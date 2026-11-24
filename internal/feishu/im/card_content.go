@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -87,13 +88,48 @@ func renderedText(value any) string {
 	return ""
 }
 
+// Match inline HTTP(S) links, including a parenthesized segment in the URL.
+var cardMarkdownLink = regexp.MustCompile(`\[([^\[\]\r\n]+)\]\((https?://[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*)\)`)
+
+func renderedTextNodes(value any) []fields {
+	node, _ := value.(map[string]any)
+	text := renderedText(node)
+	if node["tag"] != "markdown" && node["tag"] != "lark_md" {
+		return []fields{{"tag": "text", "text": text}}
+	}
+	var nodes []fields
+	start := 0
+	for _, match := range cardMarkdownLink.FindAllStringSubmatchIndex(text, -1) {
+		// Image syntax and escaped opening brackets remain literal text.
+		if match[0] > 0 && text[match[0]-1] == '!' {
+			continue
+		}
+		prefix := match[0]
+		for prefix > start && text[prefix-1] == '\\' {
+			prefix--
+		}
+		if (match[0]-prefix)%2 != 0 {
+			continue
+		}
+		if start < match[0] {
+			nodes = append(nodes, fields{"tag": "text", "text": text[start:match[0]]})
+		}
+		nodes = append(nodes, fields{"tag": "a", "text": text[match[2]:match[3]], "href": text[match[4]:match[5]]})
+		start = match[1]
+	}
+	if start < len(text) || len(nodes) == 0 {
+		nodes = append(nodes, fields{"tag": "text", "text": text[start:]})
+	}
+	return nodes
+}
+
 func renderComponent(value any) [][]fields {
 	node, _ := value.(map[string]any)
 	tag, _ := node["tag"].(string)
 	var row []fields
 	switch tag {
 	case "plain_text", "lark_md", "markdown":
-		row = []fields{{"tag": "text", "text": renderedText(node)}}
+		row = renderedTextNodes(node)
 	case "button":
 		kind, _ := node["type"].(string)
 		if kind == "" {
@@ -106,12 +142,12 @@ func renderComponent(value any) [][]fields {
 		row = []fields{{"tag": tag}}
 	case "div":
 		if text, ok := node["text"]; ok {
-			row = append(row, fields{"tag": "text", "text": renderedText(text)})
+			row = append(row, renderedTextNodes(text)...)
 		}
 		properties, _ := node["fields"].([]any)
 		for _, item := range properties {
 			property, _ := item.(map[string]any)
-			row = append(row, fields{"tag": "text", "text": renderedText(property["text"])})
+			row = append(row, renderedTextNodes(property["text"])...)
 		}
 		for _, extra := range renderComponent(node["extra"]) {
 			row = append(row, extra...)
@@ -139,14 +175,20 @@ func renderComponent(value any) [][]fields {
 			}
 		}
 		return rows
-	case "select_static", "multi_select_static", "overflow":
-		options, _ := node["options"].([]any)
-		labels := make([]string, 0, len(options))
-		for _, value := range options {
-			option, _ := value.(map[string]any)
-			labels = append(labels, renderedText(option["text"]))
+	case "select_static", "multi_select_static", "select_person", "multi_select_person", "overflow":
+		item := fields{"tag": tag}
+		if placeholder, present := node["placeholder"]; present {
+			item["placeholder"] = renderedText(placeholder)
 		}
-		row = []fields{{"tag": tag, "options": labels}}
+		if options, ok := node["options"].([]any); ok {
+			labels := make([]string, 0, len(options))
+			for _, value := range options {
+				option, _ := value.(map[string]any)
+				labels = append(labels, renderedText(option["text"]))
+			}
+			item["options"] = labels
+		}
+		row = []fields{item}
 	case "date_picker", "picker_datetime", "picker_time":
 		item := fields{"tag": tag, "placeholder": renderedText(node["placeholder"])}
 		for _, field := range []string{"initial_date", "initial_datetime", "initial_time"} {

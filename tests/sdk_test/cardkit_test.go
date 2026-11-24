@@ -405,18 +405,27 @@ func TestOfficialSDKCardActionTransitionConstraints(t *testing.T) {
 	srv, web := sdkEventServer(t, cfg, event.Options{})
 	client := sdkEventREST(web, cfg.Apps[0])
 	id := sdkCardEntity(t, client, "card_json", sdkStreamingCard)
-	messageID := value(sdkCardMessage(t, client, cfg.Chats[0].ChatID, sdkEntityReference(id)).MessageId)
+	linkedMessageID := value(sdkCardMessage(t, client, cfg.Chats[0].ChatID, sdkEntityReference(id)).MessageId)
+	legacy := `{"elements":[{"tag":"markdown","content":"legacy"}]}`
+	cardV2 := strings.Replace(sdkStreamingCard, `"streaming_mode":true`, `"streaming_mode":false`, 1)
 	for _, tc := range []struct {
-		name    string
-		disable bool
-		data    string
-		failure string
+		name                  string
+		disable               bool
+		inline, data, failure string
 	}{
-		{"streaming card replacement", false, sdkStreamingCard, "streaming mode"},
-		{"toast only while streaming", false, "", ""},
-		{"legacy raw card replacement", true, `{"elements":[{"tag":"markdown","content":"legacy"}]}`, "cannot be replaced"},
+		{"streaming entity replacement", false, "", sdkStreamingCard, "streaming mode"},
+		{"toast only on streaming entity", false, "", "", ""},
+		{"legacy raw entity replacement", true, "", legacy, "cannot be replaced"},
+		{"inline 2.0 to 1.0", false, cardV2, legacy, "2.0 cannot be replaced with card JSON 1.0"},
+		{"inline 1.0 to 2.0", false, legacy, cardV2, "1.0 cannot be replaced with card JSON 2.0"},
+		{"inline streaming replacement", false, sdkStreamingCard, cardV2, "streaming mode"},
+		{"toast only on inline streaming card", false, sdkStreamingCard, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			messageID := linkedMessageID
+			if tc.inline != "" {
+				messageID = value(sdkCardMessage(t, client, cfg.Chats[0].ChatID, tc.inline).MessageId)
+			}
 			if tc.disable {
 				settings, err := client.Cardkit.V1.Card.Settings(t.Context(), larkcardkit.NewSettingsCardReqBuilder().CardId(id).
 					Body(larkcardkit.NewSettingsCardReqBodyBuilder().Sequence(1).Settings(`{"config":{"streaming_mode":false}}`).Build()).Build())
@@ -435,11 +444,56 @@ func TestOfficialSDKCardActionTransitionConstraints(t *testing.T) {
 			} else if err == nil || !strings.Contains(err.Error(), tc.failure) {
 				t.Fatalf("got %v, want %q", err, tc.failure)
 			}
+			if tc.inline != "" {
+				detail, err := client.Im.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(messageID).
+					CardMsgContentType("user_card_content").Build())
+				requireSDKNetwork(t, err)
+				requireSDKCode(t, detail.CodeError, 0)
+				if len(detail.Data.Items) != 1 || value(detail.Data.Items[0].Updated) ||
+					value(detail.Data.Items[0].Body.Content) != tc.inline {
+					t.Fatalf("inline callback changed the original message: %s", detail.RawBody)
+				}
+			}
 			after, _ := srv.Store().Card(id)
 			if result.Updated || result.Toast == nil || result.Toast.Content != "Clicked" ||
 				after.Revision != before.Revision || after.Sequence != before.Sequence || string(after.JSON) != string(before.JSON) {
 				t.Fatalf("invalid SDK transition: %+v, %+v", result, after)
 			}
 		})
+	}
+}
+
+func TestOfficialSDKCardRenderingSelectorsAndLinks(t *testing.T) {
+	cfg := sdkTestConfig()
+	_, web := sdkEventServer(t, cfg, event.Options{})
+	client := sdkEventREST(web, cfg.Apps[0])
+	chatID := cfg.Chats[0].ChatID
+	const original = `{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"Resources"}},"body":{"elements":[
+		{"tag":"select_static","placeholder":{"tag":"plain_text","content":"Choose a service"},"options":[
+			{"text":{"tag":"plain_text","content":"Cards"},"value":"cardkit"},
+			{"text":{"tag":"plain_text","content":"Messages"},"value":"im"}]},
+		{"tag":"markdown","content":"Read [Cards](https://example.test/wiki/Card_(Lark)) and [Messages](https://example.test/im)."},
+		{"tag":"div","text":{"tag":"lark_md","content":"[More](https://example.test/more)"}},
+		{"tag":"plain_text","content":"[Literal](https://example.test/literal)"}
+	]}}`
+	const rendered = `{"elements":[[{"options":["Cards","Messages"],"placeholder":"Choose a service","tag":"select_static"}],[{"tag":"text","text":"Read "},{"href":"https://example.test/wiki/Card_(Lark)","tag":"a","text":"Cards"},{"tag":"text","text":" and "},{"href":"https://example.test/im","tag":"a","text":"Messages"},{"tag":"text","text":"."}],[{"href":"https://example.test/more","tag":"a","text":"More"}],[{"tag":"text","text":"[Literal](https://example.test/literal)"}]],"title":"Resources"}`
+	messageID := value(sdkCardMessage(t, client, chatID, original).MessageId)
+	for _, tc := range []struct{ mode, expect string }{{"", rendered}, {"user_card_content", original}} {
+		detail, err := client.Im.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(messageID).
+			CardMsgContentType(tc.mode).Build())
+		requireSDKNetwork(t, err)
+		requireSDKCode(t, detail.CodeError, 0)
+		history, err := client.Im.Message.List(t.Context(), larkim.NewListMessageReqBuilder().ContainerIdType("chat").
+			ContainerId(chatID).CardMsgContentType(tc.mode).Build())
+		requireSDKNetwork(t, err)
+		requireSDKCode(t, history.CodeError, 0)
+		for _, items := range [][]*larkim.Message{detail.Data.Items, history.Data.Items} {
+			if len(items) != 1 || value(items[0].MessageId) != messageID || items[0].Body == nil {
+				t.Fatalf("unexpected card read for %q: %+v", tc.mode, items)
+			}
+			if actual := value(items[0].Body.Content); actual != tc.expect {
+				t.Fatalf("card mode %q content = %s, want %s", tc.mode, actual, tc.expect)
+			}
+		}
 	}
 }

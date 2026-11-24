@@ -221,6 +221,20 @@ func TestSocketAcknowledgementCorrelationAndTimeout(t *testing.T) {
 		traces[1].EventID != result.EventID || traces[1].Error == "" || traces[1].Attempt != 1 {
 		t.Fatalf("unexpected traces: %+v", traces)
 	}
+
+	// The timed-out frame is still queued on the receiving socket.
+	readDataFrame(t, conn)
+	go func() {
+		result, err := d.Dispatch(t.Context(), app.AppID, "test.created", struct{}{})
+		got <- outcome{result, err}
+	}()
+	created := readDataFrame(t, conn)
+	writeAck(t, conn, created, wsproto.Response{StatusCode: http.StatusCreated})
+	ordinary := <-got
+	requireNoError(t, ordinary.err)
+	if len(ordinary.result.Deliveries) != 1 || ordinary.result.Deliveries[0].Status != http.StatusCreated {
+		t.Fatalf("ordinary event did not accept HTTP 201: %+v", ordinary)
+	}
 }
 
 func TestConcurrentSocketLifecycle(t *testing.T) {

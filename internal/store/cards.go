@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -199,6 +200,7 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 	}
 	now := s.Now()
 	var previous Card
+	var schema string
 	if current.CardID != "" {
 		previous, err = s.liveCard(current.AppID, current.CardID, now)
 		if err != nil {
@@ -207,8 +209,23 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 		if previous.Revision != target.cardRevision {
 			return errors.New("card entity changed while awaiting card action response")
 		}
-		if previous.StreamingMode && !previous.StreamingExpired(now) {
-			return errors.New("card entity is in streaming mode")
+		if previous.Type != "template" || len(previous.TemplateData) != 0 {
+			schema, _ = rawCardState(previous.JSON)
+		}
+	} else {
+		schema, previous.StreamingMode = rawCardState([]byte(current.Content))
+		previous.StreamingSince = current.UpdatedAt
+		if previous.StreamingSince.IsZero() {
+			previous.StreamingSince = current.CreatedAt
+		}
+	}
+	if previous.StreamingMode && (previous.StreamingSince.IsZero() || !previous.StreamingExpired(now)) {
+		return errors.New("card is in streaming mode")
+	}
+	if card.Type == "card_json" && schema != "" {
+		replacement, _ := rawCardState(card.JSON)
+		if replacement != schema {
+			return fmt.Errorf("card JSON %s cannot be replaced with card JSON %s", schema, replacement)
 		}
 	}
 	switch {
@@ -220,9 +237,6 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 		encoded, _ := json.Marshal(reference)
 		current.Content = `{"type":"card","data":{"card_id":` + string(encoded) + "}}"
 	case current.CardID != "":
-		if card.Type == "card_json" && cardSchema(previous) == "2.0" && cardSchema(card) != "2.0" {
-			return errors.New("card JSON 2.0 cannot be replaced with card JSON 1.0")
-		}
 		card.ID, card.AppID, card.Sequence = previous.ID, previous.AppID, previous.Sequence
 		card.CreatedAt = previous.CreatedAt
 		if card.StreamingMode {
@@ -237,10 +251,21 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 	return nil
 }
 
-func cardSchema(card Card) string {
-	var doc struct {
+// An omitted schema is Card JSON 1.0. References use their own wire format.
+func rawCardState(body []byte) (schema string, streaming bool) {
+	var card *struct {
+		Type   string `json:"type"`
 		Schema string `json:"schema"`
+		Config struct {
+			StreamingMode json.RawMessage `json:"streaming_mode"`
+		} `json:"config"`
 	}
-	_ = json.Unmarshal(card.JSON, &doc)
-	return doc.Schema
+	if json.Unmarshal(body, &card) != nil || card == nil || card.Type != "" {
+		return "", false
+	}
+	schema = card.Schema
+	if schema == "" {
+		schema = "1.0"
+	}
+	return schema, string(card.Config.StreamingMode) == "true"
 }

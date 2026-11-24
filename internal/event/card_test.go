@@ -155,14 +155,15 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 	web := testGateway(t, d)
 	host := strings.TrimPrefix(web.URL, "http://")
 	conn := connect(t, ticketURL(t, d, host, cfg.Apps[0]), http.StatusSwitchingProtocols)
-	_, input := actionMessage(t, d, cfg)
+	message, input := actionMessage(t, d, cfg)
 	input.PreviewToken = "test-private-preview-token"
 	type actionReply struct {
 		result CardActionResult
 		err    error
 	}
 	replies := make(chan actionReply, 1)
-	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusCreated, http.StatusInternalServerError, http.StatusOK} {
+		before, _ := d.state.Card(message.CardID)
 		go func() {
 			result, err := d.TriggerCardAction(t.Context(), input)
 			replies <- actionReply{result, err}
@@ -198,8 +199,13 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 			if !reply.result.Updated || reply.result.Toast == nil || reply.result.Toast.Content != "wire" {
 				t.Fatalf("invalid callback response: %+v", reply.result)
 			}
-		} else if reply.err == nil || reply.result.Updated || trace[0].Error == "" {
-			t.Fatalf("failed callback was accepted: %+v", reply)
+		} else {
+			after, _ := d.state.Card(message.CardID)
+			stored, _ := d.state.Messages().Get(message.ID)
+			if reply.err == nil || reply.result.Updated || trace[0].Error == "" ||
+				stored.Updated || after.Revision != before.Revision || string(after.JSON) != string(before.JSON) {
+				t.Fatalf("callback ACK %d changed the message or card: %+v, %+v", status, reply, after)
+			}
 		}
 	}
 }

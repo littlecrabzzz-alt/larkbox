@@ -427,7 +427,7 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 		}
 		trace.ResponseBody, _ = json.Marshal(audit)
 		switch {
-		case !success(trace.Status):
+		case !success(trace.Status) || (job.kind == cardActionTrigger && trace.Status != http.StatusOK):
 			result.err = fmt.Errorf("websocket acknowledgement status %d", trace.Status)
 		case ctx.Err() != nil:
 			result.err = ctx.Err()
