@@ -76,7 +76,7 @@ func TestBearer(t *testing.T) {
 		{"unknown app", App, []string{"Bearer a-unknown"}, 400, 99991664, "invalid app token", "", false},
 		{"expired tenant", Tenant, []string{"Bearer t-expired"}, 400, 99991663, invalid, "", false},
 		{"revoked tenant", Tenant, []string{"Bearer t-revoked"}, 400, 99991663, invalid, "", false},
-		{"expired app", App, []string{"Bearer a-expired"}, 400, 99991664, "invalid app token", "", false},
+		{"expired app", App, []string{"Bearer a-expired"}, 400, 99991663, invalid, "", false},
 		{"expired user", User, []string{"Bearer u-expired"}, 400, 99991668, "token invalid", "", false},
 		{"revoked user", User, []string{"Bearer u-revoked"}, 400, 99991668, "token invalid", "", false},
 		{"tenant on a user route", User, []string{"Bearer t-valid"}, 400, 99991663, invalid, "", false},
@@ -85,7 +85,7 @@ func TestBearer(t *testing.T) {
 		{"tenant", Tenant, []string{"bearer  t-valid"}, 200, 0, "ok", store.TenantToken, false},
 		{"a-prefixed app", App, []string{"Bearer a-valid"}, 200, 0, "ok", store.AppToken, false},
 		{"t-prefixed app", App, []string{"Bearer t-app"}, 200, 0, "ok", store.AppToken, false},
-		{"t-prefixed app expired", App, []string{"Bearer t-app-expired"}, 400, 99991664, "invalid app token", "", false},
+		{"t-prefixed app expired", App, []string{"Bearer t-app-expired"}, 400, 99991663, invalid, "", false},
 		{"t-prefixed app missing owner", App, []string{"Bearer t-app-owner-deleted"}, 400, 99991664, "invalid app token", "", false},
 		{"user", User, []string{"Bearer u-valid"}, 200, 0, "ok", store.UserToken, false},
 		{"tenant or user uses tenant", TenantOrUser, []string{"Bearer t-valid"}, 200, 0, "ok", store.TenantToken, false},
@@ -187,10 +187,9 @@ func TestAuditBodyLimit(t *testing.T) {
 				}
 			})).ServeHTTP(w, r)
 			trace := state.Traces()[0]
-			want := body[:min(len(body), auditBodyLimit)]
 			truncated := len(body) > auditBodyLimit
 			if w.Body.String() != body || trace.Status != http.StatusOK || trace.Code != nil ||
-				string(trace.RequestBody) != want || string(trace.ResponseBody) != want ||
+				len(trace.RequestBody) != 0 || len(trace.ResponseBody) != 0 ||
 				trace.RequestBodyTruncated != truncated || trace.ResponseBodyTruncated != truncated {
 				t.Fatal("HTTP echo or captured body was incorrect")
 			}
@@ -267,8 +266,8 @@ func TestAuditPreservesReadAndCloseErrors(t *testing.T) {
 		}
 	})).ServeHTTP(httptest.NewRecorder(), r)
 	trace := state.Traces()[0]
-	if string(trace.RequestBody) != payload || !trace.RequestBodyTruncated {
-		t.Fatalf("did not capture partial request body: %+v", trace)
+	if len(trace.RequestBody) != 0 || !trace.RequestBodyTruncated {
+		t.Fatalf("partial request body was not omitted: %+v", trace)
 	}
 }
 

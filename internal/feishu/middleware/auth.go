@@ -43,9 +43,10 @@ func AuthFromContext(ctx context.Context) (Auth, bool) {
 
 // Bearer authenticates a route with the specified Feishu token kind. In
 // permissive mode, unauthenticated requests proceed without an auth identity.
-func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.Handler) http.Handler {
+// Wrappers supplied here let fault selection use the policy before route entry.
+func Bearer(state *store.Store, required RequiredToken, strict bool, wrappers ...func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
 			switch {
 			case failure.Code == protocol.Success:
@@ -58,8 +59,25 @@ func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.H
 			}
 			next.ServeHTTP(w, r)
 		})
+		for _, wrap := range wrappers {
+			handler = wrap(handler)
+		}
+		return WithBearerPolicy(handler, required)
 	}
 }
+
+// WithBearerPolicy declares the accepted Bearer credentials for fault selection.
+// Use it on the final wrapped handler and keep Bearer authentication inside it.
+func WithBearerPolicy(handler http.Handler, required RequiredToken) http.Handler {
+	return bearerRoute{Handler: handler, required: required}
+}
+
+type bearerRoute struct {
+	http.Handler
+	required RequiredToken
+}
+
+func (route bearerRoute) bearerPolicy() RequiredToken { return route.required }
 
 func authenticate(state *store.Store, required RequiredToken, headers []string) (Auth, protocol.APIError) {
 	value, bearer := bearerToken(headers)
@@ -76,7 +94,9 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return Auth{}, credentialError(prefixKind, invalidCredential)
-	case errors.Is(err, store.ErrTokenExpired), errors.Is(err, store.ErrTokenRevoked):
+	case errors.Is(err, store.ErrTokenExpired):
+		return Auth{}, expiryError(token.Kind)
+	case errors.Is(err, store.ErrTokenRevoked):
 		return Auth{}, credentialError(token.Kind, inactiveCredential)
 	case err != nil:
 		return Auth{}, credentialError(token.Kind, invalidCredential)
@@ -152,4 +172,20 @@ func credentialError(kind store.TokenKind, reason credentialFailure) protocol.AP
 	default:
 		return protocol.NewError(protocol.InvalidTokenFormat, nil)
 	}
+}
+
+func expiryError(kind store.TokenKind) protocol.APIError {
+	if kind == store.AppToken {
+		return protocol.NewError(protocol.ExpiredTenantToken, nil)
+	}
+	return credentialError(kind, inactiveCredential)
+}
+
+// WriteResetConflict reports that a write lost its reset generation.
+func WriteResetConflict(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, store.ErrReset) {
+		return false
+	}
+	_ = protocol.WriteError(w, protocol.APIError{Code: 99991401, Status: http.StatusConflict, Message: store.ErrReset.Error()})
+	return true
 }

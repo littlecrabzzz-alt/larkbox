@@ -85,6 +85,8 @@ type Message struct {
 	UpdatedAt     time.Time
 	Reactions     []Reaction
 	ReactionOrder uint64
+
+	DiagnosticRedactor Redactor `json:"-"`
 }
 
 // Card stores a CardKit entity and its last accepted sequence.
@@ -100,6 +102,8 @@ type Card struct {
 	Revision       uint64
 	CreatedAt      time.Time
 	StreamingSince time.Time
+
+	DiagnosticRedactor Redactor `json:"-"`
 }
 
 // Media stores an image or file and its download metadata.
@@ -144,4 +148,5 @@ type Trace struct {
 	EventID               string
 	Channel               string
 	Attempt               int
+	Copy                  int
 }

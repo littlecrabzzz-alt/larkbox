@@ -118,7 +118,11 @@ type templateKey struct{ id, version string }
 func (s *Store) CardTemplate(id, version string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cardTemplates[templateKey{id, version}]
+	data := s.cardTemplates[templateKey{id, version}]
+	if data == "" && version == "" {
+		data = s.latestTemplates[id]
+	}
+	return data
 }
 
 // renderMessage resolves a linked entity for its owner in the same snapshot.
@@ -126,6 +130,7 @@ func (s *Store) renderMessage(callerAppID string, m Message) Message {
 	if callerAppID == m.AppID && m.CardID != "" && !m.Deleted {
 		if card, err := s.ownedCard(callerAppID, m.CardID); err == nil {
 			m.Content = cardContent(card)
+			m.DiagnosticRedactor = card.DiagnosticRedactor
 		}
 	}
 	return cloneMessage(m)
@@ -185,7 +190,7 @@ func (s *Store) cardActionTarget(messageID, openID string) (Message, User, error
 
 // ApplyCardAction commits a validated callback card to the clicked message.
 // Inline results also replace any linked entity without consuming its sequence.
-func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, card Card, reference string) error {
+func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, card Card, reference string, redactor Redactor) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -242,9 +247,11 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 		if card.StreamingMode {
 			card.StreamingSince = now
 		}
+		card.DiagnosticRedactor = redactor
 		s.cards.put(card)
 	default:
 		current.Content = cardContent(card)
+		current.DiagnosticRedactor = redactor
 	}
 	current.Updated, current.UpdatedAt = true, now
 	s.messages.put(current)

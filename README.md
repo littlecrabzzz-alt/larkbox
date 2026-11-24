@@ -66,7 +66,16 @@ CardKit writes require the creating app's tenant token. Send or reply with an in
 
 Register local templates through `card_templates`. Each entry has a `template_id`, an optional `template_version_name`, and a `data` string containing a Card JSON 2.0 definition. Without a requested version, larkbox selects the unversioned entry or the last configured version. Registered templates use the local definition and support text streaming on Markdown elements.
 
-In-process tests can call `Server.TriggerCardAction` to simulate an interaction by a chat member. Each action has a three-second deadline and goes to one active WebSocket session, or to the configured webhook if no session is active. The callback is attempted once and can return a toast and an updated card.
+In-process tests can call `Server.TriggerCardAction` to simulate an interaction by a chat member. Each action has a three-second deadline and goes to one active WebSocket session, or to the configured webhook if no session is active. By default the callback makes one transport attempt and can return a toast and an updated card. An explicit `duplicate_event` fault sends extra copies with the same event ID. Each copy is a separate delivery attempt, and trace entries identify it with `duplicate_index`.
+
+Use `GET /_sandbox/state` to see the seeded chat and user IDs. Send a user
+message with `POST /_sandbox/messages/send`, simulate a card click with
+`POST /_sandbox/cards/action`, and inspect deliveries with
+`GET /_sandbox/traces`. Use `POST /_sandbox/faults` to add a rule and
+`POST /_sandbox/reset` to restore the startup seed. Keep the unauthenticated
+control plane on loopback or an isolated test network. See the
+[control plane contract](docs/adr/0002-sandbox-control-plane.md) for request
+fields, trace filters, and fault options.
 
 ## Non-Goals
 

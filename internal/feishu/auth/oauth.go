@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -82,7 +83,10 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Code)), Scope: query.Get("scope"),
 		RedirectURI: redirectURI, CodeChallenge: challenge, CodeChallengeMethod: method,
 	}
-	if err := h.state.PutToken(grant); err != nil {
+	if err := h.state.Mutate(r.Context(), func() error { return h.state.PutToken(grant) }); err != nil {
+		if middleware.WriteResetConflict(w, err) {
+			return
+		}
 		writeLegacyError(w, oauthUserMissing)
 		return
 	}
@@ -137,8 +141,11 @@ func (h handler) oidcToken(refresh bool) http.HandlerFunc {
 			writeLegacyError(w, oauthInvalidRequest)
 			return
 		}
-		tokens, err := h.exchange(identity.AppID, fields, refresh, false)
+		tokens, err := h.exchange(r.Context(), identity.AppID, fields, refresh, false)
 		if err != nil {
+			if middleware.WriteResetConflict(w, err) {
+				return
+			}
 			writeLegacyError(w, exchangeCode(err, refresh, false))
 			return
 		}
@@ -226,8 +233,11 @@ func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	middleware.SetTraceApp(r, appID)
-	tokens, err := h.exchange(appID, fields, refresh, true)
+	tokens, err := h.exchange(r.Context(), appID, fields, refresh, true)
 	if err != nil {
+		if middleware.WriteResetConflict(w, err) {
+			return
+		}
 		writeOAuthError(w, exchangeCode(err, refresh, true))
 		return
 	}
@@ -238,39 +248,41 @@ func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	_ = protocol.WriteResult(w, http.StatusOK, body.Code, body)
 }
 
-func (h handler) exchange(appID string, fields map[string]string, refresh, v2 bool) ([2]store.Token, error) {
+func (h handler) exchange(ctx context.Context, appID string, fields map[string]string, refresh, v2 bool) ([2]store.Token, error) {
 	value, kind := fields["code"], store.OAuthCode
 	if refresh {
 		value, kind = fields["refresh_token"], store.RefreshToken
 	}
-	return h.state.ExchangeOAuthGrant(value, appID, kind, func(grant store.Token, now time.Time) ([2]store.Token, error) {
-		if !refresh {
-			redirectURI := fields["redirect_uri"]
-			if (v2 || redirectURI != "") && redirectURI != grant.RedirectURI {
-				return [2]store.Token{}, oauthRedirectMismatch
+	return store.Commit(ctx, h.state, func() ([2]store.Token, error) {
+		return h.state.ExchangeOAuthGrant(value, appID, kind, func(grant store.Token, now time.Time) ([2]store.Token, error) {
+			if !refresh {
+				redirectURI := fields["redirect_uri"]
+				if (v2 || redirectURI != "") && redirectURI != grant.RedirectURI {
+					return [2]store.Token{}, oauthRedirectMismatch
+				}
+				verifier, supplied := fields["code_verifier"]
+				if !verifyPKCE(grant, verifier, supplied) {
+					return [2]store.Token{}, oauthPKCE
+				}
 			}
-			verifier, supplied := fields["code_verifier"]
-			if !verifyPKCE(grant, verifier, supplied) {
-				return [2]store.Token{}, oauthPKCE
-			}
-		}
 
-		scope, err := tokenScope(grant.Scope, fields["scope"])
-		if err != nil {
-			return [2]store.Token{}, err
-		}
-		access := store.Token{
-			Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-			Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User)),
-		}
-		var replacement store.Token
-		if !v2 || slices.Contains(strings.Split(scope, " "), "offline_access") {
-			replacement = store.Token{
-				Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-				Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh)),
+			scope, err := tokenScope(grant.Scope, fields["scope"])
+			if err != nil {
+				return [2]store.Token{}, err
 			}
-		}
-		return [2]store.Token{access, replacement}, nil
+			access := store.Token{
+				Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+				Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User)),
+			}
+			var replacement store.Token
+			if !v2 || slices.Contains(strings.Split(scope, " "), "offline_access") {
+				replacement = store.Token{
+					Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+					Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh)),
+				}
+			}
+			return [2]store.Token{access, replacement}, nil
+		})
 	})
 }
 

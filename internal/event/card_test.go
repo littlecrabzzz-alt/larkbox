@@ -24,6 +24,8 @@ import (
 
 const replyCredential = "test-private-callback-response"
 
+const replyDiagnostics = `{"note":{"token":"hidden-duplicate"},"note":"display data","items":[{"preview_token":"nested-private"}]}`
+
 const (
 	initialCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"md","content":"initial"}]}}`
 	clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"md","content":"clicked"}]}}`
@@ -84,7 +86,14 @@ func TestCardActionWebhook(t *testing.T) {
 				case received <- raw:
 				default:
 				}
-				_, _ = io.WriteString(w, `{"token":"`+replyCredential+`","toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
+				var wire callback.CardActionTriggerEvent
+				if err := json.Unmarshal(raw, &wire); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				echo, _ := json.Marshal(wire.Event.Token + " / " + wire.Event.Context.PreviewToken + " / " + wire.EventV2Base.Header.Token)
+				_, _ = io.WriteString(w, `{"token":"`+replyCredential+`","echo":`+string(echo)+`,"diagnostics":`+replyDiagnostics+`,"toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
 			}))
 			t.Cleanup(web.Close)
 			app.WebhookURL = web.URL + "/card-click"
@@ -122,6 +131,10 @@ func TestCardActionWebhook(t *testing.T) {
 			}
 			assertCardAuditTokens(t, trace[0].RequestBody, trace[0].ResponseBody, result.Delivery.Data,
 				app.VerificationToken, e.Token, e.Context.PreviewToken)
+			if !strings.Contains(string(trace[0].ResponseBody), `"echo":"[REDACTED] / [REDACTED] / [REDACTED]"`) ||
+				!strings.Contains(string(result.Delivery.Data), e.Context.PreviewToken) {
+				t.Fatal("reflected webhook credentials were not isolated from the real response")
+			}
 			if result.Toast == nil || result.Toast.I18nContent["en_us"] != "Saved" || result.Card == nil || result.Card.Type != tc.kind || card.Sequence != 7 {
 				t.Fatalf("invalid structured response or sequence: %+v, %+v", result, card)
 			}
@@ -172,7 +185,7 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 		if wsproto.HeaderValue(frame, wsproto.Type) != wsproto.Event || !strings.Contains(string(frame.Payload), cardActionTrigger) {
 			t.Fatalf("invalid callback frame: %+v", frame)
 		}
-		body := []byte(`{"token":"` + replyCredential + `","toast":{"type":"info","content":"wire"},"card":{"type":"raw","data":` + clickedCard + `}}`)
+		body := []byte(`{"token":"` + replyCredential + `","diagnostics":` + replyDiagnostics + `,"toast":{"type":"info","content":"wire"},"card":{"type":"raw","data":` + clickedCard + `}}`)
 		writeAck(t, conn, frame, wsproto.Response{StatusCode: status, Data: body})
 		reply := <-replies
 		trace := cardTraces(d.state, reply.result.EventID)
@@ -300,9 +313,11 @@ func assertCardAuditTokens(t *testing.T, request, response, actual []byte, sensi
 			t.Fatal("outbound audit request retained a token")
 		}
 	}
-	if strings.Count(string(request), `"[redacted]"`) != len(sensitive) ||
-		strings.Contains(string(response), replyCredential) || !strings.Contains(string(response), `"token":"[redacted]"`) ||
-		!strings.Contains(string(actual), replyCredential) {
+	if strings.Count(string(request), `"[REDACTED]"`) != len(sensitive) ||
+		strings.Contains(string(response), replyCredential) || !strings.Contains(string(response), `"token":"[REDACTED]"`) ||
+		!strings.Contains(string(actual), replyCredential) || !strings.Contains(string(actual), "hidden-duplicate") ||
+		strings.Contains(string(response), "hidden-duplicate") || strings.Contains(string(response), "nested-private") ||
+		!strings.Contains(string(response), `"preview_token":"[REDACTED]"`) || !strings.Contains(string(response), "display data") {
 		t.Fatalf("request or response token was improperly redacted: request=%s response=%s", request, response)
 	}
 }

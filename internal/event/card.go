@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/cardkit"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
 const cardActionTrigger = "card.action.trigger"
@@ -39,6 +41,7 @@ type CardActionResult struct {
 	Toast    *callback.Toast
 	Card     *CardActionCard
 	Updated  bool
+	Redactor store.Redactor `json:"-"`
 }
 
 type cardOperator struct {
@@ -58,6 +61,11 @@ type cardActionPayload struct {
 // TriggerCardAction delivers one synchronous callback to one receiver. A live
 // long connection takes precedence over the webhook. Delivery is never retried.
 func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTriggerInput) (CardActionResult, error) {
+	ctx, finish, err := d.begin(ctx)
+	if err != nil {
+		return CardActionResult{}, err
+	}
+	defer finish()
 	target, err := d.state.CardActionTarget(input.MessageID, input.OperatorOpenID)
 	if err != nil {
 		return CardActionResult{}, err
@@ -91,16 +99,12 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 			URL: input.URL, PreviewToken: input.PreviewToken, OpenMessageID: message.ID, OpenChatID: message.ChatID,
 		},
 	}
-	job, err := d.newJob(message.AppID, cardActionTrigger, d.state.Now(), payload)
+	job, err := d.newJob(ctx, message.AppID, cardActionTrigger, d.state.Now(), payload)
 	if err != nil {
 		return CardActionResult{}, err
 	}
-	ctx, finish, err := d.begin(ctx)
-	if err != nil {
-		return CardActionResult{}, err
-	}
-	defer finish()
-	result := CardActionResult{EventID: job.id}
+	job.redactor = store.AppRedactor(job.app, payload.Token, input.PreviewToken)
+	result := CardActionResult{EventID: job.id, Redactor: job.redactor}
 	verify := func(ctx context.Context, body []byte) error {
 		body = bytes.TrimSpace(body)
 		if len(body) == 0 || bytes.Equal(body, []byte("null")) {
@@ -121,7 +125,7 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 		if err != nil {
 			return fmt.Errorf("invalid card action response card: %w", err)
 		}
-		if err := d.state.ApplyCardAction(ctx, target, card, reference); err != nil {
+		if err := d.state.ApplyCardAction(ctx, target, card, reference, job.redactor); err != nil {
 			return fmt.Errorf("apply card action response: %w", err)
 		}
 		result.Updated = true
@@ -136,15 +140,29 @@ func (d *Dispatcher) deliverCardAction(ctx context.Context, job deliveryJob, ver
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	if session := d.selectSession(ctx, job.app.AppID, true); session != nil {
-		return d.socketAttempt(ctx, session, job, 1, verify)
+		return d.withDeliveryFault(ctx, job, "websocket", "", socketPath, func(job deliveryJob) Delivery {
+			return d.socketAttempt(ctx, session, job, 1, firstCallback(job.copy, verify))
+		})
 	}
 	if job.app.WebhookURL != "" {
-		return d.webhookAttempt(ctx, job, 1, d.opts.WebhookTimeout, verify)
+		if err := job.prepareWebhook(); err != nil {
+			return Delivery{Channel: "webhook", Err: err}
+		}
+		return d.withDeliveryFault(ctx, job, "webhook", http.MethodPost, job.webhookPath(), func(job deliveryJob) Delivery {
+			return d.webhookAttempt(ctx, job, 1, d.opts.WebhookTimeout, firstCallback(job.copy, verify))
+		})
 	}
 	err := ctx.Err()
 	if err == nil {
 		err = errors.New("app has no active card action receiver")
 	}
-	d.record(job.trace("dispatcher", 0), err)
+	d.record(job, job.trace("dispatcher", 0), err)
 	return Delivery{Channel: "dispatcher", Err: err}
+}
+
+func firstCallback(index int, verify func(context.Context, []byte) error) func(context.Context, []byte) error {
+	if index == 0 {
+		return verify
+	}
+	return nil
 }

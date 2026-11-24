@@ -16,6 +16,8 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox"
+	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -27,6 +29,7 @@ type Server struct {
 	http   *http.Server
 	store  *store.Store
 	events *event.Dispatcher
+	faults *fault.Engine
 }
 
 // RegisterRoutes attaches handlers to one route group. Patterns include the
@@ -44,7 +47,8 @@ type options struct {
 	eventOptions event.Options
 }
 
-// WithFeishuRoutes registers routes under /open-apis/.
+// WithFeishuRoutes registers routes under /open-apis/. Annotate outer-wrapped
+// Bearer handlers with middleware.WithBearerPolicy to enable expiry faults.
 func WithFeishuRoutes(register RegisterRoutes) Option {
 	return func(opts *options) { opts.feishu = append(opts.feishu, register) }
 }
@@ -70,6 +74,7 @@ func WithEventOptions(opts event.Options) Option {
 }
 
 type eventEmitter struct {
+	state      *store.Store
 	dispatcher *event.Dispatcher
 	next       im.EventEmitter
 }
@@ -77,11 +82,11 @@ type eventEmitter struct {
 func (e eventEmitter) Emit(ctx context.Context, notification im.Event) {
 	switch notification.Type {
 	case "im.message.recalled_v1":
-		e.dispatcher.EnqueueMessageRecalled(notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
+		e.dispatcher.EnqueueMessageRecalled(ctx, notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
 	case "im.chat.member.bot.added_v1", "im.chat.member.bot.deleted_v1":
-		e.dispatcher.EnqueueBotMembership(notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
+		e.dispatcher.EnqueueBotMembership(ctx, notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
 	}
-	if e.next != nil {
+	if e.next != nil && e.state.Current(ctx) {
 		e.next.Emit(ctx, notification)
 	}
 }
@@ -94,19 +99,21 @@ func New(cfg config.Config, opts ...Option) *Server {
 	}
 	state := store.New(nil, 0)
 	state.Seed(cfg)
+	faults := fault.New(nil)
+	settings.eventOptions.Faults = faults
 	events := event.New(state, settings.eventOptions)
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
 	bot.RegisterRoutes(feishu, state)
 	cardkit.RegisterRoutes(feishu, state)
-	im.RegisterRoutes(feishu, state, eventEmitter{dispatcher: events, next: settings.emitter})
+	im.RegisterRoutes(feishu, state, eventEmitter{state: state, dispatcher: events, next: settings.emitter})
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}
-	sandbox := http.NewServeMux()
+	extensions := http.NewServeMux()
 	for _, register := range settings.sandbox {
-		register(sandbox, cfg, state)
+		register(extensions, cfg, state)
 	}
 
 	mux := http.NewServeMux()
@@ -118,15 +125,22 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, openAPIHandler(feishu))))
-	mux.Handle("/_sandbox/", sandbox)
+	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu)))))
+	control := sandbox.New(cfg, Version, state, events, faults)
+	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := extensions.Handler(r); pattern != "" {
+			extensions.ServeHTTP(w, r)
+			return
+		}
+		control.ServeHTTP(w, r)
+	}))
 
 	return &Server{
 		http: &http.Server{
 			Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		},
-		store: state, events: events,
+		store: state, events: events, faults: faults,
 	}
 }
 
@@ -188,6 +202,7 @@ func (s *Server) Serve(listener net.Listener) error { return s.http.Serve(listen
 
 // Shutdown stops accepting connections and waits for active requests to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.faults.Stop()
 	s.events.StopRetries()
 	httpErr := s.http.Shutdown(ctx)
 	return errors.Join(httpErr, s.events.Shutdown(ctx))

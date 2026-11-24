@@ -13,9 +13,10 @@ import (
 
 // IMActor identifies the caller for membership and ownership checks.
 type IMActor struct {
-	AppID  string
-	OpenID string
-	IsUser bool
+	AppID   string
+	OpenID  string
+	IsUser  bool
+	Sandbox bool
 }
 
 // ErrOutsideChat indicates that the caller cannot access the chat.
@@ -32,11 +33,14 @@ var ErrMessageUUIDConflict = errors.New("message UUID is already in use")
 
 // canReadChat requires the store lock.
 func (s *Store) canReadChat(actor IMActor, chat Chat, requireBot bool) bool {
-	if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != actor.AppID {
+	if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != actor.AppID && (!actor.Sandbox || actor.AppID != "") {
 		return false
 	}
 	if actor.OpenID == "" || !slices.Contains(chat.MemberIDs, actor.OpenID) {
 		return false
+	}
+	if actor.Sandbox {
+		return true
 	}
 	if requireBot || (chat.ChatMode != "p2p" && chat.ChatType != "public") {
 		bot := s.apps.items[actor.AppID].BotOpenID
@@ -188,6 +192,29 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.createIMMessage(actor, req)
+}
+
+// CreateSandboxMessage commits a user message and captures its bot recipients
+// before any concurrent membership change can alter the result.
+func (s *Store) CreateSandboxMessage(actor IMActor, req NewMessage) (Message, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor.Sandbox = true
+	message, err := s.createIMMessage(actor, req)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	return message, s.chatBotIDs(s.chats.items[message.ChatID]), nil
+}
+
+func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) {
+	if actor.Sandbox {
+		user, ok := s.users.items[actor.OpenID]
+		if !ok || user.Inactive {
+			return Message{}, ErrOutsideChat
+		}
+	}
 	var chat Chat
 	var parent Message
 	var err error
@@ -195,8 +222,24 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	switch {
 	case req.ParentID != "":
 		parent, err = s.imMessage(actor, req.ParentID)
+		if err == nil && actor.Sandbox && parent.ChatID != req.ChatID {
+			err = ErrOutsideChat
+		}
 		if err == nil && parent.Deleted {
 			err = ErrMessageDeleted
+		}
+	case actor.Sandbox && req.Peer != "":
+		bot, ok := s.apps.items[actor.AppID]
+		if !ok || bot.BotOpenID != req.Peer {
+			return Message{}, ErrOutsideChat
+		}
+		var found bool
+		chat, found = s.resolveP2PChat(actor, Chat{
+			ChatMode: "p2p", OwnerID: actor.OpenID, MemberIDs: []string{actor.OpenID, bot.BotOpenID},
+		})
+		createDirect = !found
+		if found && (!s.canReadChat(actor, chat, false) || !slices.Contains(chat.MemberIDs, bot.BotOpenID)) {
+			err = ErrOutsideChat
 		}
 	case req.Peer != "":
 		if peer, ok := s.users.items[req.Peer]; !ok || peer.Inactive || actor.OpenID == req.Peer {
@@ -218,11 +261,33 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		return Message{}, err
 	}
 
+	if actor.Sandbox {
+		target := chat
+		if req.ParentID != "" {
+			target = s.chats.items[parent.ChatID]
+		}
+		for _, mention := range req.Mentions {
+			if !slices.Contains(target.MemberIDs, mention.OpenID) {
+				return Message{}, ErrOutsideChat
+			}
+		}
+		if card, ok := s.cards.items[req.CardID]; ok && actor.AppID == "" {
+			app := s.apps.items[card.AppID]
+			if slices.Contains(target.MemberIDs, app.BotOpenID) {
+				actor.AppID = card.AppID
+			}
+		}
+	}
+
 	if req.CardID != "" {
-		if _, err := s.liveCard(actor.AppID, req.CardID, s.Now()); errors.Is(err, ErrNotFound) {
+		card, err := s.liveCard(actor.AppID, req.CardID, s.Now())
+		if errors.Is(err, ErrNotFound) {
 			return Message{}, ErrMessageCardNotFound
 		} else if err != nil {
 			return Message{}, err
+		}
+		if actor.Sandbox && protocol.HasAssignedMention([]byte(cardContent(card))) {
+			return Message{}, errors.New("card content must not contain preassigned @_user_N mention keys")
 		}
 	}
 
@@ -347,15 +412,21 @@ func (s *Store) RecallIMMessage(actor IMActor, id string, authorize func(*Messag
 	if err != nil {
 		return Message{}, nil, err
 	}
-	members := s.chats.items[m.ChatID].MemberIDs
+	return m, s.chatBotIDs(s.chats.items[m.ChatID]), nil
+}
+
+func (s *Store) chatBotIDs(chat Chat) []string {
 	var recipients []string
 	for _, app := range s.apps.items {
-		if app.BotOpenID != "" && slices.Contains(members, app.BotOpenID) {
+		if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != app.AppID {
+			continue
+		}
+		if app.BotOpenID != "" && slices.Contains(chat.MemberIDs, app.BotOpenID) {
 			recipients = append(recipients, app.AppID)
 		}
 	}
 	slices.Sort(recipients)
-	return m, recipients, nil
+	return recipients
 }
 
 func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, Chat) error) (Message, error) {

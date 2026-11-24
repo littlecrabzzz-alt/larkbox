@@ -529,3 +529,9 @@ func validateEditedCard(doc map[string]any) error {
 	}
 	return nil
 }
+
+// ValidateTemplate checks whether a registered template can instantiate a CardKit entity.
+func ValidateTemplate(data string) error {
+	_, err := parseEntity("card_json", data)
+	return err
+}

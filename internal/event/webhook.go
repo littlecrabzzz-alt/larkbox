@@ -19,25 +19,33 @@ import (
 // VerifyWebhook sends the Feishu URL verification challenge to an app's
 // configured receiver and checks that it echoes the challenge.
 func (d *Dispatcher) VerifyWebhook(ctx context.Context, appID string) error {
-	app, ok := d.state.Apps().Get(appID)
-	if !ok || app.WebhookURL == "" {
-		return errors.New("app has no configured webhook")
-	}
+	return d.VerifyWebhookAt(ctx, appID, "").Err
+}
+
+// VerifyWebhookAt verifies the configured URL or a one-time override.
+func (d *Dispatcher) VerifyWebhookAt(ctx context.Context, appID, override string) Delivery {
 	ctx, finish, err := d.begin(ctx)
 	if err != nil {
-		return err
+		return Delivery{Err: err}
 	}
 	defer finish()
-
+	epoch := ctx.Value(admissionKey{}).(admission).epoch
+	app, ok := d.state.Apps().Get(appID)
+	if ok && override != "" {
+		app.WebhookURL = override
+	}
+	if !ok || app.WebhookURL == "" {
+		return Delivery{Err: errors.New("app has no configured webhook")}
+	}
 	challenge := protocol.NewID("")
-	body, err := json.Marshal(map[string]string{
+	body, _ := json.Marshal(map[string]string{
 		"challenge": challenge, "token": app.VerificationToken, "type": "url_verification",
 	})
-	if err != nil {
-		return err
+	job := deliveryJob{app: app, kind: "url_verification", body: body, epoch: epoch, redactor: store.AppRedactor(app)}
+	if err := job.prepareWebhook(); err != nil {
+		return Delivery{Err: err}
 	}
-	job := deliveryJob{app: app, kind: "url_verification", body: body}
-	delivery := d.webhookAttempt(ctx, job, 1, d.opts.VerificationTimeout, func(_ context.Context, body []byte) error {
+	return d.webhookAttempt(ctx, job, 1, d.opts.VerificationTimeout, func(_ context.Context, body []byte) error {
 		var echo struct {
 			Challenge string `json:"challenge"`
 		}
@@ -49,10 +57,36 @@ func (d *Dispatcher) VerifyWebhook(ctx context.Context, appID string) error {
 		}
 		return nil
 	})
-	return delivery.Err
+}
+
+func (job *deliveryJob) prepareWebhook() error {
+	job.wireBody = job.body
+	if job.app.EncryptKey == "" {
+		return nil
+	}
+	var err error
+	job.wireBody, err = protocol.EncryptWebhook(job.app.EncryptKey, job.body)
+	return err
+}
+
+func (job deliveryJob) webhookPath() string {
+	target, err := url.Parse(job.app.WebhookURL)
+	if err == nil && target.EscapedPath() != "" {
+		return target.EscapedPath()
+	}
+	return "/"
 }
 
 func (d *Dispatcher) deliverWebhook(ctx context.Context, job deliveryJob) Delivery {
+	if err := job.prepareWebhook(); err != nil {
+		return Delivery{Channel: "webhook", Err: err}
+	}
+	return d.withDeliveryFault(ctx, job, "webhook", http.MethodPost, job.webhookPath(), func(job deliveryJob) Delivery {
+		return d.webhookDelivery(ctx, job)
+	})
+}
+
+func (d *Dispatcher) webhookDelivery(ctx context.Context, job deliveryJob) Delivery {
 	var result Delivery
 	for i := 1; i <= d.opts.WebhookMaxAttempts; i++ {
 		if i > 1 && !d.canRetry(ctx) {
@@ -71,7 +105,7 @@ func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attemp
 	trace.Method = http.MethodPost
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err := d.postWebhook(ctx, job.app, &trace)
+	err := d.postWebhook(ctx, job.app, job.wireBody, &trace)
 	if err == nil && job.kind == cardActionTrigger && trace.Status != http.StatusOK {
 		err = fmt.Errorf("webhook HTTP status %d", trace.Status)
 	}
@@ -81,25 +115,18 @@ func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attemp
 			err = verify(ctx, trace.ResponseBody)
 		}
 	}
-	d.record(trace, err)
+	d.record(job, trace, err)
 	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: trace.ResponseHeaders, Data: trace.ResponseBody, Err: err}
 }
 
-func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, trace *store.Trace) error {
+func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, body []byte, trace *store.Trace) error {
 	target, err := url.Parse(app.WebhookURL)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
 		return errors.New("invalid webhook URL")
 	}
-	trace.Path = target.Path
+	trace.Path = target.EscapedPath()
 	if trace.Path == "" {
 		trace.Path = "/"
-	}
-	body := trace.RequestBody
-	if app.EncryptKey != "" {
-		body, err = protocol.EncryptWebhook(app.EncryptKey, body)
-		if err != nil {
-			return err
-		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {

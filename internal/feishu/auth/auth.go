@@ -86,7 +86,10 @@ func (h handler) internalToken(includeApp bool) http.HandlerFunc {
 			tokens = append(tokens, appToken)
 			response.App, response.Expire = appToken.Value, h.ttls.App
 		}
-		if err := h.state.PutTokens(tokens...); err != nil {
+		if err := h.state.Mutate(r.Context(), func() error { return h.state.PutTokens(tokens...) }); err != nil {
+			if middleware.WriteResetConflict(w, err) {
+				return
+			}
 			writeUnknownInternalApp(w)
 			return
 		}

@@ -305,10 +305,11 @@ func (cfg Config) Validate() error {
 			return fmt.Errorf("%s / token_ttls must be a positive duration in seconds", item.env)
 		}
 	}
-	return cfg.validateSeeds()
+	return cfg.ValidateSeeds()
 }
 
-func (cfg Config) validateSeeds() error {
+// ValidateSeeds checks seed list keys and configuration fields.
+func (cfg Config) ValidateSeeds() error {
 	seenTemplates := make(map[[2]string]bool, len(cfg.CardTemplates))
 	for _, template := range cfg.CardTemplates {
 		key := [2]string{template.TemplateID, template.VersionName}
@@ -333,8 +334,11 @@ func (cfg Config) validateSeeds() error {
 		return err
 	}
 	for _, chat := range cfg.Chats {
-		if chat.ChatMode != "p2p" && chat.ChatMode != "group" {
+		if chat.ChatMode == "" {
 			return fmt.Errorf("chat %q must have chat_mode p2p or group", chat.ChatID)
+		}
+		if field, description := chat.NormalizeSettings(); field != "" {
+			return fmt.Errorf("chat %q has invalid %s (%s)", chat.ChatID, field, description)
 		}
 	}
 	return cfg.validateRedirectURIs()

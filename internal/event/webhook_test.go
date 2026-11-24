@@ -94,7 +94,7 @@ func TestWebhookPayloadsAndChallenge(t *testing.T) {
 			if len(traces) != 2 || traces[0].EventType != "url_verification" || traces[1].EventType != "test.event" ||
 				traces[1].Channel != "webhook" || traces[1].Direction != store.Outbound || traces[1].AppID != app.AppID ||
 				traces[1].EventID != result.EventID || traces[1].Status != 200 || traces[1].Latency <= 0 ||
-				traces[1].Path != "/events" || string(traces[1].ResponseBody) != "accepted" {
+				traces[1].Path != "/events" || len(traces[1].ResponseBody) != 0 {
 				t.Fatalf("unexpected traces: %+v", traces)
 			}
 		})
@@ -139,13 +139,12 @@ func TestWebhookRetriesAndAuditCaps(t *testing.T) {
 	}
 	for index, trace := range traces {
 		if trace.Attempt != index+1 || trace.EventID != result.EventID || trace.Status != []int{500, 0, 200}[index] ||
-			!trace.RequestBodyTruncated || len(trace.RequestBody) != store.TraceBodyLimit ||
-			!bytes.Equal(trace.RequestBody, traces[0].RequestBody) {
+			!trace.RequestBodyTruncated || len(trace.RequestBody) != 0 {
 			t.Fatalf("invalid trace %d: status %d, id %s, attempt %d", index, trace.Status, trace.EventID, trace.Attempt)
 		}
 	}
 	if traces[0].Error == "" || !strings.Contains(traces[1].Error, "deadline") || traces[2].Error != "" ||
-		!traces[2].ResponseBodyTruncated || len(traces[2].ResponseBody) != store.TraceBodyLimit {
+		!traces[2].ResponseBodyTruncated || len(traces[2].ResponseBody) != 0 {
 		t.Fatal("audit lost failure details or did not cap response")
 	}
 }
@@ -190,7 +189,7 @@ func TestShutdownDrainsHookDeliveriesAndCancelsOnDeadline(t *testing.T) {
 			defer receiver.Close()
 			cfg.Apps[0].WebhookURL = receiver.URL
 			d := testDispatcher(t, cfg, Options{}, nil)
-			d.EnqueueMessageRecalled(cfg.Apps[0].AppID, "oc_test", "om_test", "message_owner", d.state.Now())
+			d.EnqueueMessageRecalled(t.Context(), cfg.Apps[0].AppID, "oc_test", "om_test", "message_owner", d.state.Now())
 			select {
 			case <-started:
 			case <-time.After(time.Second):
@@ -284,7 +283,7 @@ func TestShutdownInterruptsWebhookBackoff(t *testing.T) {
 		backoff <- delay
 		return delay
 	}}, nil)
-	d.EnqueueMessageRecalled(cfg.Apps[0].AppID, "oc_test", "om_test", "message_owner", d.state.Now())
+	d.EnqueueMessageRecalled(t.Context(), cfg.Apps[0].AppID, "oc_test", "om_test", "message_owner", d.state.Now())
 	select {
 	case delay := <-backoff:
 		if delay != 15*time.Second {

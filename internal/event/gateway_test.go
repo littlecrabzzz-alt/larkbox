@@ -714,7 +714,7 @@ func TestShutdownInterruptsWebSocketBackoff(t *testing.T) {
 	srv := testGateway(t, d)
 	conn := connect(t, ticketURL(t, d, strings.TrimPrefix(srv.URL, "http://"), app), http.StatusSwitchingProtocols)
 	waitForSessions(t, d, app.AppID, 1)
-	d.EnqueueMessageRecalled(app.AppID, "oc_test", "om_test", "message_owner", d.state.Now())
+	d.EnqueueMessageRecalled(t.Context(), app.AppID, "oc_test", "om_test", "message_owner", d.state.Now())
 	frame := readDataFrame(t, conn)
 	writeAck(t, conn, frame, wsproto.Response{StatusCode: 500})
 	select {

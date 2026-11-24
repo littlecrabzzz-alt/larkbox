@@ -24,7 +24,7 @@ func (s *Store) OAuthUser(openID, userID string) (User, bool) {
 		}
 		return match, match.OpenID != ""
 	default:
-		for _, seed := range s.seed.Users {
+		for _, seed := range s.userSeedOrder {
 			if user, ok := s.users.items[seed.OpenID]; ok {
 				return user, true
 			}

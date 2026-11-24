@@ -65,7 +65,7 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store) {
 		card.AppID = identity.AppID
 		for {
 			card.ID = protocol.NewID(protocol.CardID)
-			err = state.CreateCard(card)
+			err = state.Mutate(r.Context(), func() error { return state.CreateCard(card) })
 			if !errors.Is(err, store.ErrAlreadyExists) {
 				break
 			}
@@ -116,11 +116,13 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store) {
 			if uuid != "" {
 				mutation.Fingerprint = req.fingerprint(route.action, cardID, elementID)
 			}
-			err := state.ChangeCard(identity.AppID, cardID, mutation, func(card *store.Card, now time.Time) error {
-				if req.Sequence > math.MaxInt32 {
-					return invalid("sequence", "Expected a positive 32-bit integer.")
-				}
-				return req.apply(card, route.action, elementID, now)
+			err := state.Mutate(r.Context(), func() error {
+				return state.ChangeCard(identity.AppID, cardID, mutation, func(card *store.Card, now time.Time) error {
+					if req.Sequence > math.MaxInt32 {
+						return invalid("sequence", "Expected a positive 32-bit integer.")
+					}
+					return req.apply(card, route.action, elementID, now)
+				})
 			})
 			if err != nil {
 				writeError(w, err)
@@ -238,6 +240,9 @@ func reply(w http.ResponseWriter, data any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	if middleware.WriteResetConflict(w, err) {
+		return
+	}
 	var apiErr protocol.APIError
 	switch {
 	case errors.As(err, &apiErr):

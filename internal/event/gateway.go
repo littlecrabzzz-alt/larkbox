@@ -41,6 +41,7 @@ var clientConfig = wsproto.ClientConfig{
 
 type ticket struct {
 	appID, deviceID string
+	reservation     *appConnections
 	expires         time.Time
 }
 
@@ -86,6 +87,9 @@ func (d *Dispatcher) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeBootstrapError(w, bootstrapEmptyCreds, "app_id or app_secret is null")
 		return
 	}
+	d.mu.Lock()
+	generation := d.generation
+	d.mu.Unlock()
 	app, found := d.state.Apps().Get(*request.AppID)
 	provided, expected := sha256.Sum256([]byte(*request.AppSecret)), sha256.Sum256([]byte(app.AppSecret))
 	validSecret := subtle.ConstantTimeCompare(provided[:], expected[:]) == 1
@@ -97,7 +101,7 @@ func (d *Dispatcher) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeBootstrapError(w, bootstrapInvalidCreds, "app_id or app_secret is invalid")
 		return
 	}
-	token, device, ok := d.issueTicket(app.AppID)
+	token, device, ok := d.issueTicket(app.AppID, generation)
 	if !ok {
 		_ = protocol.WriteJSON(w, http.StatusOK, larkws.EndpointResp{Code: larkws.SystemBusy, Msg: "system busy"})
 		return
@@ -130,7 +134,7 @@ func feishuAppID(appID string) bool {
 	return err == nil
 }
 
-func (d *Dispatcher) issueTicket(appID string) (token, device string, ok bool) {
+func (d *Dispatcher) issueTicket(appID string, generation uint64) (token, device string, ok bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.state.Now()
@@ -139,7 +143,7 @@ func (d *Dispatcher) issueTicket(appID string) (token, device string, ok bool) {
 			delete(d.ws.tickets, id)
 		}
 	}
-	if d.closed || len(d.ws.tickets) >= maxTickets {
+	if d.closed || generation != d.generation || len(d.ws.tickets) >= maxTickets {
 		return "", "", false
 	}
 	token, device = protocol.NewID(""), protocol.NewID("")
@@ -154,7 +158,7 @@ func rejectHandshake(w http.ResponseWriter, status, code int, message string) {
 }
 
 func (d *Dispatcher) upgrade(w http.ResponseWriter, r *http.Request) {
-	appID, rejection := d.reserveSession(r.URL.Query())
+	ticket, rejection := d.reserveSession(r.URL.Query())
 	if rejection != nil {
 		if rejection.code == larkws.AuthFailed && rejection.status == http.StatusForbidden {
 			w.Header().Set(larkws.HeaderHandshakeAuthErrCode, strconv.Itoa(larkws.ExceedConnLimit))
@@ -167,15 +171,16 @@ func (d *Dispatcher) upgrade(w http.ResponseWriter, r *http.Request) {
 	var s *session
 	if err == nil {
 		conn.SetReadLimit(maxFrame)
-		s = &session{conn: conn, done: make(chan struct{}), pending: make(map[string]chan ack)}
+		s = &session{conn: conn, done: make(chan struct{}), pending: make(map[string]chan ack),
+			info: SessionInfo{ID: protocol.NewID("ws_"), AppID: ticket.appID, DeviceID: ticket.deviceID, ServiceID: serviceID, ConnectedAt: d.state.Now()}}
 	}
-	if !d.registerSession(appID, s) {
+	if !d.registerSession(ticket, s) {
 		if s != nil {
 			closeSession(s, time.Now().Add(100*time.Millisecond))
 		}
 		return
 	}
-	defer d.removeSession(appID, s)
+	defer d.removeSession(ticket, s)
 	s.read(d.ctx)
 }
 
@@ -184,7 +189,7 @@ type handshakeRejection struct {
 	message      string
 }
 
-func (d *Dispatcher) reserveSession(q url.Values) (string, *handshakeRejection) {
+func (d *Dispatcher) reserveSession(q url.Values) (ticket, *handshakeRejection) {
 	token := q.Get("ticket")
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -192,12 +197,12 @@ func (d *Dispatcher) reserveSession(q url.Values) (string, *handshakeRejection) 
 	saved, found := d.ws.tickets[token]
 	switch {
 	case d.closed:
-		return "", &handshakeRejection{http.StatusServiceUnavailable, larkws.SystemBusy, "system busy"}
+		return ticket{}, &handshakeRejection{http.StatusServiceUnavailable, larkws.SystemBusy, "system busy"}
 	case !found || !now.Before(saved.expires):
 		delete(d.ws.tickets, token)
-		return "", &handshakeRejection{http.StatusUnauthorized, larkws.AuthFailed, "invalid ticket"}
+		return ticket{}, &handshakeRejection{http.StatusUnauthorized, larkws.AuthFailed, "invalid ticket"}
 	case q.Get(larkws.ServiceID) != strconv.Itoa(serviceID) || q.Get(larkws.DeviceID) != saved.deviceID:
-		return "", &handshakeRejection{http.StatusForbidden, larkws.Forbidden, "ticket binding mismatch"}
+		return ticket{}, &handshakeRejection{http.StatusForbidden, larkws.Forbidden, "ticket binding mismatch"}
 	}
 	app := d.ws.apps[saved.appID]
 	if app == nil {
@@ -205,18 +210,22 @@ func (d *Dispatcher) reserveSession(q url.Values) (string, *handshakeRejection) 
 		d.ws.apps[saved.appID] = app
 	}
 	if len(app.sessions)+app.upgrading >= d.opts.MaxConnectionsPerApp {
-		return "", &handshakeRejection{http.StatusForbidden, larkws.AuthFailed, "app connection limit exceeded"}
+		return ticket{}, &handshakeRejection{http.StatusForbidden, larkws.AuthFailed, "app connection limit exceeded"}
 	}
 	delete(d.ws.tickets, token)
 	app.upgrading++
 	d.ws.connections.Add(1)
-	return saved.appID, nil
+	saved.reservation = app
+	return saved, nil
 }
 
-func (d *Dispatcher) registerSession(appID string, s *session) bool {
+func (d *Dispatcher) registerSession(ticket ticket, s *session) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	app := d.ws.apps[appID]
+	app := d.ws.apps[ticket.appID]
+	if app != ticket.reservation {
+		return false
+	}
 	app.upgrading--
 	registered := s != nil && !d.closed
 	if registered {
@@ -224,25 +233,28 @@ func (d *Dispatcher) registerSession(appID string, s *session) bool {
 	}
 	close(app.changed)
 	if len(app.sessions) == 0 && app.upgrading == 0 {
-		delete(d.ws.apps, appID)
+		delete(d.ws.apps, ticket.appID)
 	} else {
 		app.changed = make(chan struct{})
 	}
 	return registered
 }
 
-func (d *Dispatcher) removeSession(appID string, s *session) {
+func (d *Dispatcher) removeSession(ticket ticket, s *session) {
 	s.disconnect()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	app := d.ws.apps[appID]
+	app := d.ws.apps[ticket.appID]
+	if app != ticket.reservation {
+		return
+	}
 	idx := slices.Index(app.sessions, s)
 	app.sessions = slices.Delete(app.sessions, idx, idx+1)
 	if idx < app.next {
 		app.next--
 	}
 	if len(app.sessions) == 0 && app.upgrading == 0 {
-		delete(d.ws.apps, appID)
+		delete(d.ws.apps, ticket.appID)
 	}
 }
 
@@ -257,7 +269,7 @@ func (d *Dispatcher) SessionCount(appID string) int {
 }
 
 func (d *Dispatcher) selectSession(ctx context.Context, appID string, waitForUpgrade bool) *session {
-	for {
+	for ctx.Err() == nil {
 		d.mu.Lock()
 		app := d.ws.apps[appID]
 		if app == nil {
@@ -289,11 +301,13 @@ func (d *Dispatcher) selectSession(ctx context.Context, appID string, waitForUpg
 			return nil
 		}
 	}
+	return nil
 }
 
 var errDisconnectedBeforeWrite = errors.New("websocket disconnected before event write")
 
 type session struct {
+	info      SessionInfo
 	conn      *websocket.Conn
 	done      chan struct{}
 	closeOnce sync.Once
@@ -428,4 +442,29 @@ func (s *session) exchange(ctx context.Context, frame *wsproto.Frame, messageID 
 	case <-ctx.Done():
 		return ack{err: ctx.Err()}
 	}
+}
+
+// SessionInfo exposes connection metadata without exposing upgrade credentials.
+type SessionInfo struct {
+	ID          string    `json:"session_id"`
+	AppID       string    `json:"app_id"`
+	DeviceID    string    `json:"device_id"`
+	ServiceID   int       `json:"service_id"`
+	ConnectedAt time.Time `json:"connected_at"`
+}
+
+// Sessions snapshots all active long connections.
+func (d *Dispatcher) Sessions() []SessionInfo {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	sessions := make([]SessionInfo, 0)
+	for _, app := range d.ws.apps {
+		for _, s := range app.sessions {
+			if !s.disconnected() {
+				sessions = append(sessions, s.info)
+			}
+		}
+	}
+	slices.SortFunc(sessions, func(a, b SessionInfo) int { return strings.Compare(a.ID, b.ID) })
+	return sessions
 }

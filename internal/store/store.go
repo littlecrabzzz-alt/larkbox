@@ -111,8 +111,11 @@ func (c *Collection[T]) Delete(key string) bool {
 // Store owns the sandbox's in-memory state.
 type Store struct {
 	mu                  sync.RWMutex
+	resetGate           sync.RWMutex
+	resetEpoch          uint64
 	now                 func() time.Time
 	seed                config.Config
+	userSeedOrder       []User
 	apps                Collection[App]
 	users               Collection[User]
 	chats               Collection[Chat]
@@ -128,9 +131,11 @@ type Store struct {
 	cards               Collection[Card]
 	cardUUIDs           map[cardRequest]cardReplay
 	cardTemplates       map[templateKey]string
+	latestTemplates     map[string]string
 	nextCardUUIDCleanup time.Time
 	traces              []Trace
 	tracePos            int
+	traceEpoch          uint64
 }
 
 // New creates an empty store. A nil clock uses time.Now. A supplied clock
@@ -158,6 +163,8 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	}
 	s.media = newCollection(&s.mu, func(m Media) string { return m.Key }, cloneMedia)
 	s.cardUUIDs = make(map[cardRequest]cardReplay)
+	s.cardTemplates = make(map[templateKey]string)
+	s.latestTemplates = make(map[string]string)
 	s.cards = newCollection(&s.mu, func(c Card) string { return c.ID }, cloneCard)
 	s.cards.prepare = func(card *Card) {
 		s.revision++
@@ -341,43 +348,54 @@ func (s *Store) DeleteCard(id string) bool {
 
 // Seed replaces the store contents and installs the baseline for future resets.
 func (s *Store) Seed(cfg config.Config) {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seed.Apps = make([]App, len(cfg.Apps))
+	s.seed = cloneSeed(cfg)
+	s.reset(s.seed)
+}
+
+// ResetTo replaces runtime state while preserving the original reset baseline.
+func (s *Store) ResetTo(cfg config.Config) {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reset(cfg)
+}
+
+func cloneSeed(cfg config.Config) config.Config {
+	cfg.Apps = slices.Clone(cfg.Apps)
 	for i, app := range cfg.Apps {
-		s.seed.Apps[i] = cloneApp(app)
+		cfg.Apps[i] = cloneApp(app)
 	}
-	s.seed.Users = slices.Clone(cfg.Users)
-	s.cardTemplates = make(map[templateKey]string, len(cfg.CardTemplates))
-	for _, template := range cfg.CardTemplates {
-		s.cardTemplates[templateKey{template.TemplateID, template.VersionName}] = template.Data
-	}
-	// An unversioned entry takes priority. Otherwise the last registered
-	// version supplies the default when the caller omits a version.
-	for i := len(cfg.CardTemplates) - 1; i >= 0; i-- {
-		template := cfg.CardTemplates[i]
-		key := templateKey{id: template.TemplateID}
-		if _, exists := s.cardTemplates[key]; !exists {
-			s.cardTemplates[key] = template.Data
-		}
-	}
-	s.seed.Chats = make([]Chat, len(cfg.Chats))
+	cfg.Users = slices.Clone(cfg.Users)
+	cfg.Chats = slices.Clone(cfg.Chats)
 	for i, chat := range cfg.Chats {
-		s.seed.Chats[i] = cloneChat(chat)
+		cfg.Chats[i] = cloneChat(chat)
 	}
-	s.reset()
+	cfg.CardTemplates = slices.Clone(cfg.CardTemplates)
+	return cfg
 }
 
 // Reset atomically restores the seed baseline and clears runtime state.
 func (s *Store) Reset() {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.reset()
+	s.reset(s.seed)
 }
 
-func (s *Store) reset() {
+func (s *Store) reset(seed config.Config) {
+	s.resetEpoch++
+	s.cardTemplates = make(map[templateKey]string)
+	s.latestTemplates = make(map[string]string)
+	s.registerTemplates(seed.CardTemplates)
 	clear(s.apps.items)
 	clear(s.users.items)
+	s.userSeedOrder = slices.Clone(seed.Users)
 	clear(s.chats.items)
 	clear(s.messages.items)
 	clear(s.messageUUIDs)
@@ -390,40 +408,37 @@ func (s *Store) reset() {
 	clear(s.cards.items)
 	clear(s.cardUUIDs)
 	s.nextCardUUIDCleanup = time.Time{}
-	clear(s.traces)
-	s.traces = s.traces[:0]
-	s.tracePos = 0
-	for _, app := range s.seed.Apps {
+	s.clearTraces()
+	for _, app := range seed.Apps {
 		s.apps.items[app.AppID] = cloneApp(app)
 	}
-	for _, user := range s.seed.Users {
+	for _, user := range seed.Users {
 		s.users.items[user.OpenID] = user
 	}
-	for _, chat := range s.seed.Chats {
+	for _, chat := range seed.Chats {
 		s.chats.items[chat.ChatID] = cloneChat(chat)
 	}
 }
 
 // AppendTrace records an exchange, evicting the oldest trace when full.
 func (s *Store) AppendTrace(trace Trace) {
-	if trace.Direction == Outbound {
-		trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
-		trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
-		trace.RequestBody = RedactTraceJSON(trace.RequestBody)
-		trace.ResponseBody = RedactTraceJSON(trace.ResponseBody)
-	}
-	if len(trace.RequestBody) > TraceBodyLimit {
-		trace.RequestBody = trace.RequestBody[:TraceBodyLimit]
-		trace.RequestBodyTruncated = true
-	}
-	if len(trace.ResponseBody) > TraceBodyLimit {
-		trace.ResponseBody = trace.ResponseBody[:TraceBodyLimit]
-		trace.ResponseBodyTruncated = true
-	}
+	s.AppendTraceAt(s.TraceEpoch(), trace, Redactor{})
+}
+
+// AppendTraceAt records an exchange only if the ring has not been cleared since admission.
+func (s *Store) AppendTraceAt(epoch uint64, trace Trace, redactor Redactor) {
+	trace.RequestHeaders = redactor.Headers(trace.RequestHeaders)
+	trace.ResponseHeaders = redactor.Headers(trace.ResponseHeaders)
+	trace.RequestBody, trace.RequestBodyTruncated = redactor.captureTraceBody(trace.RequestBody, trace.RequestBodyTruncated)
+	trace.ResponseBody, trace.ResponseBodyTruncated = redactor.captureTraceBody(trace.ResponseBody, trace.ResponseBodyTruncated)
+	trace.Error = redactor.Replace(trace.Error)
 	trace.Error = trace.Error[:min(len(trace.Error), TraceBodyLimit)]
 	trace = cloneTrace(trace)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if epoch != s.traceEpoch {
+		return
+	}
 	if len(s.traces) < cap(s.traces) {
 		s.traces = append(s.traces, trace)
 		return
@@ -435,6 +450,10 @@ func (s *Store) AppendTrace(trace Trace) {
 // TraceFilter selects traces by exact app and method and by path prefix.
 // A positive Limit returns the most recent matching traces.
 type TraceFilter struct {
+	Direction  TraceDirection
+	EventType  string
+	EventID    string
+	Channel    string
 	AppID      string
 	Method     string
 	PathPrefix string
@@ -451,19 +470,26 @@ func (s *Store) QueryTraces(filter TraceFilter) []Trace {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Trace, 0)
-	for i := len(s.traces) - 1; i >= 0; i-- {
+	for i := range len(s.traces) {
 		trace := s.traces[(s.tracePos+i)%len(s.traces)]
-		if (filter.AppID != "" && trace.AppID != filter.AppID) ||
+		if (filter.Direction != "" && trace.Direction != filter.Direction) ||
+			(filter.EventType != "" && trace.EventType != filter.EventType) ||
+			(filter.EventID != "" && trace.EventID != filter.EventID) ||
+			(filter.Channel != "" && trace.Channel != filter.Channel) ||
+			(filter.AppID != "" && trace.AppID != filter.AppID) ||
 			(filter.Method != "" && trace.Method != filter.Method) ||
 			!strings.HasPrefix(trace.Path, filter.PathPrefix) {
 			continue
 		}
-		result = append(result, cloneTrace(trace))
-		if len(result) == filter.Limit {
-			break
-		}
+		result = append(result, trace)
 	}
-	slices.Reverse(result)
+	slices.SortStableFunc(result, func(a, b Trace) int { return a.StartedAt.Compare(b.StartedAt) })
+	if filter.Limit > 0 && len(result) > filter.Limit {
+		result = result[len(result)-filter.Limit:]
+	}
+	for i := range result {
+		result[i] = cloneTrace(result[i])
+	}
 	return result
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 	"github.com/littlecrabzzz-alt/larkbox/internal/wsproto"
 )
@@ -34,6 +35,7 @@ type Options struct {
 	RetryBackoff func(int) time.Duration
 	AckTimeout   time.Duration
 	TicketTTL    time.Duration
+	Faults       *fault.Engine
 }
 
 // Delivery contains the outcome for one receiver. Data is the HTTP response
@@ -68,10 +70,15 @@ type eventHeader struct {
 }
 
 type deliveryJob struct {
-	app  store.App
-	id   string
-	kind string
-	body []byte
+	redactor  store.Redactor
+	app       store.App
+	id        string
+	kind      string
+	body      []byte
+	wireBody  []byte
+	epoch     uint64
+	copy      int
+	delayedAt time.Time
 }
 
 // Dispatcher manages event delivery and long connections for one server.
@@ -86,11 +93,14 @@ type Dispatcher struct {
 	retriesStopped chan struct{}
 	stopRetries    sync.Once
 
-	mu      sync.Mutex
-	closed  bool
-	pending int
-	active  sync.WaitGroup
-	ws      gateway
+	mu          sync.Mutex
+	closed      bool
+	resetCtx    context.Context
+	resetCancel context.CancelFunc
+	generation  uint64
+	pending     int
+	active      sync.WaitGroup
+	ws          gateway
 }
 
 // New creates a dispatcher. Call Shutdown to drain deliveries and close sockets.
@@ -120,10 +130,11 @@ func New(state *store.Store, opts Options) *Dispatcher {
 		opts.RetryBackoff = defaultRetryBackoff
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	resetCtx, resetCancel := context.WithCancel(ctx)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxResponseHeaderBytes = store.TraceBodyLimit
 	return &Dispatcher{
-		state: state, opts: opts, ctx: ctx, cancel: cancel,
+		state: state, opts: opts, ctx: ctx, cancel: cancel, resetCtx: resetCtx, resetCancel: resetCancel,
 		done: make(chan struct{}), stopping: make(chan struct{}), retriesStopped: make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
@@ -206,15 +217,32 @@ func closeSession(s *session, deadline time.Time) {
 	s.disconnect()
 }
 
+type admissionKey struct{}
+
+type admission struct {
+	reset context.Context
+	epoch uint64
+}
+
 func (d *Dispatcher) begin(ctx context.Context) (context.Context, func(), error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return nil, nil, errors.New("event dispatcher is shutting down")
 	}
+	if scope, ok := ctx.Value(admissionKey{}).(admission); ok && scope.reset != d.resetCtx {
+		return nil, nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	d.active.Add(1)
+	ctx = context.WithValue(ctx, admissionKey{}, admission{d.resetCtx, d.state.TraceEpoch()})
 	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(d.ctx, cancel)
+	stop := context.AfterFunc(d.resetCtx, cancel)
+	if d.resetCtx.Err() != nil {
+		cancel()
+	}
 	return ctx, func() {
 		stop()
 		cancel()
@@ -222,13 +250,14 @@ func (d *Dispatcher) begin(ctx context.Context) (context.Context, func(), error)
 	}, nil
 }
 
-func (d *Dispatcher) newJob(appID, kind string, at time.Time, payload any) (deliveryJob, error) {
+func (d *Dispatcher) newJob(ctx context.Context, appID, kind string, at time.Time, payload any) (deliveryJob, error) {
+	epoch := ctx.Value(admissionKey{}).(admission).epoch
 	app, ok := d.state.Apps().Get(appID)
 	if !ok {
-		return deliveryJob{}, fmt.Errorf("unknown event app %q", appID)
+		return deliveryJob{epoch: epoch}, fmt.Errorf("unknown event app %q", appID)
 	}
 	if kind == "" {
-		return deliveryJob{}, errors.New("event type is required")
+		return deliveryJob{epoch: epoch}, errors.New("event type is required")
 	}
 	if at.IsZero() {
 		at = d.state.Now()
@@ -247,12 +276,12 @@ func (d *Dispatcher) newJob(appID, kind string, at time.Time, payload any) (deli
 		Event: payload,
 	})
 	if err != nil {
-		return deliveryJob{}, err
+		return deliveryJob{epoch: epoch}, err
 	}
 	if len(body) > maxFrame {
-		return deliveryJob{}, errors.New("event payload exceeds size limit")
+		return deliveryJob{epoch: epoch}, errors.New("event payload exceeds size limit")
 	}
-	return deliveryJob{app: app, id: id, kind: kind, body: body}, nil
+	return deliveryJob{app: app, id: id, kind: kind, body: body, epoch: epoch, redactor: store.AppRedactor(app)}, nil
 }
 
 func tenantKey(app store.App) string {
@@ -267,25 +296,31 @@ func millis(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) 
 // Dispatch delivers a Schema 2.0 event to one active session for the app
 // and to its configured webhook. It waits for each receiver's outcome.
 func (d *Dispatcher) Dispatch(ctx context.Context, appID, kind string, payload any) (Result, error) {
-	job, err := d.newJob(appID, kind, time.Time{}, payload)
-	if err != nil {
-		return Result{}, err
-	}
 	ctx, finish, err := d.begin(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	defer finish()
+	job, err := d.newJob(ctx, appID, kind, time.Time{}, payload)
+	if err != nil {
+		return Result{}, err
+	}
 	return d.deliver(ctx, job)
 }
 
-func (d *Dispatcher) enqueue(appID, kind string, at time.Time, payload any) {
-	job, err := d.newJob(appID, kind, at, payload)
-	if err != nil {
-		d.record(store.Trace{StartedAt: time.Now(), AppID: appID, EventType: kind, Channel: "dispatcher"}, err)
+func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.Time, payload any) {
+	d.mu.Lock()
+	if !d.state.Current(from) {
+		d.mu.Unlock()
 		return
 	}
-	d.mu.Lock()
+	ctx := context.WithValue(d.resetCtx, admissionKey{}, admission{d.resetCtx, d.state.TraceEpoch()})
+	job, err := d.newJob(ctx, appID, kind, at, payload)
+	if err != nil {
+		d.mu.Unlock()
+		d.record(job, store.Trace{StartedAt: time.Now(), AppID: appID, EventType: kind, Channel: "dispatcher"}, err)
+		return
+	}
 	switch {
 	case d.closed:
 		err = errors.New("event dispatcher is shutting down")
@@ -296,17 +331,17 @@ func (d *Dispatcher) enqueue(appID, kind string, at time.Time, payload any) {
 	default:
 		d.pending++
 		d.active.Add(1)
-		go d.runJob(job)
+		go d.runJob(ctx, job)
 	}
 	d.mu.Unlock()
 	if err != nil {
-		d.record(job.trace("dispatcher", 0), err)
+		d.record(job, job.trace("dispatcher", 0), err)
 	}
 }
 
-func (d *Dispatcher) runJob(job deliveryJob) {
+func (d *Dispatcher) runJob(ctx context.Context, job deliveryJob) {
 	defer d.active.Done()
-	_, _ = d.deliver(d.ctx, job)
+	_, _ = d.deliver(ctx, job)
 	d.mu.Lock()
 	d.pending--
 	d.mu.Unlock()
@@ -314,6 +349,9 @@ func (d *Dispatcher) runJob(job deliveryJob) {
 
 func (d *Dispatcher) deliver(ctx context.Context, job deliveryJob) (Result, error) {
 	result := Result{EventID: job.id}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if job.kind == cardActionTrigger {
 		delivered := d.deliverCardAction(ctx, job, nil)
 		result.Deliveries = []Delivery{delivered}
@@ -348,6 +386,12 @@ func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Deli
 	if s == nil {
 		return Delivery{}
 	}
+	return d.withDeliveryFault(ctx, job, "websocket", "", socketPath, func(job deliveryJob) Delivery {
+		return d.socketDelivery(ctx, s, job)
+	})
+}
+
+func (d *Dispatcher) socketDelivery(ctx context.Context, s *session, job deliveryJob) Delivery {
 	var result Delivery
 	attempts := 0
 	for attempt := 1; ; attempt++ {
@@ -420,9 +464,9 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 		// The acknowledgement embeds headers in its JSON body as well.
 		// Store the same safe subset in both places.
 		audit := result.response
-		audit.Data = store.RedactTraceJSON(audit.Data)
+		audit.Data = job.redactor.JSON(audit.Data)
 		audit.Headers = make(map[string]string)
-		for key, values := range store.TraceHeaders(headers) {
+		for key, values := range job.redactor.Headers(headers) {
 			audit.Headers[key] = values[0]
 		}
 		trace.ResponseBody, _ = json.Marshal(audit)
@@ -435,24 +479,93 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 			result.err = verify(ctx, result.response.Data)
 		}
 	}
-	d.record(trace, result.err)
+	d.record(job, trace, result.err)
 	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: headers, Data: result.response.Data, Err: result.err}
 }
 
 func (job deliveryJob) trace(channel string, attempt int) store.Trace {
+	started := time.Now()
+	if job.copy == 0 && attempt <= 1 && !job.delayedAt.IsZero() {
+		started = job.delayedAt
+	}
 	return store.Trace{
 		Direction: store.Outbound, AppID: job.app.AppID, EventID: job.id, EventType: job.kind,
-		Channel: channel, Attempt: attempt, RequestBody: job.body, StartedAt: time.Now(),
+		Channel: channel, Attempt: attempt, Copy: job.copy, RequestBody: job.body, StartedAt: started,
 	}
 }
 
-func (d *Dispatcher) record(trace store.Trace, err error) {
+func (d *Dispatcher) record(job deliveryJob, trace store.Trace, err error) {
 	trace.Direction = store.Outbound
 	trace.Latency = time.Since(trace.StartedAt)
 	if err != nil {
 		trace.Error = err.Error()
 	}
-	d.state.AppendTrace(trace)
+	d.state.AppendTraceAt(job.epoch, trace, job.redactor)
 }
 
 func success(status int) bool { return status >= 200 && status < 300 }
+
+// Reset cancels deliveries, invalidates tickets and sessions, and replaces state
+// under the same admission lock. The reset callback must not call the dispatcher.
+func (d *Dispatcher) Reset(reset func()) {
+	d.mu.Lock()
+	d.resetCancel()
+	d.resetCtx, d.resetCancel = context.WithCancel(d.ctx)
+	d.generation++
+	clear(d.ws.tickets)
+	var sessions []*session
+	for _, app := range d.ws.apps {
+		sessions = append(sessions, app.sessions...)
+		close(app.changed)
+	}
+	clear(d.ws.apps)
+	reset()
+	d.mu.Unlock()
+	for _, s := range sessions {
+		s.disconnect()
+	}
+}
+
+// Scope binds a control request to the current reset generation.
+func (d *Dispatcher) Scope(ctx context.Context) context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return context.WithValue(ctx, admissionKey{}, admission{reset: d.resetCtx})
+}
+
+func (d *Dispatcher) withDeliveryFault(ctx context.Context, job deliveryJob, channel, method, path string, deliver func(deliveryJob) Delivery) Delivery {
+	input := fault.Match{AppID: job.app.AppID, EventType: job.kind, Channel: channel, Method: method, PathPrefix: path}
+	d.mu.Lock()
+	scope := ctx.Value(admissionKey{}).(admission)
+	err := scope.reset.Err()
+	var effect fault.Effect
+	if engine := d.opts.Faults; engine != nil && err == nil && ctx.Err() == nil {
+		effect = engine.Match(input, false)
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return Delivery{Channel: channel, Err: err}
+	}
+	count := 1
+	switch effect.Kind {
+	case fault.Latency:
+		job.delayedAt = time.Now()
+		if err := effect.Wait(ctx); err != nil {
+			trace := job.trace(channel, 0)
+			trace.Method, trace.Path = method, path
+			d.record(job, trace, err)
+			return Delivery{Channel: channel, Err: err}
+		}
+	case fault.DuplicateEvent:
+		count = effect.DuplicateCount
+	}
+	if err := ctx.Err(); err != nil {
+		return Delivery{Channel: channel, Err: err}
+	}
+	first := deliver(job)
+	for i := 1; i < count && ctx.Err() == nil && scope.reset.Err() == nil; i++ {
+		job.copy = i
+		_ = deliver(job)
+	}
+	return first
+}
