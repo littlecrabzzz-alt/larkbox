@@ -56,17 +56,19 @@ func RedactTraceJSON(body []byte) []byte {
 		// A partial JSON response may contain a complete credential field.
 		return []byte("[invalid JSON omitted]")
 	}
-	var root map[string]json.RawMessage
-	if json.Unmarshal(trimmed, &root) != nil {
+	var root any
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if decoder.Decode(&root) != nil {
 		return body
 	}
-	changed := false
-	for _, key := range []string{"token", "access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token", "app_secret"} {
-		changed = redactTracePath(root, key) || changed
+	changed := redactSensitiveTraceFields(root)
+	if obj, ok := root.(map[string]any); ok {
+		changed = redactTracePath(obj, "token") || changed
+		changed = redactTracePath(obj, "header", "token") || changed
+		changed = redactTracePath(obj, "event", "token") || changed
+		changed = redactTracePath(obj, "event", "context", "preview_token") || changed
 	}
-	changed = redactTracePath(root, "header", "token") || changed
-	changed = redactTracePath(root, "event", "token") || changed
-	changed = redactTracePath(root, "event", "context", "preview_token") || changed
 	if !changed {
 		return body
 	}
@@ -74,19 +76,60 @@ func RedactTraceJSON(body []byte) []byte {
 	return redacted
 }
 
-func redactTracePath(root map[string]json.RawMessage, key string, rest ...string) bool {
+// Preserve application tokens such as card icon tokens. These names identify
+// protocol credentials wherever they occur in a JSON object.
+func redactSensitiveTraceFields(value any) bool {
+	changed := false
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			switch strings.ToLower(key) {
+			case "access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token",
+				"app_secret", "client_secret", "encrypt_key", "verification_token", "authorization":
+				value[key] = "[redacted]"
+				changed = true
+			default:
+				changed = redactSensitiveTraceFields(child) || changed
+			}
+		}
+	case []any:
+		for _, child := range value {
+			changed = redactSensitiveTraceFields(child) || changed
+		}
+	}
+	return changed
+}
+
+func redactTracePath(root map[string]any, key string, rest ...string) bool {
 	value, exists := root[key]
 	if !exists {
 		return false
 	}
 	if len(rest) == 0 {
-		root[key] = json.RawMessage(`"[redacted]"`)
+		root[key] = "[redacted]"
 		return true
 	}
-	var child map[string]json.RawMessage
-	if json.Unmarshal(value, &child) != nil || !redactTracePath(child, rest[0], rest[1:]...) {
-		return false
-	}
-	root[key], _ = json.Marshal(child)
-	return true
+	child, ok := value.(map[string]any)
+	return ok && redactTracePath(child, rest[0], rest[1:]...)
+}
+
+// TraceEpoch identifies the current audit ring generation.
+func (s *Store) TraceEpoch() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.traceEpoch
+}
+
+// ClearTraces clears both directions and drops exchanges admitted to the old ring.
+func (s *Store) ClearTraces() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clearTraces()
+}
+
+func (s *Store) clearTraces() {
+	clear(s.traces)
+	s.traces = s.traces[:0]
+	s.tracePos = 0
+	s.traceEpoch++
 }

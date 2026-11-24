@@ -49,6 +49,10 @@ func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.H
 			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
 			switch {
 			case failure.Code == protocol.Success:
+				if expiresByFault(r, auth.AppID) {
+					_ = protocol.WriteError(w, expiryError(auth.Kind))
+					return
+				}
 				ctx := context.WithValue(r.Context(), authKey{}, auth)
 				SetTraceApp(r, auth.AppID)
 				r = r.WithContext(ctx)
@@ -152,4 +156,11 @@ func credentialError(kind store.TokenKind, reason credentialFailure) protocol.AP
 	default:
 		return protocol.NewError(protocol.InvalidTokenFormat, nil)
 	}
+}
+
+func expiryError(kind store.TokenKind) protocol.APIError {
+	if kind == store.AppToken {
+		return protocol.NewError(protocol.ExpiredTenantToken, nil)
+	}
+	return credentialError(kind, inactiveCredential)
 }

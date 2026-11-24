@@ -144,4 +144,5 @@ type Trace struct {
 	EventID               string
 	Channel               string
 	Attempt               int
+	Copy                  int
 }

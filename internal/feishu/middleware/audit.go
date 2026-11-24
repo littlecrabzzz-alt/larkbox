@@ -23,6 +23,7 @@ const auditBodyLimit = store.TraceBodyLimit
 // formats that cannot be safely redacted, such as multipart forms.
 func Audit(state *store.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		epoch := state.TraceEpoch()
 		started := time.Now()
 		trace := store.Trace{
 			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
@@ -65,7 +66,7 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 				trace.Code = envelope.Code
 			}
 		}
-		state.AppendTrace(trace)
+		state.AppendTraceAt(epoch, trace)
 	})
 }
 

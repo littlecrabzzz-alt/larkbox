@@ -7,6 +7,7 @@ This directory tracks significant architectural and scope decisions for `larkbox
 | ID | Title | Status | Date |
 |---|---|---|---|
 | [0001](0001-protocol-fidelity-and-scope.md) | Bounded Auth+IM Scope, Go Single Binary, and Protocol Fidelity Strategy | Accepted | 2026-11-25 |
+| [0002](0002-sandbox-control-plane.md) | Local sandbox control plane | Accepted | 2026-11-25 |
 
 ## Template
 

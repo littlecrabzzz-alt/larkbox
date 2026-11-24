@@ -13,9 +13,10 @@ import (
 
 // IMActor identifies the caller for membership and ownership checks.
 type IMActor struct {
-	AppID  string
-	OpenID string
-	IsUser bool
+	AppID   string
+	OpenID  string
+	IsUser  bool
+	Sandbox bool
 }
 
 // ErrOutsideChat indicates that the caller cannot access the chat.
@@ -32,11 +33,14 @@ var ErrMessageUUIDConflict = errors.New("message UUID is already in use")
 
 // canReadChat requires the store lock.
 func (s *Store) canReadChat(actor IMActor, chat Chat, requireBot bool) bool {
-	if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != actor.AppID {
+	if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != actor.AppID && (!actor.Sandbox || actor.AppID != "") {
 		return false
 	}
 	if actor.OpenID == "" || !slices.Contains(chat.MemberIDs, actor.OpenID) {
 		return false
+	}
+	if actor.Sandbox {
+		return true
 	}
 	if requireBot || (chat.ChatMode != "p2p" && chat.ChatType != "public") {
 		bot := s.apps.items[actor.AppID].BotOpenID
@@ -188,6 +192,12 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if actor.Sandbox {
+		user, ok := s.users.items[actor.OpenID]
+		if !ok || user.Inactive {
+			return Message{}, ErrOutsideChat
+		}
+	}
 	var chat Chat
 	var parent Message
 	var err error
@@ -195,8 +205,24 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	switch {
 	case req.ParentID != "":
 		parent, err = s.imMessage(actor, req.ParentID)
+		if err == nil && actor.Sandbox && parent.ChatID != req.ChatID {
+			err = ErrOutsideChat
+		}
 		if err == nil && parent.Deleted {
 			err = ErrMessageDeleted
+		}
+	case actor.Sandbox && req.Peer != "":
+		bot, ok := s.apps.items[actor.AppID]
+		if !ok || bot.BotOpenID != req.Peer {
+			return Message{}, ErrOutsideChat
+		}
+		var found bool
+		chat, found = s.resolveP2PChat(actor, Chat{
+			ChatMode: "p2p", OwnerID: actor.OpenID, MemberIDs: []string{actor.OpenID, bot.BotOpenID},
+		})
+		createDirect = !found
+		if found && (!s.canReadChat(actor, chat, false) || !slices.Contains(chat.MemberIDs, bot.BotOpenID)) {
+			err = ErrOutsideChat
 		}
 	case req.Peer != "":
 		if peer, ok := s.users.items[req.Peer]; !ok || peer.Inactive || actor.OpenID == req.Peer {
@@ -216,6 +242,24 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	}
 	if err != nil {
 		return Message{}, err
+	}
+
+	if actor.Sandbox {
+		target := chat
+		if req.ParentID != "" {
+			target = s.chats.items[parent.ChatID]
+		}
+		for _, mention := range req.Mentions {
+			if !slices.Contains(target.MemberIDs, mention.OpenID) {
+				return Message{}, ErrOutsideChat
+			}
+		}
+		if card, ok := s.cards.items[req.CardID]; ok && actor.AppID == "" {
+			app := s.apps.items[card.AppID]
+			if slices.Contains(target.MemberIDs, app.BotOpenID) {
+				actor.AppID = card.AppID
+			}
+		}
 	}
 
 	if req.CardID != "" {

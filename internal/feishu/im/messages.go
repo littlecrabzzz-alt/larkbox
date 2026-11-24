@@ -2,6 +2,7 @@ package im
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"slices"
@@ -94,13 +95,9 @@ func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.Ne
 		return store.NewMessage{}, false
 	}
 	encoded, mentions := h.normalizeMentions(req.MsgType, *req.Content, content)
-	var cardID string
-	if req.MsgType == "interactive" {
-		cardID = cardkit.EntityReference(content)
-	}
 	return store.NewMessage{
 		MsgType: req.MsgType, Content: encoded, UUID: req.UUID, Mentions: mentions,
-		CardID: cardID,
+		CardID: interactiveCardID(req.MsgType, content),
 	}, true
 }
 
@@ -119,59 +116,67 @@ func decodeContentObject(encoded string) map[string]any {
 }
 
 func checkContent(w http.ResponseWriter, kind string, encoded *string) (map[string]any, bool) {
-	var content map[string]any
+	var raw string
 	if encoded != nil {
-		content = decodeContentObject(*encoded)
+		raw = *encoded
 	}
-	if content == nil {
-		badField(w, "content", "Expected a JSON-encoded object in a string.")
+	content, field, err := validateContent(kind, raw)
+	if err != nil {
+		description := err.Error()
+		badField(w, field, strings.ToUpper(description[:1])+description[1:]+".")
 		return nil, false
+	}
+	return content, true
+}
+
+func validateContent(kind, encoded string) (map[string]any, string, error) {
+	content := decodeContentObject(encoded)
+	if content == nil {
+		return nil, "content", errors.New("expected a JSON-encoded object in a string")
 	}
 
 	switch kind {
 	case "text":
 		_, ok := content["text"].(string)
 		if ok {
-			return content, true
+			return content, "", nil
 		}
 	case "post":
 		if _, ok := parsePost(content); ok {
-			return content, true
+			return content, "", nil
 		}
 	case "interactive":
 		if cardkit.ValidMessageCard(content) || cardkit.EntityReference(content) != "" {
-			return content, true
+			return content, "", nil
 		}
 	case "image":
 		if nonemptyString(content, "image_key") {
-			return content, true
+			return content, "", nil
 		}
 	case "file", "audio", "sticker":
 		if nonemptyString(content, "file_key") {
-			return content, true
+			return content, "", nil
 		}
 	case "media":
 		if nonemptyString(content, "file_key") && optionalString(content, "image_key") {
-			return content, true
+			return content, "", nil
 		}
 	case "share_chat":
 		if nonemptyString(content, "chat_id") {
-			return content, true
+			return content, "", nil
 		}
 	case "share_user":
 		if nonemptyString(content, "user_id") {
-			return content, true
+			return content, "", nil
 		}
 	case "system":
 		if nonemptyString(content, "template") {
-			return content, true
+			return content, "", nil
 		}
 	default:
-		badField(w, "msg_type", "Unsupported message type.")
-		return nil, false
+		return nil, "msg_type", errors.New("unsupported message type")
 	}
-	badField(w, "content", "Invalid content for message type "+kind+".")
-	return nil, false
+	return nil, "content", errors.New("invalid content for message type " + kind)
 }
 
 func nonemptyString(obj map[string]any, key string) bool {

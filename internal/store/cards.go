@@ -118,7 +118,11 @@ type templateKey struct{ id, version string }
 func (s *Store) CardTemplate(id, version string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cardTemplates[templateKey{id, version}]
+	data := s.cardTemplates[templateKey{id, version}]
+	if data == "" && version == "" {
+		data = s.latestTemplates[id]
+	}
+	return data
 }
 
 // renderMessage resolves a linked entity for its owner in the same snapshot.

@@ -68,6 +68,15 @@ Register local templates through `card_templates`. Each entry has a `template_id
 
 In-process tests can call `Server.TriggerCardAction` to simulate an interaction by a chat member. Each action has a three-second deadline and goes to one active WebSocket session, or to the configured webhook if no session is active. The callback is attempted once and can return a toast and an updated card.
 
+Use `GET /_sandbox/state` to see the seeded chat and user IDs. Send a user
+message with `POST /_sandbox/messages/send`, simulate a card click with
+`POST /_sandbox/cards/action`, and inspect deliveries with
+`GET /_sandbox/traces`. Use `POST /_sandbox/faults` to add a rule and
+`POST /_sandbox/reset` to restore the startup seed. Keep the unauthenticated
+control plane on loopback or an isolated test network. See the
+[control plane contract](docs/adr/0002-sandbox-control-plane.md) for request
+fields, trace filters, and fault options.
+
 ## Non-Goals
 
 - **Pixel-perfect native Feishu rendering**. The planned Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.

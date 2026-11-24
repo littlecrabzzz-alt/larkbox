@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Synchronous `card.action.trigger` callbacks over WebSocket or signed, encrypted webhooks, with toast capture, validated card updates, and outbound audit traces.
 - Official Feishu Go SDK integration tests for CardKit REST endpoints and both callback transports.
 - Registered local CardKit templates, entity and stream expiration, and IM card content read modes.
+- Local `/_sandbox/*` control plane for runtime seeds, reset, message and card simulation, webhook verification, and state inspection.
+- Filterable and clearable audit traces, configurable inbound and outbound faults, and direct credential expiry.
+- Black-box official Go SDK coverage for sandbox mentions, card replies and callbacks, fault recovery, and reset.
 - Sample environment for optional live differential testing.
 
 ### Fixed

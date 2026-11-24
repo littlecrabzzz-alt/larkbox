@@ -16,6 +16,8 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox"
+	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -27,6 +29,7 @@ type Server struct {
 	http   *http.Server
 	store  *store.Store
 	events *event.Dispatcher
+	faults *fault.Engine
 }
 
 // RegisterRoutes attaches handlers to one route group. Patterns include the
@@ -94,6 +97,8 @@ func New(cfg config.Config, opts ...Option) *Server {
 	}
 	state := store.New(nil, 0)
 	state.Seed(cfg)
+	faults := fault.New(nil)
+	settings.eventOptions.Faults = faults
 	events := event.New(state, settings.eventOptions)
 
 	feishu := http.NewServeMux()
@@ -104,9 +109,9 @@ func New(cfg config.Config, opts ...Option) *Server {
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}
-	sandbox := http.NewServeMux()
+	extensions := http.NewServeMux()
 	for _, register := range settings.sandbox {
-		register(sandbox, cfg, state)
+		register(extensions, cfg, state)
 	}
 
 	mux := http.NewServeMux()
@@ -118,15 +123,22 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, openAPIHandler(feishu))))
-	mux.Handle("/_sandbox/", sandbox)
+	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, openAPIHandler(feishu)))))
+	control := sandbox.New(cfg, Version, state, events, faults)
+	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := extensions.Handler(r); pattern != "" {
+			extensions.ServeHTTP(w, r)
+			return
+		}
+		control.ServeHTTP(w, r)
+	}))
 
 	return &Server{
 		http: &http.Server{
 			Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		},
-		store: state, events: events,
+		store: state, events: events, faults: faults,
 	}
 }
 
@@ -188,6 +200,7 @@ func (s *Server) Serve(listener net.Listener) error { return s.http.Serve(listen
 
 // Shutdown stops accepting connections and waits for active requests to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.faults.Stop()
 	s.events.StopRetries()
 	httpErr := s.http.Shutdown(ctx)
 	return errors.Join(httpErr, s.events.Shutdown(ctx))
