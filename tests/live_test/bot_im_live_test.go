@@ -9,7 +9,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -219,9 +218,19 @@ func testImage(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc) {
 	if downloaded.StatusCode != http.StatusOK || downloaded.File == nil || !downloaded.Success() {
 		t.Fatalf("image download: HTTP %d, business code %d", downloaded.StatusCode, downloaded.Code)
 	}
-	got, err := io.ReadAll(downloaded.File)
-	requireSDK(t, "read downloaded PNG", err)
-	if !bytes.Equal(got, encoded.Bytes()) {
-		t.Fatal("downloaded PNG bytes differ from the uploaded image")
+	got, err := png.Decode(downloaded.File)
+	requireSDK(t, "decode downloaded PNG", err)
+	bounds := pixel.Bounds()
+	if got.Bounds() != bounds {
+		t.Fatalf("downloaded PNG bounds = %v, want %v", got.Bounds(), bounds)
+	}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			gotR, gotG, gotB, gotA := got.At(x, y).RGBA()
+			wantR, wantG, wantB, wantA := pixel.NRGBAAt(x, y).RGBA()
+			if gotR != wantR || gotG != wantG || gotB != wantB || gotA != wantA {
+				t.Fatalf("downloaded PNG pixel differs at (%d, %d)", x, y)
+			}
+		}
 	}
 }

@@ -3,6 +3,7 @@ package sdk_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -24,11 +25,12 @@ import (
 )
 
 var sensitiveFixtureValue = regexp.MustCompile(`(?i)(` +
-	`\bbearer[ \t]+[a-z0-9_-]{12,}|\bbasic[ \t]+[a-z0-9+/]+={0,2}|\b(?:t|a|u|ur|c)-[a-z0-9_-]{16,}|` +
+	`\bbearer[ \t]+[a-z0-9_-]{12,}|\b(?:t|a|u|ur|c)-[a-z0-9_-]{16,}|` +
 	`\bcli_[a-z0-9_-]{16,}|\b(?:ou|on|oc|om|omt|omr|evt|img_v3|file_v3)_[a-z0-9_-]{20,}|` +
 	`\bopen\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/(?:v2/)?hook/[a-z0-9_-]+|` +
 	`\b(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|` +
 	`\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|[a-z0-9_.+%-]+@[a-z0-9.-]+\.[a-z]{2,}|\b(?:\+?86[ -]?)?1[3-9][0-9]{9}\b)`)
+var basicFixtureValue = regexp.MustCompile(`(?i)\bbasic[ \t]+([a-z0-9+/]+={0,2})`)
 var sensitiveFixtureKey = regexp.MustCompile(`(?i)(?:secret|token|tenant[_-]?key|encrypt[_-]?key|password|authorization|cookie|api[_-]?key|private[_-]?key|email|mobile|phone|credential)`)
 
 func TestGoldenFixtureHygiene(t *testing.T) {
@@ -44,7 +46,7 @@ func TestGoldenFixtureHygiene(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sensitiveFixtureValue.Match(raw) {
+			if hasSensitiveFixtureText(string(raw)) {
 				t.Fatal("file contains a credential, live ID, or PII pattern")
 			}
 			if path == filepath.Join(fixturetest.Root, "README.md") {
@@ -71,6 +73,26 @@ func TestGoldenFixtureHygiene(t *testing.T) {
 	}
 }
 
+func hasSensitiveFixtureText(text string) bool {
+	if sensitiveFixtureValue.MatchString(text) {
+		return true
+	}
+	for _, match := range basicFixtureValue.FindAllStringSubmatch(text, -1) {
+		candidate := match[1]
+		encoding := base64.RawStdEncoding
+		if strings.HasSuffix(candidate, "=") {
+			encoding = base64.StdEncoding
+		}
+		decoded, err := encoding.DecodeString(candidate)
+		if err == nil && bytes.ContainsRune(decoded, ':') && bytes.IndexFunc(decoded, func(r rune) bool {
+			return r < ' ' || r == 0x7f
+		}) < 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func hasFixtureLeak(value any) bool {
 	switch node := value.(type) {
 	case map[string]any:
@@ -87,7 +109,7 @@ func hasFixtureLeak(value any) bool {
 					return true
 				}
 			}
-			if sensitiveFixtureValue.MatchString(key) || hasFixtureLeak(child) {
+			if hasSensitiveFixtureText(key) || hasFixtureLeak(child) {
 				return true
 			}
 		}
@@ -98,7 +120,7 @@ func hasFixtureLeak(value any) bool {
 			}
 		}
 	case string:
-		if sensitiveFixtureValue.MatchString(node) {
+		if hasSensitiveFixtureText(node) {
 			return true
 		}
 		text := strings.TrimSpace(node)
@@ -110,24 +132,30 @@ func hasFixtureLeak(value any) bool {
 	return false
 }
 
-func TestGoldenFixtureHygieneRejectsLeaks(t *testing.T) {
+func TestGoldenFixtureHygieneExamples(t *testing.T) {
 	for _, tc := range []struct {
 		name, input string
+		leak        bool
 	}{
-		{"embedded array", `{"content":"[{\"app_secret\":\"example\"}]"}`},
-		{"embedded object", `{"content":"{\"tenantKey\":\"example\"}"}`},
-		{"short app ID", `{"label":"cli_0123456789abcdef"}`},
-		{"bot webhook URL", `{"url":"https://open.feishu.cn/open-apis/bot/v2/hook/example"}`},
-		{"Basic authorization", `{"comment":"Basic dXNlcjpwYXNz"}`},
-		{"raw ciphertext", `{"encrypt":"U3ludGhldGljIGNpcGhlcnRleHQ="}`},
+		{"embedded array", `{"content":"[{\"app_secret\":\"example\"}]"}`, true},
+		{"embedded object", `{"content":"{\"tenantKey\":\"example\"}"}`, true},
+		{"short app ID", `{"label":"cli_0123456789abcdef"}`, true},
+		{"bot webhook URL", `{"url":"https://open.feishu.cn/open-apis/bot/v2/hook/example"}`, true},
+		{"Basic authorization", `{"comment":"Basic dXNlcjpwYXNz"}`, true},
+		{"raw ciphertext", `{"encrypt":"U3ludGhldGljIGNpcGhlcnRleHQ="}`, true},
+		{"padded Basic authorization", `{"comment":"Basic dTpwPw=="}`, true},
+		{"unpadded Basic authorization", `{"comment":"Basic dTpwPw"}`, true},
+		{"Basic authorization header", `{"Authorization":"Basic setup"}`, true},
+		{"basic prose", `{"comment":"See the basic setup."}`, false},
+		{"base64 without separator", `{"comment":"Basic c2V0dXA="}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var body map[string]any
 			if err := json.Unmarshal([]byte(tc.input), &body); err != nil {
 				t.Fatal("invalid synthetic input")
 			}
-			if !hasFixtureLeak(body) {
-				t.Fatal("hygiene scanner accepted a synthetic leak")
+			if got := hasSensitiveFixtureText(tc.input) || hasFixtureLeak(body); got != tc.leak {
+				t.Fatalf("hygiene detected a leak = %t, want %t", got, tc.leak)
 			}
 		})
 	}
