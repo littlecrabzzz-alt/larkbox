@@ -190,7 +190,7 @@ func TestTraceRing(t *testing.T) {
 	code := 230001
 	for _, trace := range []Trace{
 		{Direction: Inbound, Path: "/old"},
-		{Direction: Outbound, Path: "/callback", EventID: "evt_test", Channel: "webhook", Attempt: 2, RequestBody: []byte("event")},
+		{Direction: Outbound, Path: "/callback", EventID: "evt_test", Channel: "webhook", Attempt: 2, RequestBody: []byte(`{"event":"test"}`)},
 		{Direction: Inbound, Path: "/open-apis/demo", Code: &code, RequestHeaders: http.Header{"Content-Type": []string{"application/json"}}},
 	} {
 		state.AppendTrace(trace)
@@ -205,7 +205,7 @@ func TestTraceRing(t *testing.T) {
 	got[1].RequestHeaders.Set("Content-Type", "text/plain")
 	*got[1].Code = 13
 	got = state.Traces()
-	if string(got[0].RequestBody) != "event" || got[1].RequestHeaders.Get("Content-Type") != "application/json" || *got[1].Code != 230001 {
+	if string(got[0].RequestBody) != `{"event":"test"}` || got[1].RequestHeaders.Get("Content-Type") != "application/json" || *got[1].Code != 230001 {
 		t.Fatal("mutating trace copies changed backing state")
 	}
 }
@@ -307,7 +307,7 @@ func TestQueryTracesAfterRingWrap(t *testing.T) {
 		{"cli_a", http.MethodGet, "/open-apis/b/other"},
 		{"cli_a", http.MethodGet, "/open-apis/a/latest"},
 	} {
-		state.AppendTrace(Trace{AppID: tc.app, Method: tc.method, Path: tc.path, RequestBody: []byte("body")})
+		state.AppendTrace(Trace{AppID: tc.app, Method: tc.method, Path: tc.path, RequestBody: []byte(`{"body":"test"}`)})
 	}
 	filter := TraceFilter{AppID: "cli_a", Method: http.MethodGet, PathPrefix: "/open-apis/a/"}
 	for _, tc := range []struct {
@@ -323,7 +323,7 @@ func TestQueryTracesAfterRingWrap(t *testing.T) {
 			t.Fatalf("limit %d: got %d results, want %d", tc.limit, len(traces), len(tc.want))
 		}
 		for i, trace := range traces {
-			if trace.Path != tc.want[i] || string(trace.RequestBody) != "body" {
+			if trace.Path != tc.want[i] || string(trace.RequestBody) != `{"body":"test"}` {
 				t.Fatalf("limit %d: unexpected trace %+v", tc.limit, trace)
 			}
 			trace.RequestBody[0] = 'x'
@@ -356,4 +356,54 @@ func TestAppRedirectURISnapshots(t *testing.T) {
 	read("https://changed.test/runtime")
 	state.Reset()
 	read(original)
+}
+
+func TestSandboxMessageCapturesRecipientsAtCommit(t *testing.T) {
+	cfg := config.Default()
+	initial := cfg.Apps[0]
+	replacement := config.App{AppID: "cli_other", BotOpenID: "ou_other"}
+	cfg.Apps = append(cfg.Apps, replacement)
+	clockEntered, releaseClock := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	state := New(func() time.Time {
+		once.Do(func() {
+			close(clockEntered)
+			<-releaseClock
+		})
+		return time.Unix(1700000000, 0)
+	}, 0)
+	state.Seed(cfg)
+	chatID := cfg.Chats[0].ChatID
+	actor := IMActor{OpenID: cfg.Users[0].OpenID, IsUser: true, Sandbox: true}
+	req := NewMessage{ChatID: chatID, MsgType: "text", Content: `{"text":"hello"}`}
+	type result struct {
+		message    Message
+		recipients []string
+		err        error
+	}
+	committed := make(chan result, 1)
+	go func() {
+		message, recipients, err := state.CreateSandboxMessage(actor, req)
+		committed <- result{message, recipients, err}
+	}()
+	<-clockEntered
+	changed := make(chan error, 1)
+	go func() {
+		changed <- state.ChangeIMChat(actor, chatID, func(chat *Chat) error {
+			chat.MemberIDs = append(slices.DeleteFunc(chat.MemberIDs, func(id string) bool { return id == initial.BotOpenID }), replacement.BotOpenID)
+			return nil
+		})
+	}()
+	close(releaseClock)
+	first := <-committed
+	if err := <-changed; err != nil {
+		t.Fatal(err)
+	}
+	if first.err != nil || first.message.ID == "" || !slices.Equal(first.recipients, []string{initial.AppID}) {
+		t.Fatalf("before membership change: %+v", first)
+	}
+	_, after, err := state.CreateSandboxMessage(actor, req)
+	if err != nil || !slices.Equal(after, []string{replacement.AppID}) {
+		t.Fatalf("after membership change: got %v, %v", after, err)
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -102,7 +103,12 @@ func (h handler) upload(w http.ResponseWriter, r *http.Request, kind string, pre
 	if err != nil || supplied == "application/octet-stream" {
 		media.ContentType = http.DetectContentType(media.Bytes)
 	}
-	h.state.Media().Put(media)
+	if err := h.state.Mutate(r.Context(), func() error {
+		h.state.Media().Put(media)
+		return nil
+	}); middleware.WriteResetConflict(w, err) {
+		return
+	}
 	success(w, fields{kind + "_key": media.Key})
 }
 

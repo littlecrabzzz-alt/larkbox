@@ -111,8 +111,8 @@ func (d *Dispatcher) userTenant(openID string, app store.App) string {
 }
 
 // EnqueueMessageRecalled sends the notification for a committed recall.
-func (d *Dispatcher) EnqueueMessageRecalled(appID, chatID, messageID, recallType string, at time.Time) {
-	d.enqueue(appID, messageRecall, at, struct {
+func (d *Dispatcher) EnqueueMessageRecalled(ctx context.Context, appID, chatID, messageID, recallType string, at time.Time) {
+	d.enqueue(ctx, appID, messageRecall, at, struct {
 		ChatID     string `json:"chat_id"`
 		MessageID  string `json:"message_id"`
 		RecallTime string `json:"recall_time"`
@@ -121,14 +121,14 @@ func (d *Dispatcher) EnqueueMessageRecalled(appID, chatID, messageID, recallType
 }
 
 // EnqueueBotMembership sends the notification for a committed bot membership change.
-func (d *Dispatcher) EnqueueBotMembership(appID, chatID, operatorID, operatorAppID string, at time.Time, added bool) {
+func (d *Dispatcher) EnqueueBotMembership(ctx context.Context, appID, chatID, operatorID, operatorAppID string, at time.Time, added bool) {
 	kind := botDeleted
 	if added {
 		kind = botAdded
 	}
 	chat, _ := d.state.Chats().Get(chatID)
 	operatorApp, _ := d.state.Apps().Get(operatorAppID)
-	d.enqueue(appID, kind, at, struct {
+	d.enqueue(ctx, appID, kind, at, struct {
 		ChatID            string            `json:"chat_id"`
 		OperatorID        userID            `json:"operator_id"`
 		OperatorTenantKey string            `json:"operator_tenant_key"`

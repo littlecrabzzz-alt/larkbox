@@ -23,13 +23,13 @@ const auditBodyLimit = store.TraceBodyLimit
 // formats that cannot be safely redacted, such as multipart forms.
 func Audit(state *store.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		epoch := state.TraceEpoch()
+		ctx, epoch := state.Admit(r.Context())
 		started := time.Now()
 		trace := store.Trace{
 			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
 			RequestHeaders: store.TraceHeaders(r.Header),
 		}
-		r = r.WithContext(context.WithValue(r.Context(), traceAppKey{}, &trace.AppID))
+		r = r.WithContext(context.WithValue(ctx, traceAppKey{}, &trace.AppID))
 		requestContentType := r.Header.Get("Content-Type")
 		requestLength := r.ContentLength
 		var request *auditReader
@@ -173,65 +173,9 @@ func (w *auditWriter) FlushError() error {
 }
 
 func auditBody(body []byte, contentType string, truncated bool) []byte {
-	if len(body) == 0 {
-		return nil
-	}
-	body = body[:min(len(body), auditBodyLimit)]
 	format, _, _ := mime.ParseMediaType(contentType)
-	var value any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if !truncated && json.Valid(body) && decoder.Decode(&value) == nil {
-		if redactJSON(value) {
-			redacted, err := json.Marshal(value)
-			if err != nil || len(redacted) > auditBodyLimit {
-				return nil
-			}
-			return redacted
-		}
-		return body
-	}
-	trimmed := bytes.TrimSpace(body)
-	looksLikeJSON := len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
-	if looksLikeJSON || format == "application/json" || strings.HasSuffix(format, "+json") ||
-		strings.HasPrefix(format, "multipart/") || format == "application/x-www-form-urlencoded" {
+	if truncated || strings.HasPrefix(format, "multipart/") || format == "application/x-www-form-urlencoded" {
 		return nil
 	}
 	return body
-}
-
-func redactJSON(value any) bool {
-	changed := false
-	switch value := value.(type) {
-	case map[string]any:
-		for name, child := range value {
-			if credentialField(name, child) {
-				value[name] = "[REDACTED]"
-				changed = true
-			} else if redactJSON(child) {
-				changed = true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if redactJSON(child) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-func credentialField(name string, value any) bool {
-	switch strings.ToLower(name) {
-	case "authorization", "app_secret", "client_secret", "encrypt_key", "password", "token",
-		"access_token", "app_access_token", "tenant_access_token", "user_access_token", "refresh_token",
-		"verification_token", "app_ticket", "code_verifier":
-		return true
-	case "code":
-		_, isString := value.(string)
-		return isString
-	default:
-		return false
-	}
 }

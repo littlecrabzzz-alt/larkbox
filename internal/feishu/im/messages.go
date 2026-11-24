@@ -51,7 +51,7 @@ func (h handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		input.Peer = user.OpenID
 	}
-	message, err := h.state.CreateIMMessage(caller(r), input)
+	message, err := store.Commit(r.Context(), h.state, func() (store.Message, error) { return h.state.CreateIMMessage(caller(r), input) })
 	if err != nil {
 		writeFailure(w, err, missingChat)
 		return
@@ -77,7 +77,7 @@ func (h handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.ParentID = r.PathValue("message_id")
-	message, err := h.state.CreateIMMessage(caller(r), input)
+	message, err := store.Commit(r.Context(), h.state, func() (store.Message, error) { return h.state.CreateIMMessage(caller(r), input) })
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
@@ -412,24 +412,26 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	actor := caller(r)
 	encoded, mentions := h.normalizeMentions(req.MsgType, *req.Content, content)
-	m, err := h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
-		if !sentBy(actor, m) {
-			return noPermission
-		}
-		if (patch && m.MsgType != "interactive") || (!patch && m.MsgType != "text" && m.MsgType != "post") {
-			return protocol.NewError(protocol.IMInvalidParameter, nil)
-		}
-		if patch {
-			if m.CardID != "" {
-				return protocol.APIError{Code: protocol.IMInvalidParameter, Message: "Use CardKit APIs to update a message card entity.", Status: http.StatusBadRequest}
+	m, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
+		return h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
+			if !sentBy(actor, m) {
+				return noPermission
 			}
-			if !cardkit.SharedMessageCard(decodeContentObject(m.Content)) || !cardkit.SharedMessageCard(content) {
-				return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
+			if (patch && m.MsgType != "interactive") || (!patch && m.MsgType != "text" && m.MsgType != "post") {
+				return protocol.NewError(protocol.IMInvalidParameter, nil)
 			}
-		}
-		m.MsgType, m.Content, m.Mentions, m.CardID = req.MsgType, encoded, mentions, ""
-		m.Updated, m.UpdatedAt = true, h.state.Now()
-		return nil
+			if patch {
+				if m.CardID != "" {
+					return protocol.APIError{Code: protocol.IMInvalidParameter, Message: "Use CardKit APIs to update a message card entity.", Status: http.StatusBadRequest}
+				}
+				if !cardkit.SharedMessageCard(decodeContentObject(m.Content)) || !cardkit.SharedMessageCard(content) {
+					return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
+				}
+			}
+			m.MsgType, m.Content, m.Mentions, m.CardID = req.MsgType, encoded, mentions, ""
+			m.Updated, m.UpdatedAt = true, h.state.Now()
+			return nil
+		})
 	})
 	if err != nil {
 		writeFailure(w, err, missingMessage)
@@ -445,23 +447,31 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 func (h handler) recallMessage(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
 	recallType := "message_owner"
-	m, recipients, err := h.state.RecallIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, chat store.Chat) error {
-		if !sentBy(actor, m) {
-			if chat.ChatMode != "group" || !managesChat(actor, chat) {
-				return noPermission
+	type recalled struct {
+		message    store.Message
+		recipients []string
+	}
+	result, err := store.Commit(r.Context(), h.state, func() (recalled, error) {
+		message, recipients, err := h.state.RecallIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, chat store.Chat) error {
+			if !sentBy(actor, m) {
+				if chat.ChatMode != "group" || !managesChat(actor, chat) {
+					return noPermission
+				}
+				recallType = "group_manager"
+				if chat.OwnerID == actor.OpenID {
+					recallType = "group_owner"
+				}
 			}
-			recallType = "group_manager"
-			if chat.OwnerID == actor.OpenID {
-				recallType = "group_owner"
-			}
-		}
-		return nil
+			return nil
+		})
+		return recalled{message, recipients}, err
 	})
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
 	}
-	for _, appID := range recipients {
+	m := result.message
+	for _, appID := range result.recipients {
 		h.emitter.Emit(r.Context(), Event{
 			Type: "im.message.recalled_v1", AppID: appID, ChatID: m.ChatID,
 			MessageID: m.ID, ActorID: actor.OpenID, ActorAppID: actor.AppID, RecallType: recallType, At: m.UpdatedAt,

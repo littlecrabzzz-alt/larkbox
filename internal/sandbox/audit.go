@@ -72,10 +72,7 @@ func traceBody(body []byte) any {
 	if len(body) == 0 {
 		return nil
 	}
-	if json.Valid(body) {
-		return json.RawMessage(body)
-	}
-	return string(body)
+	return json.RawMessage(body)
 }
 
 func (c *control) clearTraces(w http.ResponseWriter, _ *http.Request) {
@@ -92,7 +89,9 @@ func (c *control) addFault(w http.ResponseWriter, r *http.Request) {
 	if !read(w, r, &spec, false) {
 		return
 	}
+	c.mu.RLock()
 	rule, err := c.faults.Add(spec)
+	c.mu.RUnlock()
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return

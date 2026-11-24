@@ -46,9 +46,29 @@ func TestOutboundAuditRedactsBeforeTruncation(t *testing.T) {
 	response := []byte(`{"token":"private-incomplete","remaining":`)
 	s.AppendTrace(Trace{Direction: Outbound, RequestBody: wire, ResponseBody: response})
 	trace := s.Traces()[0]
-	if !trace.RequestBodyTruncated || len(trace.RequestBody) != TraceBodyLimit ||
-		strings.Contains(string(trace.RequestBody), "private-") || strings.Count(string(trace.RequestBody), `"[redacted]"`) != 4 ||
+	if !trace.RequestBodyTruncated || len(trace.RequestBody) != 0 ||
+		strings.Contains(string(trace.RequestBody), "private-") ||
 		strings.Contains(string(trace.ResponseBody), "private-") || strings.Count(string(wire), "private-") != 4 {
 		t.Fatal("audit redaction changed wire data or retained a private field")
+	}
+}
+
+func TestTraceScrubbingCanonicalizesNestedCredentials(t *testing.T) {
+	for _, direction := range []TraceDirection{Inbound, Outbound} {
+		t.Run(string(direction), func(t *testing.T) {
+			state := New(nil, 0)
+			body := []byte(`{ "keep":{"token":"hidden-duplicate"}, "keep":"safe", "items":[{"token":"first","ToKeN":"second","preview_token":"third","challenge":"readable"}], "content":"{\"access_token\":\"encoded-secret\",\"text\":\"visible\"}" }`)
+			state.AppendTrace(Trace{Direction: direction, RequestBody: body, ResponseBody: []byte("bearer opaque-secret")})
+			trace := state.Traces()[0]
+			want := `{"content":"{\"access_token\":\"[REDACTED]\",\"text\":\"visible\"}","items":[{"ToKeN":"[REDACTED]","challenge":"readable","preview_token":"[REDACTED]","token":"[REDACTED]"}],"keep":"safe"}`
+			if string(trace.RequestBody) != want || trace.ResponseBody != nil {
+				t.Fatalf("unsafe or incorrectly canonicalized trace: %s / %s", trace.RequestBody, trace.ResponseBody)
+			}
+			for _, malformed := range []string{`{"token":"private"} unexpected`, `{"token":"private"`, `"private"`} {
+				if got := RedactTraceJSON([]byte(malformed)); got != nil {
+					t.Fatalf("ambiguous body was retained: %s", got)
+				}
+			}
+		})
 	}
 }

@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fence stale Open API writes and event notifications after sandbox reset.
+- Redact structured audit and card diagnostics consistently, apply one inbound fault per request, and validate sandbox seed and token selectors before changing state.
 - Restrict live card entity reads to the owning app and reject stale callback overwrites and conflicting UUID reuse.
 - Redact outbound callback credentials in audit bodies while retaining authenticated wire delivery.
 

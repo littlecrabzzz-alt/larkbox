@@ -27,7 +27,7 @@ func TestMatchingProbabilityAndRemainingHits(t *testing.T) {
 	}
 	wrong := input
 	wrong.Method = "POST"
-	if engine.Match(wrong, false).Kind != "" || engine.Match(input, true).Kind != "" ||
+	if engine.Match(wrong, false).Kind != "" ||
 		engine.Match(input, false).Kind != "" || *engine.List()[0].RemainingHits != hits {
 		t.Fatal("an unmatched request or probability miss consumed a hit")
 	}

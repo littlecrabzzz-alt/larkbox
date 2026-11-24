@@ -158,10 +158,10 @@ func viewCard(card store.Card, detail bool) cardView {
 		Revision: card.Revision, CreatedAt: card.CreatedAt, ExpiresAt: card.ExpiresAt(), StreamingExpiresAt: card.StreamingExpiresAt(),
 	}
 	if detail {
-		view.JSON = card.JSON
-		elements := card.Elements
-		if elements == nil {
-			elements = map[string]string{}
+		view.JSON = store.RedactTraceJSON(card.JSON)
+		elements := make(map[string]string, len(card.Elements))
+		for id, content := range card.Elements {
+			elements[id] = store.RedactDiagnosticText(content)
 		}
 		view.Elements = &elements
 	}
@@ -197,23 +197,31 @@ func (c *control) sessions(w http.ResponseWriter, _ *http.Request) {
 
 func (c *control) expireTokens(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		AppID  string    `json:"app_id"`
-		Token  *string   `json:"token"`
-		Tokens *[]string `json:"tokens"`
+		AppID  string          `json:"app_id"`
+		Token  json.RawMessage `json:"token"`
+		Tokens json.RawMessage `json:"tokens"`
 	}
 	if !read(w, r, &input, false) {
 		return
 	}
-	if input.AppID == "" || (input.Tokens != nil && (input.Token != nil || len(*input.Tokens) == 0)) {
+	if input.AppID == "" || (input.Tokens != nil && input.Token != nil) {
 		fail(w, http.StatusBadRequest, "app_id is required; provide either token or a nonempty tokens list")
 		return
 	}
 	var values []string
 	switch {
 	case input.Token != nil:
-		values = []string{*input.Token}
+		var token string
+		if json.Unmarshal(input.Token, &token) != nil || token == "" {
+			fail(w, http.StatusBadRequest, "token must be a nonempty string")
+			return
+		}
+		values = []string{token}
 	case input.Tokens != nil:
-		values = *input.Tokens
+		if json.Unmarshal(input.Tokens, &values) != nil || len(values) == 0 {
+			fail(w, http.StatusBadRequest, "tokens must be a nonempty list of strings")
+			return
+		}
 	}
 	for _, value := range values {
 		if value == "" {

@@ -45,72 +45,88 @@ func TraceHeaders(headers http.Header) http.Header {
 	return result
 }
 
-// RedactTraceJSON removes credential fields from an audit copy of a payload.
-// It preserves unrelated fields, including application data and card icon tokens.
+// RedactTraceJSON canonicalizes structured JSON and removes protocol credentials.
+// Opaque, partial, or ambiguous bodies are omitted.
 func RedactTraceJSON(body []byte) []byte {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
-		return body
-	}
-	if (trimmed[0] == '{' || trimmed[0] == '[') && !json.Valid(trimmed) {
-		// A partial JSON response may contain a complete credential field.
-		return []byte("[invalid JSON omitted]")
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || (body[0] != '{' && body[0] != '[') || !json.Valid(body) {
+		return nil
 	}
 	var root any
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if decoder.Decode(&root) != nil {
-		return body
+		return nil
 	}
-	changed := redactSensitiveTraceFields(root)
-	if obj, ok := root.(map[string]any); ok {
-		changed = redactTracePath(obj, "token") || changed
-		changed = redactTracePath(obj, "header", "token") || changed
-		changed = redactTracePath(obj, "event", "token") || changed
-		changed = redactTracePath(obj, "event", "context", "preview_token") || changed
-	}
-	if !changed {
-		return body
-	}
+	redactCredentials(root, 0)
 	redacted, _ := json.Marshal(root)
 	return redacted
 }
 
-// Preserve application tokens such as card icon tokens. These names identify
-// protocol credentials wherever they occur in a JSON object.
-func redactSensitiveTraceFields(value any) bool {
-	changed := false
+// RedactDiagnosticText preserves display text and scrubs JSON encoded inside it.
+func RedactDiagnosticText(text string) string {
+	return redactCredentials(text, 0).(string)
+}
+
+const maxEmbeddedJSONDepth = 4
+
+func redactCredentials(value any, embeddedDepth int) any {
 	switch value := value.(type) {
 	case map[string]any:
 		for key, child := range value {
-			switch strings.ToLower(key) {
-			case "access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token",
-				"app_secret", "client_secret", "encrypt_key", "verification_token", "authorization":
-				value[key] = "[redacted]"
-				changed = true
-			default:
-				changed = redactSensitiveTraceFields(child) || changed
+			if credentialField(key, child) {
+				value[key] = "[REDACTED]"
+			} else {
+				value[key] = redactCredentials(child, embeddedDepth)
 			}
 		}
 	case []any:
-		for _, child := range value {
-			changed = redactSensitiveTraceFields(child) || changed
+		for i, child := range value {
+			value[i] = redactCredentials(child, embeddedDepth)
+		}
+	case string:
+		// IM content and CardKit data can contain JSON-encoded objects.
+		raw := strings.TrimSpace(value)
+		if len(raw) == 0 || (raw[0] != '{' && raw[0] != '[') {
+			return value
+		}
+		if embeddedDepth == maxEmbeddedJSONDepth {
+			return "[OMITTED]"
+		}
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.UseNumber()
+		var nested any
+		if json.Valid([]byte(raw)) && decoder.Decode(&nested) == nil {
+			body, _ := json.Marshal(redactCredentials(nested, embeddedDepth+1))
+			return string(body)
 		}
 	}
-	return changed
+	return value
 }
 
-func redactTracePath(root map[string]any, key string, rest ...string) bool {
-	value, exists := root[key]
-	if !exists {
+func credentialField(key string, value any) bool {
+	switch strings.ToLower(key) {
+	case "authorization", "password", "app_secret", "client_secret", "encrypt_key", "verification_token",
+		"access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token",
+		"app_ticket", "code_verifier", "token", "preview_token":
+		return true
+	case "code":
+		_, isString := value.(string)
+		return isString
+	default:
 		return false
 	}
-	if len(rest) == 0 {
-		root[key] = "[redacted]"
-		return true
+}
+
+func captureTraceBody(body []byte, truncated bool) ([]byte, bool) {
+	if truncated || len(body) > TraceBodyLimit {
+		return nil, true
 	}
-	child, ok := value.(map[string]any)
-	return ok && redactTracePath(child, rest[0], rest[1:]...)
+	redacted := RedactTraceJSON(body)
+	if len(redacted) > TraceBodyLimit {
+		return nil, true
+	}
+	return redacted, false
 }
 
 // TraceEpoch identifies the current audit ring generation.

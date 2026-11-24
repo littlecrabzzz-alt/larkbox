@@ -111,6 +111,8 @@ func (c *Collection[T]) Delete(key string) bool {
 // Store owns the sandbox's in-memory state.
 type Store struct {
 	mu                  sync.RWMutex
+	resetGate           sync.RWMutex
+	resetEpoch          uint64
 	now                 func() time.Time
 	seed                config.Config
 	userSeedOrder       []User
@@ -346,6 +348,8 @@ func (s *Store) DeleteCard(id string) bool {
 
 // Seed replaces the store contents and installs the baseline for future resets.
 func (s *Store) Seed(cfg config.Config) {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seed = cloneSeed(cfg)
@@ -354,6 +358,8 @@ func (s *Store) Seed(cfg config.Config) {
 
 // ResetTo replaces runtime state while preserving the original reset baseline.
 func (s *Store) ResetTo(cfg config.Config) {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reset(cfg)
@@ -375,12 +381,15 @@ func cloneSeed(cfg config.Config) config.Config {
 
 // Reset atomically restores the seed baseline and clears runtime state.
 func (s *Store) Reset() {
+	s.resetGate.Lock()
+	defer s.resetGate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reset(s.seed)
 }
 
 func (s *Store) reset(seed config.Config) {
+	s.resetEpoch++
 	s.cardTemplates = make(map[templateKey]string)
 	s.latestTemplates = make(map[string]string)
 	s.registerTemplates(seed.CardTemplates)
@@ -418,20 +427,10 @@ func (s *Store) AppendTrace(trace Trace) {
 
 // AppendTraceAt records an exchange only if the ring has not been cleared since admission.
 func (s *Store) AppendTraceAt(epoch uint64, trace Trace) {
-	if trace.Direction == Outbound {
-		trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
-		trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
-		trace.RequestBody = RedactTraceJSON(trace.RequestBody)
-		trace.ResponseBody = RedactTraceJSON(trace.ResponseBody)
-	}
-	if len(trace.RequestBody) > TraceBodyLimit {
-		trace.RequestBody = trace.RequestBody[:TraceBodyLimit]
-		trace.RequestBodyTruncated = true
-	}
-	if len(trace.ResponseBody) > TraceBodyLimit {
-		trace.ResponseBody = trace.ResponseBody[:TraceBodyLimit]
-		trace.ResponseBodyTruncated = true
-	}
+	trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
+	trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
+	trace.RequestBody, trace.RequestBodyTruncated = captureTraceBody(trace.RequestBody, trace.RequestBodyTruncated)
+	trace.ResponseBody, trace.ResponseBodyTruncated = captureTraceBody(trace.ResponseBody, trace.ResponseBodyTruncated)
 	trace.Error = trace.Error[:min(len(trace.Error), TraceBodyLimit)]
 	trace = cloneTrace(trace)
 	s.mu.Lock()

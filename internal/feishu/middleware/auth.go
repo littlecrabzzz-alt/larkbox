@@ -45,24 +45,29 @@ func AuthFromContext(ctx context.Context) (Auth, bool) {
 // permissive mode, unauthenticated requests proceed without an auth identity.
 func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
-			switch {
-			case failure.Code == protocol.Success:
-				if expiresByFault(r, auth.AppID) {
-					_ = protocol.WriteError(w, expiryError(auth.Kind))
-					return
-				}
-				ctx := context.WithValue(r.Context(), authKey{}, auth)
-				SetTraceApp(r, auth.AppID)
-				r = r.WithContext(ctx)
-			case strict:
-				_ = protocol.WriteError(w, failure)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
+		return &bearerHandler{state: state, required: required, strict: strict, next: next}
 	}
+}
+
+type bearerHandler struct {
+	state    *store.Store
+	required RequiredToken
+	strict   bool
+	next     http.Handler
+}
+
+func (h *bearerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	auth, failure := authenticate(h.state, h.required, r.Header.Values("Authorization"))
+	switch {
+	case failure.Code == protocol.Success:
+		ctx := context.WithValue(r.Context(), authKey{}, auth)
+		SetTraceApp(r, auth.AppID)
+		r = r.WithContext(ctx)
+	case h.strict:
+		_ = protocol.WriteError(w, failure)
+		return
+	}
+	h.next.ServeHTTP(w, r)
 }
 
 func authenticate(state *store.Store, required RequiredToken, headers []string) (Auth, protocol.APIError) {
@@ -80,7 +85,9 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return Auth{}, credentialError(prefixKind, invalidCredential)
-	case errors.Is(err, store.ErrTokenExpired), errors.Is(err, store.ErrTokenRevoked):
+	case errors.Is(err, store.ErrTokenExpired):
+		return Auth{}, expiryError(token.Kind)
+	case errors.Is(err, store.ErrTokenRevoked):
 		return Auth{}, credentialError(token.Kind, inactiveCredential)
 	case err != nil:
 		return Auth{}, credentialError(token.Kind, invalidCredential)
@@ -163,4 +170,13 @@ func expiryError(kind store.TokenKind) protocol.APIError {
 		return protocol.NewError(protocol.ExpiredTenantToken, nil)
 	}
 	return credentialError(kind, inactiveCredential)
+}
+
+// WriteResetConflict reports that a write lost its reset generation.
+func WriteResetConflict(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, store.ErrReset) {
+		return false
+	}
+	_ = protocol.WriteError(w, protocol.APIError{Code: 99991401, Status: http.StatusConflict, Message: store.ErrReset.Error()})
+	return true
 }

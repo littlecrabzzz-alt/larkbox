@@ -45,9 +45,11 @@ func TestSandboxFaultResponsesAndAudit(t *testing.T) {
 			if _, err := engine.Add(tc.spec); err != nil {
 				t.Fatal(err)
 			}
-			h := Audit(state, SandboxFaults(engine, state, Bearer(state, tc.required, true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			mux := http.NewServeMux()
+			mux.Handle("GET /open-apis/test", Bearer(state, tc.required, true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
-			}))))
+			})))
+			h := Audit(state, SandboxFaults(engine, state, mux, mux))
 			call := func(token string) *httptest.ResponseRecorder {
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest(http.MethodGet, "/open-apis/test", nil)
@@ -76,6 +78,63 @@ func TestSandboxFaultResponsesAndAudit(t *testing.T) {
 			}
 			if w := call(tc.token); w.Code != http.StatusNoContent {
 				t.Fatalf("expired rule still applied: %d %s", w.Code, w.Body)
+			}
+		})
+	}
+}
+
+func TestInboundFaultSelectsOnlyFirstEligibleRule(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second fault.Kind
+		header        string
+		status        int
+		body          string
+		left          fault.Kind
+	}{
+		{"expiry before rate limit", fault.TokenExpiry, fault.RateLimit, "Bearer t-good", 400, "99991663", fault.RateLimit},
+		{"rate limit before expiry", fault.RateLimit, fault.TokenExpiry, "Bearer t-good", 429, "99991400", fault.TokenExpiry},
+		{"latency before expiry", fault.Latency, fault.TokenExpiry, "Bearer t-good", 204, "", fault.TokenExpiry},
+		{"missing bearer", fault.TokenExpiry, fault.RateLimit, "", 429, "99991400", fault.TokenExpiry},
+		{"unknown bearer", fault.TokenExpiry, fault.RateLimit, "Bearer t-unknown", 429, "99991400", fault.TokenExpiry},
+		{"wrong token kind", fault.TokenExpiry, fault.RateLimit, "Bearer a-wrong", 429, "99991400", fault.TokenExpiry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			state := store.New(nil, 0)
+			state.Seed(cfg)
+			for value, kind := range map[string]store.TokenKind{"t-good": store.TenantToken, "a-wrong": store.AppToken} {
+				err := state.PutToken(store.Token{Value: value, Kind: kind, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			engine := fault.New(nil)
+			for _, kind := range []fault.Kind{tc.first, tc.second} {
+				hits, delay := 1, 1
+				spec := fault.Spec{Kind: kind, RemainingHits: &hits}
+				if kind == fault.Latency {
+					spec.DelayMS = &delay
+				}
+				if _, err := engine.Add(spec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mux := http.NewServeMux()
+			path := "/open-apis/example"
+			mux.Handle("GET "+path, Bearer(state, Tenant, true)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})))
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			if tc.header != "" {
+				r.Header.Set("Authorization", tc.header)
+			}
+			w := httptest.NewRecorder()
+			SandboxFaults(engine, state, mux, mux).ServeHTTP(w, r)
+			rules := engine.List()
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.body) || len(rules) != 1 ||
+				rules[0].Kind != tc.left || *rules[0].RemainingHits != 1 {
+				t.Fatalf("HTTP %d %s, remaining rules %+v", w.Code, w.Body, rules)
 			}
 		})
 	}

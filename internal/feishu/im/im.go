@@ -134,6 +134,9 @@ func badField(w http.ResponseWriter, field, description string) {
 var noPermission = protocol.APIError{Code: 230027, Message: "Lack of necessary permissions.", Status: http.StatusBadRequest}
 
 func writeFailure(w http.ResponseWriter, err error, missing protocol.APIError) {
+	if middleware.WriteResetConflict(w, err) {
+		return
+	}
 	var apiErr protocol.APIError
 	switch {
 	case errors.As(err, &apiErr):

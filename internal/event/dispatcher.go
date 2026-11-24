@@ -307,8 +307,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, appID, kind string, payload a
 	return d.deliver(ctx, job)
 }
 
-func (d *Dispatcher) enqueue(appID, kind string, at time.Time, payload any) {
+func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.Time, payload any) {
 	d.mu.Lock()
+	if !d.state.Current(from) {
+		d.mu.Unlock()
+		return
+	}
 	ctx := context.WithValue(d.resetCtx, admissionKey{}, admission{d.resetCtx, d.state.TraceEpoch()})
 	job, err := d.newJob(ctx, appID, kind, at, payload)
 	if err != nil {

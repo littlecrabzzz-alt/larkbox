@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,7 +229,7 @@ func TestControlWebhookVerification(t *testing.T) {
 		`{"app_id":"cli_larkbox","webhook_url":%q}`, webhook.URL+"/mismatch"), 200)
 	assertContains(t, raw, `"verified":false`, `"status_code":200`, "challenge mismatch")
 	trace := call(t, srv, "GET", "/_sandbox/traces?channel=webhook&direction=outbound&event_type=url_verification", "", 200)
-	assertContains(t, trace, "url_verification", "[redacted]")
+	assertContains(t, trace, "url_verification", "[REDACTED]")
 	if bytes.Contains(trace, []byte(cfg.Apps[0].VerificationToken)) {
 		t.Fatal("trace exposed the verification token")
 	}
@@ -283,4 +284,207 @@ func TestAppScopedFaultOnCredentialEndpoint(t *testing.T) {
 	}
 	raw := call(t, srv, "POST", path, credentials, 200)
 	assertContains(t, raw, `"code":0`, `"tenant_access_token"`)
+}
+
+type pausedBody struct {
+	*strings.Reader
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *pausedBody) Read(p []byte) (int, error) {
+	if b.entered != nil {
+		close(b.entered)
+		b.entered = nil
+		<-b.release
+	}
+	return b.Reader.Read(p)
+}
+
+func TestResetFencesOpenAPIWritesAdmittedBeforeReset(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		auth             bool
+	}{
+		{"credential issuance", "/open-apis/auth/v3/tenant_access_token/internal", `{"app_id":"cli_larkbox","app_secret":"larkbox-local-secret"}`, false},
+		{"chat creation after Bearer", "/open-apis/im/v1/chats", `{"name":"stale chat"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			srv := sandboxServer(t, cfg)
+			if tc.auth {
+				err := srv.Store().PutToken(store.Token{Value: "t-pending", Kind: store.TenantToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, nil)
+			r.Body = io.NopCloser(&pausedBody{strings.NewReader(tc.body), entered, release})
+			if tc.auth {
+				r.Header.Set("Authorization", "Bearer t-pending")
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				w := httptest.NewRecorder()
+				srv.ServeHTTP(w, r)
+				done <- w
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("Open API request did not reach its body read")
+			}
+			call(t, srv, "POST", "/_sandbox/reset", "", 200)
+			close(release)
+			select {
+			case w := <-done:
+				if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "sandbox reset") {
+					t.Errorf("stale Open API write returned %d %s", w.Code, w.Body)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("stale request did not finish")
+			}
+			assertContains(t, call(t, srv, "POST", "/_sandbox/tokens/expire", `{"app_id":"cli_larkbox"}`, 200), `"expired":0`)
+			if len(srv.Store().Traces()) != 0 || len(srv.Store().Chats().List()) != len(cfg.Chats) {
+				t.Fatal("stale Open API request repopulated the state or trace ring")
+			}
+		})
+	}
+}
+
+func TestInvalidChatSettingsRejectEntireSeedAndReset(t *testing.T) {
+	srv := sandboxServer(t, config.Default())
+	call(t, srv, "POST", "/_sandbox/faults", `{"kind":"rate_limit"}`, 201)
+	before := call(t, srv, "GET", "/_sandbox/state", "", 200)
+	batch := `{"users":[{"open_id":"ou_valid","user_id":"valid","name":"Uncommitted"}],"chats":[{"chat_id":"oc_bad","chat_mode":"group","group_message_type":"unsupported","owner_id":"ou_valid","member_ids":["ou_valid"]}]}`
+	for path, body := range map[string]string{"seed": batch, "reset": `{"seed":` + batch + `}`} {
+		assertContains(t, call(t, srv, "POST", "/_sandbox/"+path, body, 400), "group_message_type")
+		after := call(t, srv, "GET", "/_sandbox/state", "", 200)
+		if !bytes.Equal(before, after) {
+			t.Fatalf("%s mutated state after rejecting a mixed seed batch", path)
+		}
+	}
+}
+
+func TestControlDirectTokenExpiryMatchesFaultCodes(t *testing.T) {
+	cfg := config.Default()
+	srv := sandboxServer(t, cfg)
+	for _, tc := range []struct {
+		kind                      store.TokenKind
+		value, method, path, code string
+	}{
+		{store.TenantToken, "t-tenant", "GET", "/open-apis/bot/v3/info", "99991663"},
+		{store.AppToken, "a-app", "POST", "/open-apis/authen/v1/oidc/access_token", "99991663"},
+		{store.UserToken, "u-user", "GET", "/open-apis/authen/v1/user_info", "99991668"},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			err := srv.Store().PutToken(store.Token{
+				Value: tc.value, Kind: tc.kind, AppID: cfg.Apps[0].AppID,
+				UserOpenID: cfg.Users[0].OpenID, ExpiresAt: time.Now().Add(time.Hour),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, body := range []string{`{"app_id":"cli_larkbox","token":null}`, `{"app_id":"cli_larkbox","tokens":null}`} {
+				call(t, srv, "POST", "/_sandbox/tokens/expire", body, 400)
+				if _, err := srv.Store().CheckToken(tc.value); err != nil {
+					t.Fatalf("null token selector changed credentials: %v", err)
+				}
+			}
+			assertContains(t, call(t, srv, "POST", "/_sandbox/tokens/expire",
+				fmt.Sprintf(`{"app_id":"cli_larkbox","token":%q}`, tc.value), 200), `"expired":1`)
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			r.Header.Set("Authorization", "Bearer "+tc.value)
+			srv.ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expired %s returned %d: %s", tc.kind, w.Code, w.Body)
+			}
+			assertContains(t, w.Body.Bytes(), `"code":`+tc.code)
+		})
+	}
+}
+
+func TestSandboxRejectsPreassignedMentionKeys(t *testing.T) {
+	wire := make(chan string, 4)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		wire <- string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+	cfg := config.Default()
+	cfg.Apps[0].WebhookURL, cfg.Apps[0].EncryptKey = webhook.URL, ""
+	srv := sandboxServer(t, cfg)
+	if err := srv.Store().CreateCard(store.Card{
+		ID: "1", AppID: cfg.Apps[0].AppID, Type: "card_json",
+		JSON: json.RawMessage(`{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"@_user_9"}]}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"chat_id":"oc_larkbox_group","sender_user_id":"alice","text":"@_user_9 hello","at_bot":true}`,
+		`{"chat_id":"oc_larkbox_group","sender_user_id":"alice","content":"{\"text\":\"\\u0040_user_9\"}"}`,
+		`{"chat_id":"oc_larkbox_group","sender_user_id":"alice","msg_type":"post","content":"{\"content\":[[{\"tag\":\"at\",\"user_id\":\"@_user_9\"}]]}"}`,
+		fmt.Sprintf(`{"chat_id":"oc_larkbox_group","sender_user_id":"alice","msg_type":"interactive","content":%q}`, `{"type":"card","data":{"card_id":"1"}}`),
+	} {
+		assertContains(t, call(t, srv, "POST", "/_sandbox/messages/send", body, 400), "preassigned")
+	}
+	if len(wire) != 0 || len(srv.Store().Messages().List()) != 0 {
+		t.Fatal("invalid mention was stored or dispatched")
+	}
+	call(t, srv, "POST", "/_sandbox/messages/send", `{"chat_id":"oc_larkbox_group","sender_user_id":"alice","text":"@bot hello","at_bot":true}`, 201)
+	sent := <-wire
+	message := srv.Store().Messages().List()[0]
+	if message.Content != `{"text":"@_user_1 hello"}` || len(message.Mentions) != 1 || message.Mentions[0].Key != "@_user_1" ||
+		!strings.Contains(sent, `"key":"@_user_1"`) || !strings.Contains(sent, `@_user_1 hello`) {
+		t.Fatalf("normalized mentions missing from store or wire: %+v / %s", message, sent)
+	}
+}
+
+func TestControlWebhookVerificationCapsEmbeddedTimeout(t *testing.T) {
+	cfg := config.Default()
+	cfg.Apps[0].EncryptKey = ""
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(4 * time.Second):
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer hook.Close()
+	cfg.Apps[0].WebhookURL = hook.URL
+	srv := server.New(cfg, server.WithEventOptions(event.Options{VerificationTimeout: 10 * time.Second}))
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+	start := time.Now()
+	result := call(t, srv, "POST", "/_sandbox/events/webhook/verify", `{"app_id":"cli_larkbox"}`, 200)
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("verification inherited the longer timeout: %s", result)
+	}
+	assertContains(t, result, `"verified":false`, `"status_code":0`, "timed out")
+}
+
+func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Apps[0].EncryptKey = ""
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"toast":{"type":"info","content":"Saved"},"card":{"type":"raw","data":{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"visible","content":"Updated card","preview_token":"private-card-value"}]}}}}`)
+	}))
+	defer hook.Close()
+	cfg.Apps[0].WebhookURL = hook.URL
+	srv := sandboxServer(t, cfg)
+	srv.Store().Messages().Put(store.Message{
+		ID: "om_click", AppID: cfg.Apps[0].AppID, ChatID: cfg.Chats[0].ChatID, MsgType: "interactive",
+		Content:      `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"Initial card"}]}}`,
+		SenderOpenID: cfg.Apps[0].BotOpenID, CreatedAt: time.Now(),
+	})
+	raw := call(t, srv, "POST", "/_sandbox/cards/action", `{"message_id":"om_click","operator_open_id":"ou_larkbox_alice","action":{"tag":"button"}}`, 200)
+	assertContains(t, raw, `"card_applied":true`, "Updated card", "Saved", `"preview_token":"[REDACTED]"`)
+	if bytes.Contains(raw, []byte("private-card-value")) {
+		t.Fatal("card diagnostics exposed a credential")
+	}
 }

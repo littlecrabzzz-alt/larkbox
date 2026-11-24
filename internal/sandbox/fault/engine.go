@@ -179,13 +179,13 @@ func (e *Engine) NeedsApp(input Match) bool {
 	return false
 }
 
-// Match applies the first eligible rule. Token expiry is matched separately
-// after Bearer authentication has confirmed a valid credential.
-func (e *Engine) Match(input Match, bearer bool) Effect {
+// Match applies the first eligible rule in creation order. Token expiry
+// requires a valid credential of a kind accepted by the route.
+func (e *Engine) Match(input Match, expiryEligible bool) Effect {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for i, rule := range e.rules {
-		if (rule.Kind == TokenExpiry) != bearer || !rule.matches(input) ||
+		if (rule.Kind == TokenExpiry && !expiryEligible) || !rule.matches(input) ||
 			(rule.Probability != nil && *rule.Probability < 1 && e.random() >= *rule.Probability) {
 			continue
 		}

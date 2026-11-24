@@ -67,20 +67,22 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 	if !actor.IsUser {
 		reaction.OperatorAppID = actor.AppID
 	}
-	_, err := h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
-		if m.MsgType == "system" {
-			return protocol.APIError{Code: 231017, Message: "This operation is not supported for this message type.", Status: http.StatusBadRequest}
-		}
-		for _, existing := range m.Reactions {
-			if existing.OperatorAppID == reaction.OperatorAppID && existing.OperatorOpenID == actor.OpenID && existing.EmojiType == emoji {
-				reaction = existing
-				return nil
+	_, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
+		return h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
+			if m.MsgType == "system" {
+				return protocol.APIError{Code: 231017, Message: "This operation is not supported for this message type.", Status: http.StatusBadRequest}
 			}
-		}
-		m.ReactionOrder++
-		reaction.Order, reaction.CreatedAt = m.ReactionOrder, h.state.Now()
-		m.Reactions = append(m.Reactions, reaction)
-		return nil
+			for _, existing := range m.Reactions {
+				if existing.OperatorAppID == reaction.OperatorAppID && existing.OperatorOpenID == actor.OpenID && existing.EmojiType == emoji {
+					reaction = existing
+					return nil
+				}
+			}
+			m.ReactionOrder++
+			reaction.Order, reaction.CreatedAt = m.ReactionOrder, h.state.Now()
+			m.Reactions = append(m.Reactions, reaction)
+			return nil
+		})
 	})
 	if err != nil {
 		reactionError(w, err)
@@ -93,18 +95,20 @@ func (h handler) deleteReaction(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
 	id := r.PathValue("reaction_id")
 	var reaction store.Reaction
-	_, err := h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
-		index := slices.IndexFunc(m.Reactions, func(candidate store.Reaction) bool { return candidate.ID == id })
-		if index < 0 {
-			return reactionMissing
-		}
-		reaction = m.Reactions[index]
-		if reaction.OperatorOpenID != actor.OpenID || (reaction.OperatorAppID == "") != actor.IsUser ||
-			(!actor.IsUser && reaction.OperatorAppID != actor.AppID) {
-			return noPermission
-		}
-		m.Reactions = slices.Delete(m.Reactions, index, index+1)
-		return nil
+	_, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
+		return h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
+			index := slices.IndexFunc(m.Reactions, func(candidate store.Reaction) bool { return candidate.ID == id })
+			if index < 0 {
+				return reactionMissing
+			}
+			reaction = m.Reactions[index]
+			if reaction.OperatorOpenID != actor.OpenID || (reaction.OperatorAppID == "") != actor.IsUser ||
+				(!actor.IsUser && reaction.OperatorAppID != actor.AppID) {
+				return noPermission
+			}
+			m.Reactions = slices.Delete(m.Reactions, index, index+1)
+			return nil
+		})
 	})
 	if err != nil {
 		reactionError(w, err)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/cardkit"
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -15,13 +16,17 @@ func PrepareSandboxMessage(state *store.Store, kind, encoded string, mentionIDs,
 	if err != nil {
 		return store.NewMessage{}, err
 	}
+	normalized, _ := json.Marshal(content)
+	if protocol.HasAssignedMention(normalized) {
+		return store.NewMessage{}, errors.New("content must not contain preassigned @_user_N mention keys")
+	}
 	if err := insertSandboxMentions(kind, content, mentionIDs, botIDs); err != nil {
 		return store.NewMessage{}, err
 	}
 	if len(mentionIDs)+len(botIDs) > 0 {
-		raw, _ := json.Marshal(content)
-		encoded = string(raw)
+		normalized, _ = json.Marshal(content)
 	}
+	encoded = string(normalized)
 	h := handler{state: state}
 	encoded, mentions := h.normalizeMentions(kind, encoded, content)
 	return store.NewMessage{MsgType: kind, Content: encoded, Mentions: mentions, CardID: interactiveCardID(kind, content)}, nil
@@ -88,6 +93,9 @@ func insertSandboxMentions(kind string, content map[string]any, mentionIDs, botI
 // InspectMessageData returns the IM representation and both card read modes.
 func InspectMessageData(state *store.Store, m store.Message) map[string]any {
 	h := handler{state: state}
+	if m.MsgType == "interactive" {
+		m.Content = string(store.RedactTraceJSON([]byte(m.Content)))
+	}
 	rendered := cardForRead(m, m.AppID, false)
 	data := h.messageData(rendered, "open_id", false)
 	data["content"] = rendered.Content

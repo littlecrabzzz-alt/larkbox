@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -34,10 +33,17 @@ func Fault(hook FaultHook, next http.Handler) http.Handler {
 }
 
 // SandboxFaults applies runtime fault rules to the Open API route group.
-func SandboxFaults(engine *fault.Engine, state *store.Store, next http.Handler) http.Handler {
+func SandboxFaults(engine *fault.Engine, state *store.Store, routes *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		input := inboundMatch(r)
-		if value, ok := bearerToken(r.Header.Values("Authorization")); ok {
+		input := fault.Match{Channel: "inbound", Method: r.Method, PathPrefix: r.URL.EscapedPath()}
+		headers := r.Header.Values("Authorization")
+		handler, _ := routes.Handler(r)
+		var auth Auth
+		if bearer, ok := handler.(*bearerHandler); ok {
+			auth, _ = authenticate(bearer.state, bearer.required, headers)
+		}
+		input.AppID = auth.AppID
+		if value, ok := bearerToken(headers); input.AppID == "" && ok {
 			token, _ := state.CheckToken(value)
 			input.AppID = token.AppID
 			SetTraceApp(r, input.AppID)
@@ -48,7 +54,12 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, next http.Handler) 
 				input.AppID = ""
 			}
 		}
-		effect := engine.Match(input, false)
+		effect, err := store.Commit(r.Context(), state, func() (fault.Effect, error) {
+			return engine.Match(input, auth.Kind != ""), nil
+		})
+		if WriteResetConflict(w, err) {
+			return
+		}
 		if effect.Kind != "" && input.AppID != "" {
 			SetTraceApp(r, input.AppID)
 		}
@@ -58,6 +69,9 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, next http.Handler) 
 				_ = protocol.WriteError(w, protocol.APIError{Status: http.StatusServiceUnavailable, Code: 99991401, Message: "request canceled"})
 				return
 			}
+		case fault.TokenExpiry:
+			_ = protocol.WriteError(w, expiryError(auth.Kind))
+			return
 		case fault.RateLimit:
 			w.Header().Set("Retry-After", strconv.Itoa(effect.RetryAfter))
 			_ = protocol.WriteError(w, protocol.NewError(protocol.RateLimited, nil))
@@ -66,24 +80,8 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, next http.Handler) 
 			_ = protocol.WriteError(w, protocol.APIError{Status: effect.StatusCode, Code: effect.ErrorCode, Message: effect.ErrorMsg})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sandboxFaultKey{}, engine)))
+		next.ServeHTTP(w, r)
 	})
-}
-
-type sandboxFaultKey struct{}
-
-func inboundMatch(r *http.Request) fault.Match {
-	return fault.Match{Channel: "inbound", Method: r.Method, PathPrefix: r.URL.EscapedPath()}
-}
-
-func expiresByFault(r *http.Request, appID string) bool {
-	engine, ok := r.Context().Value(sandboxFaultKey{}).(*fault.Engine)
-	if !ok {
-		return false
-	}
-	input := inboundMatch(r)
-	input.AppID = appID
-	return engine.Match(input, true).Kind == fault.TokenExpiry
 }
 
 type bufferedRequestBody struct {

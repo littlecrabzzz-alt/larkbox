@@ -192,6 +192,23 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.createIMMessage(actor, req)
+}
+
+// CreateSandboxMessage commits a user message and captures its bot recipients
+// before any concurrent membership change can alter the result.
+func (s *Store) CreateSandboxMessage(actor IMActor, req NewMessage) (Message, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actor.Sandbox = true
+	message, err := s.createIMMessage(actor, req)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	return message, s.chatBotIDs(s.chats.items[message.ChatID]), nil
+}
+
+func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) {
 	if actor.Sandbox {
 		user, ok := s.users.items[actor.OpenID]
 		if !ok || user.Inactive {
@@ -263,10 +280,14 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	}
 
 	if req.CardID != "" {
-		if _, err := s.liveCard(actor.AppID, req.CardID, s.Now()); errors.Is(err, ErrNotFound) {
+		card, err := s.liveCard(actor.AppID, req.CardID, s.Now())
+		if errors.Is(err, ErrNotFound) {
 			return Message{}, ErrMessageCardNotFound
 		} else if err != nil {
 			return Message{}, err
+		}
+		if actor.Sandbox && protocol.HasAssignedMention([]byte(cardContent(card))) {
+			return Message{}, errors.New("card content must not contain preassigned @_user_N mention keys")
 		}
 	}
 
@@ -391,15 +412,21 @@ func (s *Store) RecallIMMessage(actor IMActor, id string, authorize func(*Messag
 	if err != nil {
 		return Message{}, nil, err
 	}
-	members := s.chats.items[m.ChatID].MemberIDs
+	return m, s.chatBotIDs(s.chats.items[m.ChatID]), nil
+}
+
+func (s *Store) chatBotIDs(chat Chat) []string {
 	var recipients []string
 	for _, app := range s.apps.items {
-		if app.BotOpenID != "" && slices.Contains(members, app.BotOpenID) {
+		if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != app.AppID {
+			continue
+		}
+		if app.BotOpenID != "" && slices.Contains(chat.MemberIDs, app.BotOpenID) {
 			recipients = append(recipients, app.AppID)
 		}
 	}
 	slices.Sort(recipients)
-	return m, recipients, nil
+	return recipients
 }
 
 func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, Chat) error) (Message, error) {

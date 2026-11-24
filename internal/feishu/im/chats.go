@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -93,7 +93,7 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 			badField(w, "chat_mode", "A p2p chat requires two participants and has no managers.")
 			return
 		}
-		direct, err := h.state.EnsureP2PChat(actor, chat)
+		direct, err := store.Commit(r.Context(), h.state, func() (store.Chat, error) { return h.state.EnsureP2PChat(actor, chat) })
 		if err != nil {
 			writeChatFailure(w, err)
 			return
@@ -103,7 +103,12 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 		if manager == "true" && app.BotOpenID != "" && owner != app.BotOpenID {
 			chat.BotManagers = []string{app.AppID}
 		}
-		h.state.Chats().Put(chat)
+		if err := h.state.Mutate(r.Context(), func() error {
+			h.state.Chats().Put(chat)
+			return nil
+		}); middleware.WriteResetConflict(w, err) {
+			return
+		}
 		for _, id := range members {
 			if bot, found := bots[id]; found {
 				h.emitMembership(r, chat.ChatID, bot, true)
@@ -116,57 +121,19 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (req *chatRequest) validate(w http.ResponseWriter) bool {
-	req.Mode = cmp.Or(req.Mode, "group")
-	req.ChatType = cmp.Or(req.ChatType, "private")
+	chat := config.Chat{ChatMode: req.Mode, Name: req.Name, ChatSettings: req.ChatSettings}
+	if field, description := chat.NormalizeSettings(); field != "" {
+		badField(w, field, description)
+		return false
+	}
+	req.Mode, req.Name, req.ChatSettings = chat.ChatMode, chat.Name, chat.ChatSettings
 	switch {
-	case !slices.Contains([]string{"group", "p2p"}, req.Mode):
-		badField(w, "chat_mode", "Expected group or p2p.")
-		return false
-	case !slices.Contains([]string{"private", "public"}, req.ChatType):
-		badField(w, "chat_type", "Expected private or public.")
-		return false
-	case utf8.RuneCountInString(req.Name) > 60 || (req.ChatType == "public" && utf8.RuneCountInString(strings.TrimSpace(req.Name)) < 2):
-		badField(w, "name", "Expected at most 60 characters and at least two for a public group.")
-		return false
-	case utf8.RuneCountInString(req.Description) > 100:
-		badField(w, "description", "Expected at most 100 characters.")
-		return false
 	case len(req.UserIDs) > 50:
 		badField(w, "user_id_list", "Expected at most 50 users.")
 		return false
 	case len(req.BotIDs) > 5:
 		badField(w, "bot_id_list", "Expected at most five bots.")
 		return false
-	}
-	for _, option := range []struct {
-		field   string
-		value   *string
-		allowed []string
-	}{
-		{"group_message_type", &req.GroupMessageType, []string{"chat", "thread"}},
-		{"join_message_visibility", &req.JoinMessageVisibility, []string{"all_members", "only_owner", "not_anyone"}},
-		{"leave_message_visibility", &req.LeaveMessageVisibility, []string{"all_members", "only_owner", "not_anyone"}},
-		{"membership_approval", &req.MembershipApproval, []string{"no_approval_required", "approval_required"}},
-		{"urgent_setting", &req.UrgentSetting, []string{"all_members", "only_owner"}},
-		{"video_conference_setting", &req.VideoConferenceSetting, []string{"all_members", "only_owner"}},
-		{"edit_permission", &req.EditPermission, []string{"all_members", "only_owner"}},
-		{"pin_manage_setting", &req.PinManageSetting, []string{"all_members", "only_owner"}},
-		{"hide_member_count_setting", &req.HideMemberCountSetting, []string{"all_members", "only_owner"}},
-	} {
-		*option.value = cmp.Or(*option.value, option.allowed[0])
-		if !slices.Contains(option.allowed, *option.value) {
-			badField(w, option.field, "Expected one of: "+strings.Join(option.allowed, ", ")+".")
-			return false
-		}
-	}
-	if req.Mode == "group" {
-		req.Name = cmp.Or(strings.TrimSpace(req.Name), "Group Chat")
-	}
-	for lang := range req.I18nNames {
-		if !slices.Contains([]string{"zh_cn", "en_us", "ja_jp"}, lang) {
-			badField(w, "i18n_names", "Expected zh_cn, en_us, or ja_jp.")
-			return false
-		}
 	}
 	return true
 }
@@ -435,25 +402,27 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	var selectionFailure protocol.APIError
 	var changedBots []store.App
 	actor, id := caller(r), r.PathValue("chat_id")
-	err := h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
-		if chat.ChatMode == "p2p" {
-			return invalidChatParameter
-		}
-		if !add && !managesChat(actor, *chat) {
-			for _, member := range req.IDs {
-				if target := ids[member].openID; target != "" && target != actor.OpenID && slices.Contains(chat.MemberIDs, target) {
-					return protocol.APIError{Code: 232014, Status: http.StatusBadRequest, Message: "The token used in the request does NOT have the permissions necessary to complete the request."}
+	err := h.state.Mutate(r.Context(), func() error {
+		return h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
+			if chat.ChatMode == "p2p" {
+				return invalidChatParameter
+			}
+			if !add && !managesChat(actor, *chat) {
+				for _, member := range req.IDs {
+					if target := ids[member].openID; target != "" && target != actor.OpenID && slices.Contains(chat.MemberIDs, target) {
+						return protocol.APIError{Code: 232014, Status: http.StatusBadRequest, Message: "The token used in the request does NOT have the permissions necessary to complete the request."}
+					}
 				}
 			}
-		}
-		result, changedBots = applyMembers(chat, req.IDs, ids, bots, actor, add)
-		if add {
-			selectionFailure = result.failure(mode)
-			if selectionFailure.Code != protocol.Success {
-				return selectionFailure
+			result, changedBots = applyMembers(chat, req.IDs, ids, bots, actor, add)
+			if add {
+				selectionFailure = result.failure(mode)
+				if selectionFailure.Code != protocol.Success {
+					return selectionFailure
+				}
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 
 	data := fields{"invalid_id_list": emptySlice(result.invalid)}

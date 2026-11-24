@@ -53,7 +53,7 @@ func (c *control) send(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.RLock()
 	ctx := c.events.Scope(r.Context())
-	message, apps, err := c.saveMessage(input)
+	message, recipients, err := c.saveMessage(input)
 	var view data
 	if err == nil {
 		view = im.InspectMessageData(c.state, message)
@@ -64,27 +64,27 @@ func (c *control) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deliveries := make([]data, len(apps))
+	deliveries := make([]data, len(recipients))
 	// Independent bots can handle the same message concurrently.
-	done := make(chan struct{}, len(apps))
-	for i, app := range apps {
+	done := make(chan struct{}, len(recipients))
+	for i, appID := range recipients {
 		go func() {
-			result, err := c.events.DispatchMessageReceive(ctx, app.AppID, message)
+			result, err := c.events.DispatchMessageReceive(ctx, appID, message)
 			outcomes := make([]data, 0, len(result.Deliveries))
 			for _, delivery := range result.Deliveries {
 				outcomes = append(outcomes, deliveryData(delivery))
 			}
-			deliveries[i] = data{"app_id": app.AppID, "event_id": result.EventID, "deliveries": outcomes, "error": errorText(err)}
+			deliveries[i] = data{"app_id": appID, "event_id": result.EventID, "deliveries": outcomes, "error": errorText(err)}
 			done <- struct{}{}
 		}()
 	}
-	for range apps {
+	for range recipients {
 		<-done
 	}
 	reply(w, http.StatusCreated, data{"message": view, "deliveries": deliveries})
 }
 
-func (c *control) saveMessage(input sendInput) (store.Message, []store.App, error) {
+func (c *control) saveMessage(input sendInput) (store.Message, []string, error) {
 	user, ok := c.state.OAuthUser(input.SenderOpenID, input.SenderUserID)
 	if !ok {
 		return store.Message{}, nil, store.ErrNotFound
@@ -130,8 +130,7 @@ func (c *control) saveMessage(input sendInput) (store.Message, []store.App, erro
 		return store.Message{}, nil, err
 	}
 	req.ChatID, req.Peer, req.ParentID, req.ReplyInThread = chat.ChatID, peer, input.ParentID, input.ReplyInThread
-	message, err := c.state.CreateIMMessage(actor, req)
-	return message, apps, err
+	return c.state.CreateSandboxMessage(actor, req)
 }
 
 func (c *control) messageTarget(input sendInput, actor store.IMActor) (store.Chat, []store.App, string, error) {
@@ -200,8 +199,20 @@ func (c *control) cardAction(w http.ResponseWriter, r *http.Request) {
 	}
 	delivery := deliveryData(result.Delivery)
 	delivery["event_id"] = result.EventID
+	var toast *callback.Toast
+	if result.Toast != nil {
+		redacted := *result.Toast
+		redacted.Content = store.RedactDiagnosticText(redacted.Content)
+		if len(redacted.I18nContent) > 0 {
+			redacted.I18nContent = make(map[string]string, len(result.Toast.I18nContent))
+			for lang, text := range result.Toast.I18nContent {
+				redacted.I18nContent[lang] = store.RedactDiagnosticText(text)
+			}
+		}
+		toast = &redacted
+	}
 	reply(w, http.StatusOK, data{
-		"toast": result.Toast, "card_applied": result.Updated, "card_error": errorText(err),
+		"toast": toast, "card_applied": result.Updated, "card_error": errorText(err),
 		"message": message, "delivery": delivery,
 	})
 }
@@ -235,8 +246,10 @@ func (c *control) verifyWebhook(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "webhook_url must be an absolute HTTP(S) URL with a valid host")
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
 	start := time.Now()
-	result := c.events.VerifyWebhookAt(r.Context(), input.AppID, override)
+	result := c.events.VerifyWebhookAt(ctx, input.AppID, override)
 	reply(w, http.StatusOK, data{
 		"verified": result.Err == nil, "status_code": result.Status, "error": errorText(result.Err),
 		"latency_ms": time.Since(start).Milliseconds(),

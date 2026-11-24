@@ -540,7 +540,7 @@ func TestOfficialSDKWebhookTimeoutAndRetry(t *testing.T) {
 		}
 		switch trace.Attempt {
 		case 1:
-			if trace.Status != 500 || string(trace.ResponseBody) != "retry\n" || trace.Error == "" {
+			if trace.Status != 500 || len(trace.ResponseBody) != 0 || trace.Error == "" {
 				t.Fatalf("invalid 500 delivery trace: %+v", trace)
 			}
 		case 2:

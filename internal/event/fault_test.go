@@ -112,3 +112,20 @@ func TestDispatcherResetCancelsOutboundLatency(t *testing.T) {
 		t.Fatal("reset did not cancel outbound latency")
 	}
 }
+
+func TestResetIgnoresNotificationsFromOldOpenAPIRequests(t *testing.T) {
+	cfg := config.Default()
+	cfg.Apps[0].WebhookURL = "http://127.0.0.1:1"
+	d := testDispatcher(t, cfg, Options{}, nil)
+	state := d.state
+	before, _ := state.Admit(t.Context())
+	d.Reset(state.Reset)
+	d.EnqueueMessageRecalled(before, cfg.Apps[0].AppID, cfg.Chats[0].ChatID, "om_previous", "message_owner", state.Now())
+	d.EnqueueBotMembership(before, cfg.Apps[0].AppID, cfg.Chats[0].ChatID, cfg.Users[0].OpenID, "", state.Now(), true)
+	d.mu.Lock()
+	pending := d.pending
+	d.mu.Unlock()
+	if pending != 0 || len(state.Traces()) != 0 {
+		t.Fatalf("pre-reset notifications produced %d jobs or %d traces", pending, len(state.Traces()))
+	}
+}

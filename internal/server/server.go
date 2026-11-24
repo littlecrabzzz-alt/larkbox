@@ -73,6 +73,7 @@ func WithEventOptions(opts event.Options) Option {
 }
 
 type eventEmitter struct {
+	state      *store.Store
 	dispatcher *event.Dispatcher
 	next       im.EventEmitter
 }
@@ -80,11 +81,11 @@ type eventEmitter struct {
 func (e eventEmitter) Emit(ctx context.Context, notification im.Event) {
 	switch notification.Type {
 	case "im.message.recalled_v1":
-		e.dispatcher.EnqueueMessageRecalled(notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
+		e.dispatcher.EnqueueMessageRecalled(ctx, notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
 	case "im.chat.member.bot.added_v1", "im.chat.member.bot.deleted_v1":
-		e.dispatcher.EnqueueBotMembership(notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
+		e.dispatcher.EnqueueBotMembership(ctx, notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
 	}
-	if e.next != nil {
+	if e.next != nil && e.state.Current(ctx) {
 		e.next.Emit(ctx, notification)
 	}
 }
@@ -105,7 +106,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	auth.RegisterRoutes(feishu, cfg, state)
 	bot.RegisterRoutes(feishu, state)
 	cardkit.RegisterRoutes(feishu, state)
-	im.RegisterRoutes(feishu, state, eventEmitter{dispatcher: events, next: settings.emitter})
+	im.RegisterRoutes(feishu, state, eventEmitter{state: state, dispatcher: events, next: settings.emitter})
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}
@@ -123,7 +124,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, openAPIHandler(feishu)))))
+	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu)))))
 	control := sandbox.New(cfg, Version, state, events, faults)
 	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pattern := extensions.Handler(r); pattern != "" {

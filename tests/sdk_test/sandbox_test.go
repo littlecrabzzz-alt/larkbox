@@ -140,7 +140,7 @@ func TestOfficialSDKSandbox(t *testing.T) {
 
 	traces := request(http.MethodGet, "traces", nil, http.StatusOK)
 	for _, want := range []string{`"direction":"inbound"`, `"direction":"outbound"`, `"channel":"websocket"`,
-		eventID, callbackID, "/open-apis/im/v1/messages/" + messageID + "/reply", "[REDACTED]", "[redacted]"} {
+		eventID, callbackID, "/open-apis/im/v1/messages/" + messageID + "/reply", "[REDACTED]"} {
 		if !bytes.Contains(traces, []byte(want)) {
 			t.Fatalf("missing %q from traces: %s", want, traces)
 		}

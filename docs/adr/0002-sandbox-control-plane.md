@@ -31,8 +31,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /ws/sessions` | Returns `{"ws_sessions":[...]}` with session, app, device and service IDs, and connection time. |
 | `POST /messages/send` | Persists a virtual user's message and returns HTTP 201 with `{message, deliveries}`. Each member bot has a delivery result containing its app ID, event ID, and per-channel status. |
 | `POST /cards/action` | Requires `message_id`, `operator_open_id`, and `action.tag`. Accepts SDK action fields `value`, `name`, `option`, `options`, `input_value`, `form_value`, `checked`, and `timezone`, plus optional top-level `host` and `delivery_type`. Returns `{toast, card_applied, card_error, message, delivery}` after callback processing. |
-| `POST /events/webhook/verify` | Requires `app_id`. Uses the registered URL or a one-call HTTP(S) `webhook_url` override. Returns `{verified, status_code, error, latency_ms}` for the handshake. A transport failure has status code 0 inside the result. |
-| `POST /tokens/expire` | Requires `app_id`. Accepts `token` or a nonempty `tokens` list to expire individual credentials, or expires all credentials for that app when both fields are omitted. Returns `{"expired":n}` without echoing credentials. |
+| `POST /events/webhook/verify` | Requires `app_id`. Uses the registered URL or a one-call HTTP(S) `webhook_url` override. Caps the handshake at one second, including on embedded servers with a longer timeout. Returns `{verified, status_code, error, latency_ms}`. A transport failure has status code 0 inside the result. |
+| `POST /tokens/expire` | Requires `app_id`. Accepts `token` or a nonempty `tokens` list to expire individual credentials, or expires all credentials for that app when both fields are omitted. Explicit `null` selectors return 400. Returns `{"expired":n}` without echoing credentials. |
 
 A user message requires one sender selector (`sender_open_id` or
 `sender_user_id`), one destination (`chat_id` or `app_id` for a direct
@@ -40,9 +40,11 @@ message), and either JSON-encoded string `content` or plain `text`. The default
 `msg_type` is `text`. The `mentions` array accepts member open IDs and
 `"@bot"`. The `at_bot` flag (alias `mention_bot`) also mentions the member
 bots. Text mentions use the Feishu `@_user_N` placeholders and corresponding
-event metadata. For replies, `parent_id` must refer to a message in the
-destination and `reply_in_thread` requires a parent. Eligible bots receive
-`im.message.receive_v1` through the same dispatcher used by Open API events.
+event metadata. Caller-supplied mention placeholders return 400. For replies,
+`parent_id` must refer to a message in the destination and `reply_in_thread`
+requires a parent. The message commit captures the eligible member bots.
+Those apps receive `im.message.receive_v1` through the same dispatcher used
+by Open API events.
 Card actions use the dispatcher’s synchronous callback deadline and channel
 selection. A failed delivery is represented in the result for the saved
 message, callback, or verification. Request validation uses HTTP 400,
@@ -57,7 +59,8 @@ and `channel` (`webhook` or `websocket`). The `limit` selects the latest
 1–256 matching exchanges before ordering. Each trace includes timing,
 Feishu code when available, HTTP or acknowledgment status, redacted bodies
 and headers, truncation flags, and delivery attempt and duplicate indices
-where applicable. Bodies are JSON values or text. `DELETE /traces` clears the
+where applicable. Bodies contain canonical, redacted JSON. Opaque, malformed,
+and truncated bodies are omitted. `DELETE /traces` clears the
 shared ring in both directions.
 
 `POST /faults` creates a rule and returns HTTP 201 with its `fault_id`.
@@ -73,7 +76,9 @@ rule in creation order whose probability trial succeeds wins. The
 `remaining_hits` means unlimited. A positive hit count is decremented
 atomically and the rule disappears when the last hit is spent. Incoming
 requests derive their app from a stored Bearer token or the app selector
-of a credential or OAuth endpoint.
+of a credential or OAuth endpoint. Inbound selection happens once per
+request. Expiry is eligible only for a valid Bearer token of a kind
+accepted by the matched route.
 
 | Kind | Scope | Parameters and behavior |
 |---|---|---|
@@ -85,9 +90,13 @@ of a credential or OAuth endpoint.
 
 Outbound rules are evaluated per event and transport before its first
 attempt. Retries retain the event ID and use the existing retry budget.
-URL verification is a separate handshake. Reset cancels pending
-deliveries and invalidates the previous audit generation so those
-exchanges cannot repopulate the cleared ring.
+A card action makes one transport attempt by default. An explicit
+`duplicate_event` rule adds copies with distinct `duplicate_index` values
+and starts each copy at attempt 1. URL verification is a separate
+handshake. Reset fences Open API commits by admission generation. A
+stale commit returns HTTP 409. Reset also cancels pending deliveries,
+drops stale notifications, and prevents old exchanges from repopulating
+the audit ring.
 
 ### Local boundary and data exposure
 

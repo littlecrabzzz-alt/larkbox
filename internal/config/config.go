@@ -334,8 +334,11 @@ func (cfg Config) ValidateSeeds() error {
 		return err
 	}
 	for _, chat := range cfg.Chats {
-		if chat.ChatMode != "p2p" && chat.ChatMode != "group" {
+		if chat.ChatMode == "" {
 			return fmt.Errorf("chat %q must have chat_mode p2p or group", chat.ChatID)
+		}
+		if field, description := chat.NormalizeSettings(); field != "" {
+			return fmt.Errorf("chat %q has invalid %s (%s)", chat.ChatID, field, description)
 		}
 	}
 	return cfg.validateRedirectURIs()
