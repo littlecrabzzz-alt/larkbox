@@ -72,3 +72,20 @@ func TestTraceScrubbingCanonicalizesNestedCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactorPreservesCollidingObjectEntries(t *testing.T) {
+	redactor := NewRedactor("first-secret", "second-secret")
+	input := []byte(`{"nested":{"prefix-first-secret":"First result first-secret","prefix-second-secret":"Second result second-secret","prefix-[REDACTED]":"already safe","prefix-[REDACTED]#2":"also safe"}}`)
+	const want = `{"nested":{"prefix-[REDACTED]":"already safe","prefix-[REDACTED]#2":"also safe","prefix-[REDACTED]#3":"First result [REDACTED]","prefix-[REDACTED]#4":"Second result [REDACTED]"}}`
+	for range 10 {
+		if got := string(redactor.JSON(input)); got != want {
+			t.Fatalf("redacted collision yielded %s, want %s", got, want)
+		}
+	}
+	localized := map[string]string{"first-secret": "first", "second-secret": "second"}
+	scrubbed := redactor.TextMap(localized)
+	if len(scrubbed) != 2 || scrubbed["[REDACTED]"] != "first" || scrubbed["[REDACTED]#2"] != "second" ||
+		localized["first-secret"] != "first" || localized["second-secret"] != "second" {
+		t.Fatalf("localization collision changed the source or lost entries: %v", scrubbed)
+	}
+}

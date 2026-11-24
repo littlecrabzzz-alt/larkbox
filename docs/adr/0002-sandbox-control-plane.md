@@ -78,9 +78,11 @@ atomically and the rule disappears when the last hit is spent. Incoming
 requests derive their app from a stored Bearer token or the app selector
 of a credential or OAuth endpoint. Inbound selection happens once per
 request. Expiry is eligible only for a valid Bearer token of a kind
-accepted by the matched route. Extension routes pass outer wrappers such as
-`http.TimeoutHandler` to `middleware.Bearer` so the registered handler retains
-its authentication policy.
+accepted by the matched route. When an outer wrapper hides the route's
+Bearer policy and expiry could win, the Bearer check makes the single fault
+selection before the application handler runs. Deferred rules are spent
+only when a Bearer check runs. Public credential endpoints make their
+selection directly.
 
 | Kind | Scope | Parameters and behavior |
 |---|---|---|
@@ -115,7 +117,9 @@ credentials. App secrets, encryption keys, verification tokens, OAuth
 credentials, and WebSocket tickets are excluded from control reads.
 Audit data uses a header allowlist, credential-field redaction, and bounded
 body capture. Callback diagnostics also redact known credentials reflected
-in display text or response strings. Card projections preserve standard
+in display text, localized toast fields, and response object keys. If
+scrubbed object keys collide, a numbered suffix keeps each value visible.
+Card projections preserve standard
 icon identifiers such as `icon.token: "info_outlined"` and still scrub known
 credential values. Application-provided messages and card values remain
 visible to the local operator. Keep real credentials out of fixture data,

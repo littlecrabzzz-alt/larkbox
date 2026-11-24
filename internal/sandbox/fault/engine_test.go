@@ -83,3 +83,28 @@ func TestLatencyCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestDeferredMatchSpendsNoRandomSamplesBeforeBearer(t *testing.T) {
+	samples := 0
+	engine := New(func() float64 {
+		samples++
+		return 0.75
+	})
+	one, probability := 1, 0.5
+	if _, err := engine.Add(Spec{Kind: RateLimit, Probability: &probability, RemainingHits: &one}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Add(Spec{Kind: TokenExpiry, RemainingHits: &one}); err != nil {
+		t.Fatal(err)
+	}
+	input := Match{Channel: "inbound"}
+	effect, deferred := engine.MatchBeforeBearer(input)
+	if !deferred || effect.Kind != "" || samples != 0 || len(engine.List()) != 2 {
+		t.Fatal("preflight sampled or spent a fault before Bearer validation")
+	}
+	effect = engine.Match(input, true)
+	rules := engine.List()
+	if samples != 1 || effect.Kind != TokenExpiry || len(rules) != 1 || rules[0].Kind != RateLimit || *rules[0].RemainingHits != 1 {
+		t.Fatal("deferred selection did not spend exactly one matching rule")
+	}
+}

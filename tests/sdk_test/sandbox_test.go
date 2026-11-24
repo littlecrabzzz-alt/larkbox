@@ -57,7 +57,7 @@ func sandboxDecode[T any](t *testing.T, raw []byte) T {
 }
 
 func TestOfficialSDKSandbox(t *testing.T) {
-	const clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"result","content":%q,"icon":{"tag":"standard_icon","token":"info_outlined"}}]}}`
+	const clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"result","content":%q,"icon":{"tag":"standard_icon","token":"info_outlined"},"data":{%q:"dynamic label"}}]}}`
 	cfg := sdkTestConfig()
 	cfg.Apps[0].TenantKey = "sdk-sandbox"
 	app, chat, user := cfg.Apps[0], cfg.Chats[0], cfg.Users[0]
@@ -90,8 +90,14 @@ func TestOfficialSDKSandbox(t *testing.T) {
 			actions <- incoming
 			echo := incoming.Event.Token + " / " + incoming.EventV2Base.Header.Token
 			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{Type: "success", Content: "Confirmed " + echo},
-				Card:  &callback.Card{Type: "raw", Data: json.RawMessage(fmt.Sprintf(clickedCard, "Clicked via sandbox "+echo))},
+				Toast: &callback.Toast{
+					Type: "success-" + incoming.Event.Token, Content: "Confirmed " + echo,
+					I18nContent: map[string]string{
+						"locale-" + incoming.Event.Token:              "Alternate " + echo,
+						"locale-" + incoming.EventV2Base.Header.Token: "Translated " + echo,
+					},
+				},
+				Card: &callback.Card{Type: "raw", Data: json.RawMessage(fmt.Sprintf(clickedCard, "Clicked via sandbox "+echo, "field-"+incoming.Event.Token))},
 			}, nil
 		})
 	startSDKCardSocket(t, web, app.AppID, app.AppSecret, handler)
@@ -160,6 +166,17 @@ func TestOfficialSDKSandbox(t *testing.T) {
 		!bytes.Contains(ack, []byte("Confirmed [REDACTED] / [REDACTED]")) ||
 		!bytes.Contains(ack, []byte("Clicked via sandbox [REDACTED] / [REDACTED]")) || !bytes.Contains(ack, []byte(`"token":"info_outlined"`)) {
 		t.Fatal("WS ACK trace contains unsanitized callback text")
+	}
+
+	for _, projection := range [][]byte{click, ack} {
+		for _, want := range []string{
+			`"type":"success-[REDACTED]"`, `"locale-[REDACTED]":`, `"locale-[REDACTED]#2":`,
+			"Alternate [REDACTED] / [REDACTED]", "Translated [REDACTED] / [REDACTED]", `"field-[REDACTED]":"dynamic label"`,
+		} {
+			if !bytes.Contains(projection, []byte(want)) {
+				t.Fatalf("WS diagnostic projection omitted %q after redaction", want)
+			}
+		}
 	}
 
 	traces := request(http.MethodGet, "traces", nil, http.StatusOK)

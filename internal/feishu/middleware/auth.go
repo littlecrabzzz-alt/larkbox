@@ -43,12 +43,15 @@ func AuthFromContext(ctx context.Context) (Auth, bool) {
 
 // Bearer authenticates a route with the specified Feishu token kind. In
 // permissive mode, unauthenticated requests proceed without an auth identity.
-// Supply wrappers here to retain the route's Bearer policy for fault selection.
+// Wrappers supplied here let fault selection use the policy before route entry.
 func Bearer(state *store.Store, required RequiredToken, strict bool, wrappers ...func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		route := bearerRoute{state: state, required: required}
 		route.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
+			if applyDeferredFault(w, r, auth) {
+				return
+			}
 			switch {
 			case failure.Code == protocol.Success:
 				ctx := context.WithValue(r.Context(), authKey{}, auth)

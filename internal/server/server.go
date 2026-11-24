@@ -47,8 +47,7 @@ type options struct {
 	eventOptions event.Options
 }
 
-// WithFeishuRoutes registers routes under /open-apis/. Supply wrappers to
-// middleware.Bearer to preserve the route policy for fault selection.
+// WithFeishuRoutes registers routes under /open-apis/.
 func WithFeishuRoutes(register RegisterRoutes) Option {
 	return func(opts *options) { opts.feishu = append(opts.feishu, register) }
 }

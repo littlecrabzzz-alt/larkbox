@@ -380,21 +380,22 @@ func TestWrappedBearerExtensionFaultPrecedence(t *testing.T) {
 	const path = "/open-apis/extension"
 	cfg := config.Default()
 	srv := New(cfg, WithFeishuRoutes(func(mux *http.ServeMux, _ config.Config, state *store.Store) {
-		wrap := func(next http.Handler) http.Handler {
-			return http.TimeoutHandler(next, time.Second, "extension timed out")
-		}
-		mux.Handle("GET "+path, middleware.Bearer(state, middleware.Tenant, true, wrap)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireBearer := middleware.Bearer(state, middleware.Tenant, true)
+		mux.Handle("GET "+path, http.TimeoutHandler(requireBearer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if _, ok := middleware.AuthFromContext(r.Context()); !ok {
 				t.Error("wrapped handler did not receive the Bearer identity")
 			}
 			w.WriteHeader(http.StatusNoContent)
-		})))
+		})), time.Second, "extension timed out"))
 	}))
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	if err := srv.Store().PutToken(store.Token{Value: "t-extension", Kind: store.TenantToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := srv.Store().PutTokens(
+		store.Token{Value: "t-extension", Kind: store.TenantToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)},
+		store.Token{Value: "a-extension", Kind: store.AppToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)},
+	); err != nil {
 		t.Fatal(err)
 	}
-	call := func(method, path, body, bearer string, status int, want string) {
+	call := func(method, path, body, bearer string, status int, want string) string {
 		t.Helper()
 		r := httptest.NewRequestWithContext(t.Context(), method, path, strings.NewReader(body))
 		if bearer != "" {
@@ -405,10 +406,28 @@ func TestWrappedBearerExtensionFaultPrecedence(t *testing.T) {
 		if w.Code != status || !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("%s %s returned %d %s, want %d %q", method, path, w.Code, w.Body, status, want)
 		}
+		return w.Body.String()
 	}
 	call("POST", "/_sandbox/faults", `{"kind":"token_expiry","remaining_hits":1}`, "", 201, "fault_id")
 	call("POST", "/_sandbox/faults", `{"kind":"rate_limit","remaining_hits":1}`, "", 201, "fault_id")
 	call("GET", path, "", "t-extension", 400, "99991663")
+	if rules := call("GET", "/_sandbox/faults", "", "", 200, `"remaining_hits":1`); strings.Contains(rules, "token_expiry") || !strings.Contains(rules, "rate_limit") {
+		t.Fatalf("wrapped request must spend only expiry: %s", rules)
+	}
 	call("GET", path, "", "t-extension", 429, "99991400")
 	call("GET", path, "", "t-extension", 204, "")
+
+	call("POST", "/_sandbox/faults", `{"kind":"rate_limit","remaining_hits":1}`, "", 201, "fault_id")
+	call("POST", "/_sandbox/faults", `{"kind":"token_expiry","remaining_hits":1}`, "", 201, "fault_id")
+	call("GET", path, "", "t-extension", 429, "99991400")
+	call("GET", path, "", "a-extension", 400, "99991664")
+	call("GET", path, "", "t-extension", 400, "99991663")
+
+	// Public credential endpoints select the public fault before going to
+	// the handler even when the client sends a valid stored Bearer token.
+	call("POST", "/_sandbox/faults", `{"kind":"token_expiry","remaining_hits":1}`, "", 201, "fault_id")
+	call("POST", "/_sandbox/faults", `{"kind":"rate_limit","remaining_hits":1}`, "", 201, "fault_id")
+	call("POST", "/open-apis/auth/v3/tenant_access_token/internal", "", "t-extension", 429, "99991400")
+	call("GET", path, "", "t-extension", 400, "99991663")
+	call("GET", "/_sandbox/faults", "", "", 200, `"faults":[]`)
 }

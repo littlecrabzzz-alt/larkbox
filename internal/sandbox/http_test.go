@@ -484,8 +484,10 @@ func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
 		reflected <- incoming.Event.Token
 		echo := incoming.Event.Token + " / " + incoming.Header.Token
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"toast":{"type":"info","content":%q,"i18n":{"en_us":%q}},"card":{"type":"raw","data":{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"visible","content":%q,"preview_token":"private-card-value"}]}}}}`,
-			"Saved "+echo, "Localized "+echo, "Updated card "+echo)
+		_, _ = fmt.Fprintf(w, `{"toast":{"type":%q,"content":%q,"i18n":{"en_us":%q,%q:%q,%q:%q}},"card":{"type":"raw","data":{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"visible","content":%q,"preview_token":"private-card-value","data":{%q:"dynamic label"}}]}}}}`,
+			"info-"+incoming.Event.Token, "Saved "+echo, "Localized "+echo,
+			"locale-"+incoming.Event.Token, "Alternate "+echo, "locale-"+incoming.Header.Token, "Translated "+echo,
+			"Updated card "+echo, "field-"+incoming.Event.Token)
 	}))
 	defer hook.Close()
 	cfg.Apps[0].WebhookURL = hook.URL
@@ -503,7 +505,11 @@ func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
 	assertContains(t, raw, `"card_applied":true`, "Updated card [REDACTED] / [REDACTED]", "Saved [REDACTED] / [REDACTED]",
 		"Localized [REDACTED] / [REDACTED]", `"preview_token":"[REDACTED]"`)
 	traces := call(t, srv, "GET", "/_sandbox/traces?channel=webhook&event_type=card.action.trigger", "", 200)
-	assertContains(t, traces, "Saved [REDACTED] / [REDACTED]", "Updated card [REDACTED] / [REDACTED]")
+	for _, projection := range [][]byte{raw, traces} {
+		assertContains(t, projection, "Saved [REDACTED] / [REDACTED]", "Updated card [REDACTED] / [REDACTED]",
+			`"type":"info-[REDACTED]"`, `"locale-[REDACTED]":`, `"locale-[REDACTED]#2":`,
+			"Alternate [REDACTED] / [REDACTED]", "Translated [REDACTED] / [REDACTED]", `"field-[REDACTED]":"dynamic label"`)
+	}
 	history := call(t, srv, "GET", "/_sandbox/chats/"+cfg.Chats[0].ChatID+"/messages", "", 200)
 	assertContains(t, history, "Updated card [REDACTED] / [REDACTED]")
 	for _, projection := range [][]byte{raw, traces, history} {

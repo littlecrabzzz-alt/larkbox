@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -117,6 +118,44 @@ func (r Redactor) Text(text string) string {
 	return r.scrub(text, "", 0).(string)
 }
 
+// TextMap scrubs localized diagnostic keys and text without modifying the source.
+func (r Redactor) TextMap(entries map[string]string) map[string]string {
+	if entries == nil {
+		return nil
+	}
+	return redactObject(r, entries, func(_ string, text string) string { return r.Text(text) })
+}
+
+func redactObject[T any](r Redactor, entries map[string]T, scrub func(string, T) T) map[string]T {
+	out := make(map[string]T, len(entries))
+	var reflected []string
+	for key, value := range entries {
+		if r.Replace(key) == key {
+			out[key] = scrub(key, value)
+		} else {
+			reflected = append(reflected, key)
+		}
+	}
+	// Keep unmodified keys stable. For collisions, assign suffixes in
+	// original key order so every diagnostic value stays accessible.
+	slices.Sort(reflected)
+	next := make(map[string]int)
+	for _, key := range reflected {
+		base := r.Replace(key)
+		safe := base
+		for {
+			if _, exists := out[safe]; !exists {
+				break
+			}
+			n := max(2, next[base])
+			next[base] = n + 1
+			safe = base + "#" + strconv.Itoa(n)
+		}
+		out[safe] = scrub(key, entries[key])
+	}
+	return out
+}
+
 func structuredJSON(body []byte) (any, bool) {
 	if len(body) == 0 || (body[0] != '{' && body[0] != '[') || !json.Valid(body) {
 		return nil, false
@@ -135,15 +174,14 @@ func (r Redactor) scrub(value any, parent string, embeddedDepth int) any {
 	case map[string]any:
 		tag, _ := value["tag"].(string)
 		icon := tag == "standard_icon" || parent == "icon" && tag == ""
-		for key, child := range value {
+		return redactObject(r, value, func(key string, child any) any {
 			_, iconToken := child.(string)
 			iconToken = iconToken && icon && key == "token"
 			if !iconToken && credentialField(key, child) {
-				value[key] = redactedValue
-			} else {
-				value[key] = r.scrub(child, key, embeddedDepth)
+				return redactedValue
 			}
-		}
+			return r.scrub(child, key, embeddedDepth)
+		})
 	case []any:
 		for i, child := range value {
 			value[i] = r.scrub(child, "", embeddedDepth)

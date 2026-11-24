@@ -204,13 +204,9 @@ func (c *control) cardAction(w http.ResponseWriter, r *http.Request) {
 	var toast *callback.Toast
 	if result.Toast != nil {
 		redacted := *result.Toast
+		redacted.Type = result.Redactor.Text(redacted.Type)
 		redacted.Content = result.Redactor.Text(redacted.Content)
-		if len(redacted.I18nContent) > 0 {
-			redacted.I18nContent = make(map[string]string, len(result.Toast.I18nContent))
-			for lang, text := range result.Toast.I18nContent {
-				redacted.I18nContent[lang] = result.Redactor.Text(text)
-			}
-		}
+		redacted.I18nContent = result.Redactor.TextMap(redacted.I18nContent)
 		toast = &redacted
 	}
 	reply(w, http.StatusOK, data{
