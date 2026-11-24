@@ -1,0 +1,44 @@
+# Binaries and build outputs
+/bin/
+/dist/
+/larkbox
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace and coverage
+go.work
+go.work.sum
+coverage.txt
+coverage.html
+
+# Local environment and live test secrets
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
+
+# Local databases / runtime artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Web UI build artifacts and dependencies
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

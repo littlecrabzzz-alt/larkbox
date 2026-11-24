@@ -1,0 +1,68 @@
+name: Bug Report / Protocol Discrepancy
+description: Report a bug or a behavior mismatch between larkbox and real Feishu / Lark Open Platform
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve `larkbox`! Please sanitize any real tokens, secrets, or tenant IDs before submitting.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - Auth / OAuth / Token Validation
+        - IM / Bot / Media Open API
+        - CardKit / Interactive Cards
+        - HTTP Webhook (Schema 2.0 / Encryption / Signature)
+        - WebSocket Long Connection
+        - Control Plane (/_sandbox/*)
+        - Web UI / Inspector
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what went wrong or how larkbox differs from real Feishu.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Real Feishu Behavior (Expected)
+      description: Status code, Feishu error code, headers, or sanitized JSON payload observed on real Feishu Open Platform.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: larkbox Behavior (Actual)
+      description: Status code, error code, or payload returned by larkbox.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal curl command, SDK snippet, or test case to reproduce the issue.
+      placeholder: |
+        1. Start larkbox with ...
+        2. Call POST /open-apis/...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: larkbox version, Go/SDK version, and OS.
+      placeholder: "larkbox v0.1.0, oapi-sdk-go v3.x, macOS arm64"

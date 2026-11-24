@@ -1,0 +1,39 @@
+name: Feature / API Request
+description: Request support for a Feishu / Lark Open API endpoint, event type, or sandbox capability
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Feishu Open API Endpoint
+        - Event / Callback Type
+        - WebSocket / Webhook Protocol
+        - Control Plane / Fault Injection
+        - Web UI / CLI
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: doc_url
+    attributes:
+      label: Feishu Official Documentation URL
+      description: Link to the official Feishu / Lark Open Platform documentation for this API or event (if applicable).
+      placeholder: "https://open.feishu.cn/document/..."
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: Describe the testing or development scenario this capability unlocks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Proposed Behavior & Edge Cases
+      description: Mention any strict validation rules, error codes, or sample payloads (sanitized) that should be matched.
