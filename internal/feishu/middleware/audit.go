@@ -53,9 +53,11 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 		trace.Status = response.status
 		trace.ResponseHeaders = response.headers
 		trace.ResponseBodyTruncated = response.truncated
-		trace.ResponseBody = auditBody(response.body.Bytes(), response.headers.Get("Content-Type"), response.truncated)
+		if response.headers.Get("Content-Disposition") == "" {
+			trace.ResponseBody = auditBody(response.body.Bytes(), response.headers.Get("Content-Type"), response.truncated)
+		}
 		trace.Code = response.code
-		if trace.Code == nil && !response.truncated {
+		if trace.Code == nil && !response.truncated && response.headers.Get("Content-Disposition") == "" {
 			var envelope struct {
 				Code *int `json:"code"`
 			}
@@ -131,7 +133,9 @@ func (w *auditWriter) WriteHeader(status int) {
 func (w *auditWriter) Write(body []byte) (int, error) {
 	w.commit(http.StatusOK)
 	n, err := w.ResponseWriter.Write(body)
-	w.record(body[:n])
+	if w.headers.Get("Content-Disposition") == "" {
+		w.record(body[:n])
+	}
 	return n, err
 }
 
@@ -164,7 +168,7 @@ func (w *auditWriter) FlushError() error {
 func auditHeaders(headers http.Header) http.Header {
 	result := make(http.Header)
 	for _, name := range []string{
-		"Accept", "Content-Type", "Content-Length", "Content-Encoding", "User-Agent",
+		"Accept", "Content-Type", "Content-Length", "Content-Disposition", "Content-Encoding", "User-Agent",
 		"Retry-After", "X-Ogw-Ratelimit-Limit", "X-Ogw-Ratelimit-Reset",
 		"X-Request-Id", "X-Tt-Logid", "X-Lark-Request-Timestamp",
 	} {

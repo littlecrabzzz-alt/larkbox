@@ -16,6 +16,8 @@ const (
 	UnionID      IDPrefix = "on_"      // User union ID.
 	ChatID       IDPrefix = "oc_"      // Chat ID.
 	MessageID    IDPrefix = "om_"      // IM message ID.
+	ThreadID     IDPrefix = "omt_"     // IM thread ID.
+	ReactionID   IDPrefix = "omr_"     // IM reaction ID.
 	ImageKey     IDPrefix = "img_v3_"  // Image key.
 	FileKey      IDPrefix = "file_v3_" // File key.
 	TenantToken  IDPrefix = "t-"       // Tenant access token.

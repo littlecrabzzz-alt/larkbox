@@ -39,6 +39,7 @@ type Collection[T any] struct {
 	items map[string]T
 	key   func(T) string
 	clone func(T) T
+	index func(previous, current T)
 }
 
 func newCollection[T any](mu *sync.RWMutex, key func(T) string, clone func(T) T) Collection[T] {
@@ -56,7 +57,16 @@ func (c *Collection[T]) copy(value T) T {
 func (c *Collection[T]) Put(value T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.items[c.key(value)] = c.copy(value)
+	c.put(value)
+}
+
+// put requires the collection lock.
+func (c *Collection[T]) put(value T) {
+	key := c.key(value)
+	if c.index != nil {
+		c.index(c.items[key], value)
+	}
+	c.items[key] = c.copy(value)
 }
 
 // Get returns an independent snapshot of the value at key.
@@ -82,25 +92,33 @@ func (c *Collection[T]) List() []T {
 func (c *Collection[T]) Delete(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, ok := c.items[key]
+	previous, ok := c.items[key]
+	if ok && c.index != nil {
+		var zero T
+		c.index(previous, zero)
+	}
 	delete(c.items, key)
 	return ok
 }
 
 // Store owns the sandbox's in-memory state.
 type Store struct {
-	mu       sync.RWMutex
-	now      func() time.Time
-	seed     config.Config
-	apps     Collection[App]
-	users    Collection[User]
-	chats    Collection[Chat]
-	messages Collection[Message]
-	tokens   map[string]Token
-	media    Collection[Media]
-	cards    Collection[Card]
-	traces   []Trace
-	tracePos int
+	mu             sync.RWMutex
+	now            func() time.Time
+	seed           config.Config
+	apps           Collection[App]
+	users          Collection[User]
+	chats          Collection[Chat]
+	messages       Collection[Message]
+	messageUUIDs   map[messageRequest]string
+	chatMessages   map[string]map[string]struct{}
+	threadMessages map[string]map[string]struct{}
+	messageOrder   uint64
+	tokens         map[string]Token
+	media          Collection[Media]
+	cards          Collection[Card]
+	traces         []Trace
+	tracePos       int
 }
 
 // New creates an empty store. A nil clock uses time.Now. A supplied clock
@@ -114,10 +132,14 @@ func New(now func() time.Time, traceCapacity int) *Store {
 		traceCapacity = defaultTraceCapacity
 	}
 	s := &Store{now: now, tokens: make(map[string]Token), traces: make([]Trace, 0, traceCapacity)}
+	s.messageUUIDs = make(map[messageRequest]string)
+	s.chatMessages = make(map[string]map[string]struct{})
+	s.threadMessages = make(map[string]map[string]struct{})
 	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, cloneApp)
 	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, nil)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
+	s.messages.index = s.indexMessage
 	s.media = newCollection(&s.mu, func(m Media) string { return m.Key }, cloneMedia)
 	s.cards = newCollection(&s.mu, func(c Card) string { return c.ID }, cloneCard)
 	return s
@@ -318,6 +340,10 @@ func (s *Store) reset() {
 	clear(s.users.items)
 	clear(s.chats.items)
 	clear(s.messages.items)
+	clear(s.messageUUIDs)
+	clear(s.chatMessages)
+	clear(s.threadMessages)
+	s.messageOrder = 0
 	clear(s.tokens)
 	clear(s.media.items)
 	clear(s.cards.items)
@@ -390,6 +416,15 @@ func cloneApp(app App) App {
 
 func cloneChat(chat Chat) Chat {
 	chat.MemberIDs = slices.Clone(chat.MemberIDs)
+	chat.BotManagers = slices.Clone(chat.BotManagers)
+	chat.I18nNames = maps.Clone(chat.I18nNames)
+	chat.Labels = slices.Clone(chat.Labels)
+	chat.ToolkitIDs = slices.Clone(chat.ToolkitIDs)
+	chat.ChatTags = slices.Clone(chat.ChatTags)
+	if chat.RestrictedModeSetting != nil {
+		settings := *chat.RestrictedModeSetting
+		chat.RestrictedModeSetting = &settings
+	}
 	return chat
 }
 

@@ -57,6 +57,7 @@ type Mention struct {
 type Reaction struct {
 	ID             string
 	OperatorOpenID string
+	OperatorAppID  string
 	EmojiType      string
 	CreatedAt      time.Time
 }
@@ -67,6 +68,8 @@ type Message struct {
 	AppID        string
 	ChatID       string
 	SenderOpenID string
+	SenderIsUser bool
+	Order        uint64
 	RootID       string
 	ParentID     string
 	ThreadID     string
@@ -97,6 +100,9 @@ type Media struct {
 	Bytes       []byte
 	ContentType string
 	Filename    string
+	Kind        string
+	UploadType  string
+	Duration    int64
 }
 
 // TraceDirection identifies how an audited exchange originated.

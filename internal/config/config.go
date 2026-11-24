@@ -22,6 +22,7 @@ type App struct {
 	AppID             string   `json:"app_id" yaml:"app_id"`
 	AppSecret         string   `json:"app_secret" yaml:"app_secret"`
 	BotOpenID         string   `json:"bot_open_id" yaml:"bot_open_id"`
+	BotAvatarURL      string   `json:"bot_avatar_url,omitempty" yaml:"bot_avatar_url,omitempty"`
 	BotName           string   `json:"bot_name" yaml:"bot_name"`
 	VerificationToken string   `json:"verification_token" yaml:"verification_token"`
 	EncryptKey        string   `json:"encrypt_key" yaml:"encrypt_key"`
@@ -49,11 +50,45 @@ type User struct {
 
 // Chat describes a virtual p2p or group chat.
 type Chat struct {
-	ChatID    string   `json:"chat_id" yaml:"chat_id"`
-	ChatMode  string   `json:"chat_mode" yaml:"chat_mode"`
-	Name      string   `json:"name" yaml:"name"`
-	OwnerID   string   `json:"owner_id" yaml:"owner_id"`
-	MemberIDs []string `json:"member_ids" yaml:"member_ids"`
+	ChatID       string   `json:"chat_id" yaml:"chat_id"`
+	ChatMode     string   `json:"chat_mode" yaml:"chat_mode"`
+	Name         string   `json:"name" yaml:"name"`
+	OwnerID      string   `json:"owner_id" yaml:"owner_id"`
+	MemberIDs    []string `json:"member_ids" yaml:"member_ids"`
+	ChatSettings `yaml:",inline"`
+	AppID        string    `json:"-" yaml:"-"`
+	BotManagers  []string  `json:"-" yaml:"-"`
+	CreatedAt    time.Time `json:"-" yaml:"-"`
+}
+
+// ChatSettings are settings shared by seeded and API-created chats.
+type ChatSettings struct {
+	Avatar                 string                 `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	Description            string                 `json:"description,omitempty" yaml:"description,omitempty"`
+	I18nNames              map[string]string      `json:"i18n_names,omitempty" yaml:"i18n_names,omitempty"`
+	ChatType               string                 `json:"chat_type,omitempty" yaml:"chat_type,omitempty"`
+	External               bool                   `json:"external,omitempty" yaml:"external,omitempty"`
+	GroupMessageType       string                 `json:"group_message_type,omitempty" yaml:"group_message_type,omitempty"`
+	JoinMessageVisibility  string                 `json:"join_message_visibility,omitempty" yaml:"join_message_visibility,omitempty"`
+	LeaveMessageVisibility string                 `json:"leave_message_visibility,omitempty" yaml:"leave_message_visibility,omitempty"`
+	MembershipApproval     string                 `json:"membership_approval,omitempty" yaml:"membership_approval,omitempty"`
+	UrgentSetting          string                 `json:"urgent_setting,omitempty" yaml:"urgent_setting,omitempty"`
+	VideoConferenceSetting string                 `json:"video_conference_setting,omitempty" yaml:"video_conference_setting,omitempty"`
+	EditPermission         string                 `json:"edit_permission,omitempty" yaml:"edit_permission,omitempty"`
+	PinManageSetting       string                 `json:"pin_manage_setting,omitempty" yaml:"pin_manage_setting,omitempty"`
+	HideMemberCountSetting string                 `json:"hide_member_count_setting,omitempty" yaml:"hide_member_count_setting,omitempty"`
+	Labels                 []string               `json:"labels,omitempty" yaml:"labels,omitempty"`
+	ToolkitIDs             []string               `json:"toolkit_ids,omitempty" yaml:"toolkit_ids,omitempty"`
+	ChatTags               []string               `json:"chat_tags,omitempty" yaml:"chat_tags,omitempty"`
+	RestrictedModeSetting  *RestrictedModeSetting `json:"restricted_mode_setting,omitempty" yaml:"restricted_mode_setting,omitempty"`
+}
+
+// RestrictedModeSetting controls sharing, screenshots, and downloads in a chat.
+type RestrictedModeSetting struct {
+	Status                         bool   `json:"status" yaml:"status"`
+	ScreenshotHasPermissionSetting string `json:"screenshot_has_permission_setting,omitempty" yaml:"screenshot_has_permission_setting,omitempty"`
+	DownloadHasPermissionSetting   string `json:"download_has_permission_setting,omitempty" yaml:"download_has_permission_setting,omitempty"`
+	MessageHasPermissionSetting    string `json:"message_has_permission_setting,omitempty" yaml:"message_has_permission_setting,omitempty"`
 }
 
 // TokenTTLs configures the lifetime, in seconds, of each credential kind.
