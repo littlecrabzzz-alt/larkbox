@@ -38,11 +38,12 @@ var (
 // Collection provides snapshot CRUD by primary key. Values returned to callers
 // are independent of the backing store.
 type Collection[T any] struct {
-	mu    *sync.RWMutex
-	items map[string]T
-	key   func(T) string
-	clone func(T) T
-	index func(previous, current T)
+	mu      *sync.RWMutex
+	items   map[string]T
+	key     func(T) string
+	clone   func(T) T
+	index   func(previous, current T)
+	prepare func(*T)
 }
 
 func newCollection[T any](mu *sync.RWMutex, key func(T) string, clone func(T) T) Collection[T] {
@@ -66,6 +67,9 @@ func (c *Collection[T]) Put(value T) {
 // put requires the collection lock.
 func (c *Collection[T]) put(value T) {
 	key := c.key(value)
+	if c.prepare != nil {
+		c.prepare(&value)
+	}
 	if c.index != nil {
 		c.index(c.items[key], value)
 	}
@@ -117,11 +121,13 @@ type Store struct {
 	chatMessages        map[string]map[string]struct{}
 	threadMessages      map[string]map[string]struct{}
 	messageOrder        uint64
+	revision            uint64
 	nextDedupCleanup    time.Time
 	tokens              map[string]Token
 	media               Collection[Media]
 	cards               Collection[Card]
-	cardUUIDs           map[cardRequest]time.Time
+	cardUUIDs           map[cardRequest]cardReplay
+	cardTemplates       map[templateKey]string
 	nextCardUUIDCleanup time.Time
 	traces              []Trace
 	tracePos            int
@@ -146,9 +152,17 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
 	s.messages.index = s.indexMessage
+	s.messages.prepare = func(m *Message) {
+		s.revision++
+		m.Revision = s.revision
+	}
 	s.media = newCollection(&s.mu, func(m Media) string { return m.Key }, cloneMedia)
-	s.cardUUIDs = make(map[cardRequest]time.Time)
+	s.cardUUIDs = make(map[cardRequest]cardReplay)
 	s.cards = newCollection(&s.mu, func(c Card) string { return c.ID }, cloneCard)
+	s.cards.prepare = func(card *Card) {
+		s.revision++
+		card.Revision = s.revision
+	}
 	return s
 }
 
@@ -291,7 +305,11 @@ func (s *Store) CreateCard(card Card) error {
 	if _, ok := s.cards.items[card.ID]; ok {
 		return ErrAlreadyExists
 	}
-	s.cards.items[card.ID] = cloneCard(card)
+	card.CreatedAt = s.Now()
+	if card.StreamingMode {
+		card.StreamingSince = card.CreatedAt
+	}
+	s.cards.put(card)
 	return nil
 }
 
@@ -303,14 +321,23 @@ func (s *Store) Cards() []Card { return s.cards.List() }
 
 // UpdateCard atomically replaces a card if its sequence has strictly advanced.
 func (s *Store) UpdateCard(card Card) error {
-	return s.ChangeCard(card.AppID, card.ID, "", "", card.Sequence, func(current *Card) error {
+	return s.ChangeCard(card.AppID, card.ID, CardMutation{Sequence: card.Sequence}, func(current *Card, _ time.Time) error {
 		*current = card
 		return nil
 	})
 }
 
 // DeleteCard removes the card and reports whether it existed.
-func (s *Store) DeleteCard(id string) bool { return s.cards.Delete(id) }
+func (s *Store) DeleteCard(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.cards.items[id]; !exists {
+		return false
+	}
+	delete(s.cards.items, id)
+	maps.DeleteFunc(s.cardUUIDs, func(key cardRequest, _ cardReplay) bool { return key.cardID == id })
+	return true
+}
 
 // Seed replaces the store contents and installs the baseline for future resets.
 func (s *Store) Seed(cfg config.Config) {
@@ -321,6 +348,19 @@ func (s *Store) Seed(cfg config.Config) {
 		s.seed.Apps[i] = cloneApp(app)
 	}
 	s.seed.Users = slices.Clone(cfg.Users)
+	s.cardTemplates = make(map[templateKey]string, len(cfg.CardTemplates))
+	for _, template := range cfg.CardTemplates {
+		s.cardTemplates[templateKey{template.TemplateID, template.VersionName}] = template.Data
+	}
+	// An unversioned entry takes priority. Otherwise the last registered
+	// version supplies the default when the caller omits a version.
+	for i := len(cfg.CardTemplates) - 1; i >= 0; i-- {
+		template := cfg.CardTemplates[i]
+		key := templateKey{id: template.TemplateID}
+		if _, exists := s.cardTemplates[key]; !exists {
+			s.cardTemplates[key] = template.Data
+		}
+	}
 	s.seed.Chats = make([]Chat, len(cfg.Chats))
 	for i, chat := range cfg.Chats {
 		s.seed.Chats[i] = cloneChat(chat)
@@ -369,6 +409,8 @@ func (s *Store) AppendTrace(trace Trace) {
 	if trace.Direction == Outbound {
 		trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
 		trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
+		trace.RequestBody = RedactTraceJSON(trace.RequestBody)
+		trace.ResponseBody = RedactTraceJSON(trace.ResponseBody)
 	}
 	if len(trace.RequestBody) > TraceBodyLimit {
 		trace.RequestBody = trace.RequestBody[:TraceBodyLimit]
@@ -462,6 +504,7 @@ func cloneMessage(message Message) Message {
 
 func cloneCard(card Card) Card {
 	card.JSON = slices.Clone(card.JSON)
+	card.TemplateData = slices.Clone(card.TemplateData)
 	card.Elements = maps.Clone(card.Elements)
 	return card
 }

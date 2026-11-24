@@ -38,3 +38,17 @@ func TestOutboundTraceHeaderLimits(t *testing.T) {
 		t.Fatalf("captured %d bytes or retained a sensitive header", total)
 	}
 }
+
+func TestOutboundAuditRedactsBeforeTruncation(t *testing.T) {
+	s := New(nil, 0)
+	wire := []byte(`{"header":{"token":"private-verification"},"event":{"token":"private-action","context":{"preview_token":"private-preview"}},"token":"private-root","z":"` +
+		strings.Repeat("x", TraceBodyLimit) + `"}`)
+	response := []byte(`{"token":"private-incomplete","remaining":`)
+	s.AppendTrace(Trace{Direction: Outbound, RequestBody: wire, ResponseBody: response})
+	trace := s.Traces()[0]
+	if !trace.RequestBodyTruncated || len(trace.RequestBody) != TraceBodyLimit ||
+		strings.Contains(string(trace.RequestBody), "private-") || strings.Count(string(trace.RequestBody), `"[redacted]"`) != 4 ||
+		strings.Contains(string(trace.ResponseBody), "private-") || strings.Count(string(wire), "private-") != 4 {
+		t.Fatal("audit redaction changed wire data or retained a private field")
+	}
+}

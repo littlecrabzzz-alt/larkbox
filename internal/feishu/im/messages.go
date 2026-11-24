@@ -369,13 +369,17 @@ func (h handler) getMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	original, ok := originalCardContent(w, r)
+	if !ok {
+		return
+	}
 	m, err := h.state.IMMessage(caller(r), r.PathValue("message_id"))
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
 	}
 	_, explicitIDType := r.URL.Query()["user_id_type"]
-	success(w, fields{"items": []fields{h.messageData(m, kind, explicitIDType)}})
+	success(w, fields{"items": []fields{h.messageData(cardForRead(m, caller(r).AppID, original), kind, explicitIDType)}})
 }
 
 func sentBy(actor store.IMActor, m *store.Message) bool {
@@ -411,7 +415,10 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 			return protocol.NewError(protocol.IMInvalidParameter, nil)
 		}
 		if patch {
-			if (m.CardID == "" && !cardkit.SharedMessageCard(decodeContentObject(m.Content))) || !cardkit.SharedMessageCard(content) {
+			if m.CardID != "" {
+				return protocol.APIError{Code: protocol.IMInvalidParameter, Message: "Use CardKit APIs to update a message card entity.", Status: http.StatusBadRequest}
+			}
+			if !cardkit.SharedMessageCard(decodeContentObject(m.Content)) || !cardkit.SharedMessageCard(content) {
 				return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
 			}
 		}
@@ -472,6 +479,10 @@ func (h handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	original, ok := originalCardContent(w, r)
+	if !ok {
+		return
+	}
 	order, ok := queryChoice(w, r, "sort_type", "ByCreateTimeAsc", "ByCreateTimeAsc", "ByCreateTimeDesc")
 	if !ok {
 		return
@@ -523,7 +534,7 @@ func (h handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	items := make([]fields, 0, len(result.Items))
 	_, explicitIDType := r.URL.Query()["user_id_type"]
 	for _, m := range result.Items {
-		items = append(items, h.messageData(m, idType, explicitIDType))
+		items = append(items, h.messageData(cardForRead(m, caller(r).AppID, original), idType, explicitIDType))
 	}
 	success(w, page[fields]{Items: items, HasMore: result.HasMore, PageToken: result.PageToken})
 }

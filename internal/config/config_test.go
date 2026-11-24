@@ -12,7 +12,7 @@ import (
 func cleanEnvironment(t *testing.T) {
 	t.Helper()
 	var ttl TokenTTLs
-	names := []string{"LARKBOX_ADDR", "LARKBOX_STRICT_MODE", "LARKBOX_APPS", "LARKBOX_USERS", "LARKBOX_CHATS"}
+	names := []string{"LARKBOX_ADDR", "LARKBOX_STRICT_MODE", "LARKBOX_APPS", "LARKBOX_USERS", "LARKBOX_CHATS", "LARKBOX_CARD_TEMPLATES"}
 	for _, field := range ttlFields(&ttl) {
 		names = append(names, field.env)
 	}
@@ -190,5 +190,37 @@ func TestLoadRedirectURIs(t *testing.T) {
 				t.Fatalf("expected invalid callback configuration, got %v", err)
 			}
 		})
+	}
+}
+
+func TestCardTemplateSeeds(t *testing.T) {
+	cleanEnvironment(t)
+	path := filepath.Join(t.TempDir(), "templates.yaml")
+	body := `card_templates:
+  - template_id: local
+    template_version_name: 1.0.0
+    data: '{"schema":"2.0","body":{"elements":[]}}'
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CardTemplates) != 1 || cfg.CardTemplates[0].TemplateID != "local" || cfg.CardTemplates[0].VersionName != "1.0.0" {
+		t.Fatalf("unexpected configured templates: %+v", cfg.CardTemplates)
+	}
+	cfg.CardTemplates = append(cfg.CardTemplates, cfg.CardTemplates[0])
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate card template") {
+		t.Fatalf("duplicate template version was accepted: %v", err)
+	}
+	t.Setenv("LARKBOX_CARD_TEMPLATES", `[]`)
+	cfg, err = Load(path)
+	if err != nil || len(cfg.CardTemplates) != 0 {
+		t.Fatalf("environment did not replace template list: %+v, %v", cfg.CardTemplates, err)
 	}
 }

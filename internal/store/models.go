@@ -71,6 +71,7 @@ type Message struct {
 	SenderOpenID  string
 	SenderIsUser  bool
 	Order         uint64
+	Revision      uint64
 	RootID        string
 	ParentID      string
 	ThreadID      string
@@ -88,13 +89,17 @@ type Message struct {
 
 // Card stores a CardKit entity and its last accepted sequence.
 type Card struct {
-	ID            string
-	AppID         string
-	Type          string
-	JSON          json.RawMessage
-	Elements      map[string]string
-	StreamingMode bool
-	Sequence      int64
+	ID             string
+	AppID          string
+	Type           string
+	TemplateData   json.RawMessage
+	JSON           json.RawMessage
+	Elements       map[string]string
+	StreamingMode  bool
+	Sequence       int64
+	Revision       uint64
+	CreatedAt      time.Time
+	StreamingSince time.Time
 }
 
 // Media stores an image or file and its download metadata.

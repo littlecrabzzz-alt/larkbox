@@ -3,9 +3,11 @@ package cardkit
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -23,6 +25,7 @@ func cardError(code protocol.Code, message string) protocol.APIError {
 
 var (
 	errDuplicateElement  = cardError(300301, "Duplicate element_id in card component.")
+	errUnsharedCard      = cardError(300302, "update_multi property is false.")
 	errUnsupportedSchema = cardError(300303, "Only schema 2.0 is supported.")
 	errCardOwner         = cardError(300311, "The current application does not have permission to update/use this card.")
 	errElementTag        = cardError(300312, "Unable to update element tag.")
@@ -58,7 +61,7 @@ func invalid(field, description string) error {
 
 // ParseCallbackCard validates a callback's inline or template card data.
 // References are resolved by the store in the same transaction as the update.
-func ParseCallbackCard(kind string, data json.RawMessage) (store.Card, string, error) {
+func ParseCallbackCard(state *store.Store, kind string, data json.RawMessage) (store.Card, string, error) {
 	doc := object(string(data))
 	switch kind {
 	case "card":
@@ -73,10 +76,30 @@ func ParseCallbackCard(kind string, data json.RawMessage) (store.Card, string, e
 			return card, "", err
 		}
 	case kindTemplate:
-		card, err := parseEntity(kindTemplate, string(data))
+		card, err := instantiateCard(state, kindTemplate, string(data))
 		return card, "", err
 	}
 	return store.Card{}, "", invalid("card", "Invalid callback card.")
+}
+
+// instantiateCard uses the local definition if the requested template is registered.
+func instantiateCard(state *store.Store, kind, data string) (store.Card, error) {
+	card, err := parseEntity(kind, data)
+	if err != nil || kind != kindTemplate {
+		return card, err
+	}
+	template := object(data)
+	id, _ := template["template_id"].(string)
+	version, _ := template["template_version_name"].(string)
+	if definition := state.CardTemplate(id, version); definition != "" {
+		instance, err := parseEntity(kindJSON, definition)
+		if err != nil {
+			return store.Card{}, err
+		}
+		instance.Type, instance.TemplateData = kindTemplate, card.JSON
+		return instance, nil
+	}
+	return card, nil
 }
 
 func parseEntity(kind, encoded string) (store.Card, error) {
@@ -86,9 +109,14 @@ func parseEntity(kind, encoded string) (store.Card, error) {
 		switch kind {
 		case kindJSON:
 			_, wrapped := doc["type"]
-			valid = !wrapped && validEntityCard(doc)
+			if !wrapped && doc["schema"] == "2.0" {
+				if err := validateEditedCard(doc); err != nil {
+					return store.Card{}, err
+				}
+				valid = true
+			}
 		case kindTemplate:
-			valid = validTemplate(doc)
+			valid = doc["schema"] == nil && validTemplate(doc)
 		}
 	}
 	if !valid {
@@ -99,7 +127,7 @@ func parseEntity(kind, encoded string) (store.Card, error) {
 
 func encodeCard(kind string, doc map[string]any) (store.Card, error) {
 	var elements map[string]string
-	if kind == kindJSON {
+	if kind == kindJSON || doc["schema"] == "2.0" {
 		var err error
 		elements, err = indexElements(doc)
 		if err != nil {
@@ -131,8 +159,8 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 		}
 		if value, present := node["element_id"]; present {
 			id, ok := value.(string)
-			if !ok || !nonemptyString(node, "element_id") || utf8.RuneCountInString(id) > 20 {
-				validationErr = invalid("element_id", "Expected an element ID of 1 to 20 characters.")
+			if !ok || !elementIDPattern.MatchString(id) {
+				validationErr = invalid("element_id", "Expected 1 to 20 ASCII letters, digits, or underscores, starting with a letter.")
 				return true
 			}
 			if _, exists := elements[id]; exists {
@@ -184,7 +212,7 @@ func validStreamingConfig(value any) bool {
 	for _, field := range []string{"print_frequency_ms", "print_step"} {
 		if value, present := cfg[field]; present {
 			platforms, ok := value.(map[string]any)
-			if !ok || !optionalCardInts(platforms, 1<<31-1, "default", "android", "ios", "pc") {
+			if !ok || platforms["default"] == nil || !optionalCardInts(platforms, 1<<31-1, "default", "android", "ios", "pc") {
 				return false
 			}
 		}
@@ -194,7 +222,7 @@ func validStreamingConfig(value any) bool {
 	})
 }
 
-func changeSettings(doc, patch map[string]any) error {
+func changeSettings(doc, patch map[string]any, restart *bool) error {
 	if len(patch) == 0 || !validCardSettings(patch) {
 		return invalid("settings", "Expected valid config or card_link settings.")
 	}
@@ -202,11 +230,15 @@ func changeSettings(doc, patch map[string]any) error {
 		if field != "config" && field != "card_link" {
 			return invalid("settings", "Unsupported setting: "+field+".")
 		}
+		properties := value.(map[string]any)
+		if field == "config" && properties["streaming_mode"] == true {
+			*restart = true
+		}
 		previous, _ := doc[field].(map[string]any)
 		if previous == nil {
 			doc[field] = value
 		} else {
-			mergeProperties(previous, value.(map[string]any))
+			mergeProperties(previous, properties)
 		}
 	}
 	return nil
@@ -254,7 +286,7 @@ func (s elementSlot) remove() {
 func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) bool {
 	// Walk only structural properties so an ID in callback values, chart data,
 	// template variables, or other opaque payloads does not become a card element.
-	for _, key := range []string{"body", "header", "elements", "columns", "actions", "fields", "options", "extra", "text", "title", "subtitle", "alt", "label", "placeholder"} {
+	for _, key := range []string{"body", "header", "elements", "columns", "actions", "fields", "options", "extra", "text", "title", "subtitle", "alt", "label", "placeholder", "text_tag_list"} {
 		switch value := parent[key].(type) {
 		case map[string]any:
 			if visitNode(elementSlot{parent, key, -1}, value, visit) {
@@ -263,6 +295,17 @@ func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) b
 		case []any:
 			for i, item := range value {
 				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{parent, key, i}, node, visit) {
+					return true
+				}
+			}
+		}
+	}
+	// Localized suffix tags contain the same element shape under locale keys.
+	if locales, ok := parent["i18n_text_tag_list"].(map[string]any); ok {
+		for _, locale := range slices.Sorted(maps.Keys(locales)) {
+			nodes, _ := locales[locale].([]any)
+			for i, item := range nodes {
+				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{locales, locale, i}, node, visit) {
 					return true
 				}
 			}
@@ -292,6 +335,9 @@ func findElement(doc map[string]any, id string) (elementSlot, map[string]any) {
 }
 
 func addElements(doc map[string]any, kind, target string, elements []any) error {
+	if target != "" && !elementIDPattern.MatchString(target) {
+		return invalid("target_element_id", "Invalid element ID.")
+	}
 	if !cardObjects(elements, true, validCardComponent) {
 		return invalid("elements", "Expected a nonempty array of card components.")
 	}
@@ -329,6 +375,9 @@ func addElements(doc map[string]any, kind, target string, elements []any) error 
 }
 
 func updateElement(doc map[string]any, id string, patch map[string]any, partial bool) error {
+	if !elementIDPattern.MatchString(id) {
+		return invalid("element_id", "Invalid element ID.")
+	}
 	field := "element"
 	failure := errReplaceElement
 	if partial {
@@ -361,6 +410,9 @@ func updateElement(doc map[string]any, id string, patch map[string]any, partial 
 }
 
 func deleteElement(doc map[string]any, id string) error {
+	if !elementIDPattern.MatchString(id) {
+		return invalid("element_id", "Invalid element ID.")
+	}
 	slot, node := findElement(doc, id)
 	if node == nil {
 		return errDeleteElement
@@ -369,12 +421,14 @@ func deleteElement(doc map[string]any, id string) error {
 	return nil
 }
 
-func streamElement(doc map[string]any, id string, content *string) error {
+func streamElement(card *store.Card, doc map[string]any, id string, content *string, now time.Time) error {
 	if content == nil || *content == "" || utf8.RuneCountInString(*content) > 100000 {
 		return invalid("content", "Expected a string of 1 to 100000 characters.")
 	}
-	config, _ := doc["config"].(map[string]any)
-	if config["streaming_mode"] != true {
+	if card.StreamingExpired(now) {
+		return cardError(200850, "Card streaming timeout.")
+	}
+	if !card.StreamingMode {
 		return cardError(300309, "Card streaming closed.")
 	}
 	_, node := findElement(doc, id)
@@ -383,6 +437,9 @@ func streamElement(doc map[string]any, id string, content *string) error {
 	}
 	switch node["tag"] {
 	case "markdown", "plain_text":
+		if card.Type == kindTemplate && node["tag"] != "markdown" {
+			return cardError(300310, "Only update text.")
+		}
 		node["content"] = *content
 		return nil
 	default:
@@ -392,7 +449,7 @@ func streamElement(doc map[string]any, id string, content *string) error {
 
 // applyBatch implements the five action shapes documented for batch_update.
 // The input is a private decoded card snapshot owned by the current transaction.
-func applyBatch(kind string, doc map[string]any, encoded string) error {
+func applyBatch(doc map[string]any, encoded string, restart *bool) error {
 	var actions []struct {
 		Action string `json:"action"`
 		Params struct {
@@ -417,7 +474,7 @@ func applyBatch(kind string, doc map[string]any, encoded string) error {
 		}
 		switch action.Action {
 		case "partial_update_setting":
-			err = changeSettings(doc, p.Settings)
+			err = changeSettings(doc, p.Settings, restart)
 		case "add_elements":
 			err = addElements(doc, p.Type, p.TargetElementID, p.Elements)
 		case "delete_elements":
@@ -439,7 +496,7 @@ func applyBatch(kind string, doc map[string]any, encoded string) error {
 		if err != nil {
 			return err
 		}
-		if kind == kindJSON {
+		if doc["schema"] == "2.0" {
 			if err := validateEditedCard(doc); err != nil {
 				return err
 			}
@@ -452,7 +509,7 @@ func applyBatch(kind string, doc map[string]any, encoded string) error {
 }
 
 func saveEntity(kind string, doc map[string]any) (store.Card, error) {
-	if kind == kindJSON {
+	if kind == kindJSON || doc["schema"] == "2.0" {
 		if err := validateEditedCard(doc); err != nil {
 			return store.Card{}, err
 		}
@@ -465,7 +522,7 @@ func validateEditedCard(doc map[string]any) error {
 		return errUnsupportedSchema
 	}
 	if config, _ := doc["config"].(map[string]any); config["update_multi"] == false {
-		return cardError(300302, "update_multi property is false.")
+		return errUnsharedCard
 	}
 	if !validEntityCard(doc) || !validCardSettings(doc) {
 		return invalid("data", "The operation would leave an invalid card.")

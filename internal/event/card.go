@@ -51,17 +51,18 @@ type cardActionPayload struct {
 	Token        string                  `json:"token"`
 	Action       callback.CallBackAction `json:"action"`
 	Host         string                  `json:"host"`
-	DeliveryType string                  `json:"delivery_type"`
+	DeliveryType string                  `json:"delivery_type,omitempty"`
 	Context      callback.Context        `json:"context"`
 }
 
 // TriggerCardAction delivers one synchronous callback to one receiver. A live
 // long connection takes precedence over the webhook. Delivery is never retried.
 func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTriggerInput) (CardActionResult, error) {
-	message, user, err := d.state.CardActionTarget(input.MessageID, input.OperatorOpenID)
+	target, err := d.state.CardActionTarget(input.MessageID, input.OperatorOpenID)
 	if err != nil {
 		return CardActionResult{}, err
 	}
+	message, user := target.Message, target.Operator
 	app, ok := d.state.Apps().Get(message.AppID)
 	if !ok {
 		return CardActionResult{}, errors.New("interactive message has no known app")
@@ -116,11 +117,11 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 		if reply.Card == nil {
 			return nil
 		}
-		card, reference, err := cardkit.ParseCallbackCard(reply.Card.Type, reply.Card.Data)
+		card, reference, err := cardkit.ParseCallbackCard(d.state, reply.Card.Type, reply.Card.Data)
 		if err != nil {
 			return fmt.Errorf("invalid card action response card: %w", err)
 		}
-		if err := d.state.ApplyCardAction(ctx, message, user.OpenID, card, reference); err != nil {
+		if err := d.state.ApplyCardAction(ctx, target, card, reference); err != nil {
 			return fmt.Errorf("apply card action response: %w", err)
 		}
 		result.Updated = true

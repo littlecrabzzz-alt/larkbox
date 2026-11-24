@@ -1,11 +1,13 @@
 package cardkit
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"math"
 	"net/http"
+	"time"
 	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
@@ -55,11 +57,7 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store) {
 			return
 		}
 		identity, _ := middleware.AuthFromContext(r.Context())
-		card, err := parseEntity(input.Type, input.Data)
-		var cardErr protocol.APIError
-		if errors.As(err, &cardErr) && cardErr.Code != protocol.FieldValidation {
-			err = invalid("data", cardErr.Message)
-		}
+		card, err := instantiateCard(state, input.Type, input.Data)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -105,16 +103,24 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store) {
 				}
 			}
 			cardID, elementID := r.PathValue("card_id"), r.PathValue("element_id")
-			if utf8.RuneCountInString(cardID) > 20 || utf8.RuneCountInString(elementID) > 20 {
-				writeError(w, invalid("path", "Expected card and element IDs of at most 20 characters."))
+			if utf8.RuneCountInString(cardID) > 20 {
+				writeError(w, invalid("card_id", "Expected a card ID of at most 20 characters."))
+				return
+			}
+			if elementID != "" && !elementIDPattern.MatchString(elementID) {
+				writeError(w, invalid("element_id", "Invalid element ID."))
 				return
 			}
 			identity, _ := middleware.AuthFromContext(r.Context())
-			err := state.ChangeCard(identity.AppID, cardID, string(route.action), uuid, req.Sequence, func(card *store.Card) error {
+			mutation := store.CardMutation{Operation: string(route.action), UUID: uuid, Sequence: req.Sequence}
+			if uuid != "" {
+				mutation.Fingerprint = req.fingerprint(route.action, cardID, elementID)
+			}
+			err := state.ChangeCard(identity.AppID, cardID, mutation, func(card *store.Card, now time.Time) error {
 				if req.Sequence > math.MaxInt32 {
 					return invalid("sequence", "Expected a positive 32-bit integer.")
 				}
-				return req.apply(card, route.action, elementID)
+				return req.apply(card, route.action, elementID, now)
 			})
 			if err != nil {
 				writeError(w, err)
@@ -125,32 +131,68 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store) {
 	}
 }
 
-func (req mutation) apply(card *store.Card, action operation, id string) error {
+func (req mutation) fingerprint(action operation, cardID, elementID string) [32]byte {
+	var payload any
+	switch action {
+	case fullUpdate:
+		payload = []any{req.Card.Type, canonicalJSON(req.Card.Data)}
+	case updateSettings:
+		payload = canonicalJSON(req.Settings)
+	case streamContent:
+		payload = req.Content
+	case add:
+		payload = []any{req.Type, req.TargetElementID, canonicalJSON(req.Elements)}
+	case replace:
+		payload = canonicalJSON(req.Element)
+	case patch:
+		payload = canonicalJSON(req.PartialElement)
+	case batch:
+		payload = canonicalJSON(req.Actions)
+	}
+	data, _ := json.Marshal([]any{cardID, elementID, action, req.Sequence, payload})
+	return sha256.Sum256(data)
+}
+
+func canonicalJSON(encoded string) any {
+	var value any
+	if decode(encoded, &value) {
+		return []any{true, value}
+	}
+	// Keep a malformed string distinct from valid JSON containing that string.
+	return []any{false, encoded}
+}
+
+func (req mutation) apply(card *store.Card, action operation, id string, now time.Time) error {
 	var next store.Card
 	var err error
 	if action == fullUpdate {
+		if req.Card.Type != kindJSON {
+			return invalid("card.type", "Expected card_json for full card updates.")
+		}
 		next, err = parseEntity(req.Card.Type, req.Card.Data)
 	} else {
-		next, err = req.edit(card, action, id)
+		next, err = req.edit(card, action, id, now)
 	}
 	if err != nil {
 		return err
 	}
 	card.Type, card.JSON, card.Elements, card.StreamingMode = next.Type, next.JSON, next.Elements, next.StreamingMode
+	card.TemplateData, card.StreamingSince = next.TemplateData, next.StreamingSince
 	return nil
 }
 
-func (req mutation) edit(card *store.Card, action operation, id string) (store.Card, error) {
+func (req mutation) edit(card *store.Card, action operation, id string, now time.Time) (store.Card, error) {
 	doc := object(string(card.JSON))
 	if doc == nil || (action != updateSettings && action != batch && doc["schema"] != "2.0") {
 		return store.Card{}, errUnsupportedSchema
 	}
 	var err error
+	var restart bool
 	switch action {
 	case updateSettings:
-		err = changeSettings(doc, object(req.Settings))
+		err = changeSettings(doc, object(req.Settings), &restart)
 	case streamContent:
-		err = streamElement(doc, id, req.Content)
+		err = streamElement(card, doc, id, req.Content, now)
 	case add:
 		var elements []any
 		if !decode(req.Elements, &elements) {
@@ -164,12 +206,17 @@ func (req mutation) edit(card *store.Card, action operation, id string) (store.C
 	case remove:
 		err = deleteElement(doc, id)
 	case batch:
-		err = applyBatch(card.Type, doc, req.Actions)
+		err = applyBatch(doc, req.Actions, &restart)
 	}
 	if err != nil {
 		return store.Card{}, err
 	}
-	return saveEntity(card.Type, doc)
+	next, err := saveEntity(card.Type, doc)
+	next.TemplateData = card.TemplateData
+	if !restart {
+		next.StreamingSince = card.StreamingSince
+	}
+	return next, err
 }
 
 func readRequest(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -196,6 +243,10 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.As(err, &apiErr):
 	case errors.Is(err, store.ErrNotFound):
 		apiErr = cardError(200740, "The card entity does not exist.")
+	case errors.Is(err, store.ErrCardExpired):
+		apiErr = cardError(200750, "The card entity has expired.")
+	case errors.Is(err, store.ErrCardUUIDConflict):
+		apiErr = cardError(200770, "UUID conflict.")
 	case errors.Is(err, store.ErrCardOwner):
 		apiErr = errCardOwner
 	case errors.Is(err, store.ErrStaleSequence):

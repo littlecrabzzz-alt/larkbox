@@ -142,6 +142,8 @@ func writeFailure(w http.ResponseWriter, err error, missing protocol.APIError) {
 		_ = protocol.WriteError(w, protocol.NewError(protocol.IMBotOutsideChat, nil))
 	case errors.Is(err, store.ErrMessageCardNotFound):
 		fail(w, 230001, "The card entity does not exist.")
+	case errors.Is(err, store.ErrCardExpired):
+		fail(w, 200750, "The card entity has expired.")
 	case errors.Is(err, store.ErrCardOwner):
 		fail(w, 300311, "The current application does not have permission to update/use this card.")
 	case errors.Is(err, store.ErrMessageUUIDConflict):

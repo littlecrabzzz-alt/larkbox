@@ -219,7 +219,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	}
 
 	if req.CardID != "" {
-		if _, err := s.ownedCard(actor.AppID, req.CardID); errors.Is(err, ErrNotFound) {
+		if _, err := s.liveCard(actor.AppID, req.CardID, s.Now()); errors.Is(err, ErrNotFound) {
 			return Message{}, ErrMessageCardNotFound
 		} else if err != nil {
 			return Message{}, err
@@ -244,7 +244,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 				return Message{}, ErrMessageUUIDConflict
 			}
 			m, err := s.imMessage(actor, record.id)
-			return s.renderMessage(m), err
+			return s.renderMessage(actor.AppID, m), err
 		}
 	}
 
@@ -286,7 +286,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	if req.UUID != "" {
 		s.messageUUIDs[key] = messageDedup{id: m.ID, target: target, actor: actor, expires: now.Add(time.Hour)}
 	}
-	return s.renderMessage(m), nil
+	return s.renderMessage(actor.AppID, s.messages.items[m.ID]), nil
 }
 
 // IMMessage returns a message visible to the caller.
@@ -294,7 +294,7 @@ func (s *Store) IMMessage(actor IMActor, id string) (Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m, err := s.imMessage(actor, id)
-	return s.renderMessage(m), err
+	return s.renderMessage(actor.AppID, m), err
 }
 
 // IMResourceMessage also requires the app bot to be a member for user tokens
@@ -371,7 +371,7 @@ func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, 
 		return Message{}, err
 	}
 	s.messages.put(m)
-	return cloneMessage(m), nil
+	return cloneMessage(s.messages.items[m.ID]), nil
 }
 
 // indexMessage requires the store lock.
@@ -421,7 +421,7 @@ func (s *Store) IMHistory(actor IMActor, containerType, id string) ([]Message, e
 		} else if _, err := s.imChat(actor, m.ChatID); err != nil {
 			return nil, err
 		}
-		result = append(result, s.renderMessage(m))
+		result = append(result, s.renderMessage(actor.AppID, m))
 	}
 	return result, nil
 }

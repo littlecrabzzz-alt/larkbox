@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,8 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 	"github.com/littlecrabzzz-alt/larkbox/internal/wsproto"
 )
+
+const replyCredential = "test-private-callback-response"
 
 const (
 	initialCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"md","content":"initial"}]}}`
@@ -81,13 +84,14 @@ func TestCardActionWebhook(t *testing.T) {
 				case received <- raw:
 				default:
 				}
-				_, _ = io.WriteString(w, `{"toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
+				_, _ = io.WriteString(w, `{"token":"`+replyCredential+`","toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
 			}))
 			t.Cleanup(web.Close)
 			app.WebhookURL = web.URL + "/card-click"
-			d := testDispatcher(t, cfg, Options{RetryBackoff: noBackoff}, nil)
+			stamp := time.Unix(1_700_000_000, 123456000)
+			d := testDispatcher(t, cfg, Options{RetryBackoff: noBackoff}, func() time.Time { return stamp })
 			m, input := actionMessage(t, d, cfg)
-			input.DeliveryType, input.URL, input.PreviewToken = "url_preview", "https://example.test", "preview"
+			input.DeliveryType, input.URL, input.PreviewToken = "url_preview", "https://example.test", "unique-card-preview-credential"
 			before, _ := d.state.Messages().Get(m.ID)
 			result, err := d.TriggerCardAction(t.Context(), input)
 			trace := cardTraces(d.state, result.EventID)
@@ -103,7 +107,7 @@ func TestCardActionWebhook(t *testing.T) {
 			if incoming.EventV2Base == nil || incoming.Schema != "2.0" || incoming.EventV2Base.Header == nil || incoming.EventV2Base.Header.EventType != cardActionTrigger ||
 				incoming.EventV2Base.Header.EventID != result.EventID || incoming.EventV2Base.Header.EventID == "" ||
 				incoming.EventV2Base.Header.AppID != app.AppID || incoming.EventV2Base.Header.Token != app.VerificationToken ||
-				incoming.EventV2Base.Header.TenantKey != app.TenantKey || incoming.EventV2Base.Header.CreateTime == "" || incoming.Event == nil {
+				incoming.EventV2Base.Header.TenantKey != app.TenantKey || incoming.EventV2Base.Header.CreateTime != strconv.FormatInt(stamp.UnixMicro(), 10) || incoming.Event == nil {
 				t.Fatalf("invalid event: %s", payload)
 			}
 			e := incoming.Event
@@ -113,9 +117,11 @@ func TestCardActionWebhook(t *testing.T) {
 				e.Action.Tag != "button" || e.Action.Option != "opt" || e.Action.Timezone != "UTC" || e.Action.Name != "submit" ||
 				e.Action.FormValue["field"] != "answer" || e.Action.InputValue != "input" || len(e.Action.Options) != 1 ||
 				e.Context == nil || e.Context.OpenMessageID != m.ID || e.Context.OpenChatID != m.ChatID || e.DeliveryType != "url_preview" ||
-				e.Context.PreviewToken != "preview" || e.Context.URL != "https://example.test" {
+				e.Context.PreviewToken != input.PreviewToken || e.Context.URL != "https://example.test" {
 				t.Fatalf("invalid callback payload: %s", payload)
 			}
+			assertCardAuditTokens(t, trace[0].RequestBody, trace[0].ResponseBody, result.Delivery.Data,
+				app.VerificationToken, e.Token, e.Context.PreviewToken)
 			if result.Toast == nil || result.Toast.I18nContent["en_us"] != "Saved" || result.Card == nil || result.Card.Type != tc.kind || card.Sequence != 7 {
 				t.Fatalf("invalid structured response or sequence: %+v, %+v", result, card)
 			}
@@ -129,7 +135,7 @@ func TestCardActionWebhook(t *testing.T) {
 			requireNoError(t, err)
 			if !result.Updated || !current.Updated || current.UpdatedAt.Before(before.UpdatedAt) || current.CardID != m.CardID ||
 				(tc.kind == "raw" && card.Elements["md"] != "clicked") ||
-				(tc.kind == "template" && (!strings.Contains(current.Content, `"type":"template"`) || card.Type != "template")) || trace[0].Error != "" {
+				(tc.kind == "template" && (!strings.Contains(string(card.JSON), `"template_id":"updated"`) || card.Type != "template")) || trace[0].Error != "" {
 				t.Fatalf("update was not persisted: %+v, %+v, %+v", result, current, card)
 			}
 		})
@@ -150,6 +156,7 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 	host := strings.TrimPrefix(web.URL, "http://")
 	conn := connect(t, ticketURL(t, d, host, cfg.Apps[0]), http.StatusSwitchingProtocols)
 	_, input := actionMessage(t, d, cfg)
+	input.PreviewToken = "test-private-preview-token"
 	type actionReply struct {
 		result CardActionResult
 		err    error
@@ -164,7 +171,7 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 		if wsproto.HeaderValue(frame, wsproto.Type) != wsproto.Event || !strings.Contains(string(frame.Payload), cardActionTrigger) {
 			t.Fatalf("invalid callback frame: %+v", frame)
 		}
-		body := []byte(`{"toast":{"type":"info","content":"wire"},"card":{"type":"raw","data":` + clickedCard + `}}`)
+		body := []byte(`{"token":"` + replyCredential + `","toast":{"type":"info","content":"wire"},"card":{"type":"raw","data":` + clickedCard + `}}`)
 		writeAck(t, conn, frame, wsproto.Response{StatusCode: status, Data: body})
 		reply := <-replies
 		trace := cardTraces(d.state, reply.result.EventID)
@@ -173,9 +180,19 @@ func TestCardActionWebSocketSingleConsumer(t *testing.T) {
 		}
 		var ack wsproto.Response
 		requireNoError(t, json.Unmarshal(trace[0].ResponseBody, &ack))
-		if string(ack.Data) != string(body) {
-			t.Fatalf("ACK response data was not captured: %+v", ack)
+		var wire struct {
+			Event  cardActionPayload `json:"event"`
+			Header eventHeader       `json:"header"`
 		}
+		requireNoError(t, json.Unmarshal(frame.Payload, &wire))
+		incoming := wire.Event
+		if wire.Header.Token != cfg.Apps[0].VerificationToken || incoming.Context.PreviewToken != input.PreviewToken ||
+			incoming.Token == "" || strings.Contains(string(frame.Payload), `"delivery_type"`) ||
+			string(reply.result.Delivery.Data) != string(body) {
+			t.Fatalf("unexpected WebSocket wire payload or ACK: %s, %s", frame.Payload, reply.result.Delivery.Data)
+		}
+		assertCardAuditTokens(t, trace[0].RequestBody, ack.Data, reply.result.Delivery.Data,
+			wire.Header.Token, incoming.Token, incoming.Context.PreviewToken)
 		if status == http.StatusOK {
 			requireNoError(t, reply.err)
 			if !reply.result.Updated || reply.result.Toast == nil || reply.result.Toast.Content != "wire" {
@@ -261,11 +278,73 @@ func TestCardActionReferenceOwnership(t *testing.T) {
 	requireNoError(t, err)
 	current, _ := d.state.Messages().Get(m.ID)
 	previous, _ := d.state.Card(m.CardID)
-	if !result.Updated || current.CardID != card.ID || current.Content != clickedCard || string(previous.JSON) != initialCard {
+	if !result.Updated || current.CardID != card.ID || current.Content != `{"type":"card","data":{"card_id":"2"}}` || string(previous.JSON) != initialCard {
 		t.Fatalf("invalid relink: %+v, %+v, %+v", result, current, previous)
 	}
 }
 
 func cardTraces(s *store.Store, id string) []store.Trace {
 	return slices.DeleteFunc(s.Traces(), func(trace store.Trace) bool { return trace.EventID != id })
+}
+
+func assertCardAuditTokens(t *testing.T, request, response, actual []byte, sensitive ...string) {
+	t.Helper()
+	for _, secret := range sensitive {
+		if strings.Contains(string(request), secret) {
+			t.Fatal("outbound audit request retained a token")
+		}
+	}
+	if strings.Count(string(request), `"[redacted]"`) != len(sensitive) ||
+		strings.Contains(string(response), replyCredential) || !strings.Contains(string(response), `"token":"[redacted]"`) ||
+		!strings.Contains(string(actual), replyCredential) {
+		t.Fatalf("request or response token was improperly redacted: request=%s response=%s", request, response)
+	}
+}
+
+func TestCardActionTransitionAndHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply, failure string
+		streaming            bool
+		status               int
+	}{
+		{"streaming replacement", `{"toast":{"content":"accepted"},"card":{"type":"raw","data":` + clickedCard + `}}`, "streaming mode", true, http.StatusOK},
+		{"streaming toast only", `{"toast":{"content":"accepted"}}`, "", true, http.StatusOK},
+		{"legacy replacement", `{"toast":{"content":"accepted"},"card":{"type":"raw","data":{"elements":[{"tag":"markdown","content":"legacy"}]}}}`, "cannot be replaced", false, http.StatusOK},
+		{"unexpected success status", `{"card":{"type":"raw","data":` + clickedCard + `}}`, "status 201", false, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.reply)
+			}))
+			t.Cleanup(web.Close)
+			cfg.Apps[0].WebhookURL = web.URL
+			d := testDispatcher(t, cfg, Options{}, nil)
+			message, input := actionMessage(t, d, cfg)
+			if tc.streaming {
+				card, _ := d.state.Card(message.CardID)
+				card.Sequence++
+				card.StreamingMode = true
+				card.JSON = []byte(strings.Replace(initialCard, `"schema":"2.0",`, `"schema":"2.0","config":{"streaming_mode":true},`, 1))
+				requireNoError(t, d.state.UpdateCard(card))
+			}
+			before, _ := d.state.Card(message.CardID)
+			result, err := d.TriggerCardAction(t.Context(), input)
+			switch {
+			case tc.failure == "":
+				requireNoError(t, err)
+			case err == nil || !strings.Contains(err.Error(), tc.failure):
+				t.Fatalf("got %v, want %q", err, tc.failure)
+			}
+			if tc.status == http.StatusOK && (result.Toast == nil || result.Toast.Content != "accepted") {
+				t.Fatalf("toast was lost: %+v", result)
+			}
+			card, _ := d.state.Card(message.CardID)
+			stored, _ := d.state.Messages().Get(message.ID)
+			if result.Updated || stored.Updated || card.Sequence != before.Sequence || card.Revision != before.Revision || string(card.JSON) != string(before.JSON) {
+				t.Fatalf("callback unexpectedly changed card: %+v", card)
+			}
+		})
+	}
 }

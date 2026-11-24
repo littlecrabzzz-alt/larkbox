@@ -40,7 +40,7 @@ All entities are scoped cleanly to support concurrent testing across multiple ch
 - **Users**: `open_id` (`ou_...`), `user_id`, `union_id` (`on_...`), name, email, avatar.
 - **Chats**: `chat_id` (`oc_...`), `chat_mode` (`p2p` / `group`), name, owner, member set.
 - **Messages**: `message_id` (`om_...`), `chat_id`, `root_id`, `parent_id`, `thread_id`, `msg_type`, raw JSON-string `content`, `mentions`, `deleted` (recalled), `updated`, timestamps, reactions list.
-- **Cards (CardKit)**: `card_id`, owning app, card JSON or template data, indexed element IDs, `streaming_mode`, and last accepted `sequence` (strictly monotonic per card). Interactive messages can reference an entity and read its current content.
+- **Cards (CardKit)**: `card_id`, owning app, card JSON or template data, indexed element IDs, `streaming_mode`, and last accepted `sequence` (strictly monotonic per card). The sending app can resolve the linked entity on message reads. Other apps receive the stored message representation.
 - **Media**: Binary blob store keyed by `image_key` (`img_v3_...`) and `file_key` (`file_v3_...`) with `Content-Type` and filename metadata.
 - **Audit Traces**: Ring buffer / queryable log of inbound Open API calls (method, path, headers, body, status, Feishu `code`, latency) and outbound event deliveries (channel, payload, response status/body, retry attempts).
 
@@ -53,7 +53,7 @@ By default, `larkbox` enforces real Feishu API constraints:
 1. **Authentication**: Missing/invalid/expired tokens return standard Feishu error codes (`99991661`, `99991663`, `99991668`, etc.) and reject mismatched token types (e.g., calling `/authen/v1/user_info` with a `tenant_access_token`).
 2. **Message Content Encoding**: `POST /open-apis/im/v1/messages` requires `content` to be a JSON-encoded string (not a raw JSON object), returning `99992402` on schema violations.
 3. **ID Type Validation**: `receive_id_type` (`chat_id`, `open_id`, `user_id`, `union_id`, `email`) is validated against target existence and prefix conventions.
-4. **CardKit Monotonicity**: Every mutation requires a positive `sequence` greater than the last committed one. A replay of a successful UUID returns the original success within one hour, scoped to the app, card, and operation. Batch actions commit together with the sequence under the store lock.
+4. **CardKit Monotonicity**: Every mutation requires a positive `sequence` greater than the last committed one. An identical request replays a successful UUID within one hour, scoped to the app, card, and operation. Reuse with a different canonical request returns a UUID conflict. Batch actions commit together with the sequence under the store lock.
 5. **Webhook Crypto & Retries**:
    - Encryption key: `SHA-256(encrypt_key)`, AES-256-CBC with random 16-byte IV prepended + PKCS7 padding, Base64 encoded into `{"encrypt":"..."}`.
    - Signature header: `X-Lark-Signature = hex(SHA-256(timestamp + nonce + encrypt_key + raw_body))`.
@@ -69,8 +69,8 @@ When an event occurs (e.g., user sends a message via `/_sandbox/messages/send`, 
 2. The `Dispatcher` inspects the target `app_id`:
    - **WebSocket channel**: If one or more official SDK `ws.Client` sessions are connected to `/ws/v2` for that app, the event is serialized into a `pbbp2.Frame` (`method=1`, header `type=event`) and delivered to one active session for that app. Failed acknowledgements and timeouts can be retried with the same event ID.
    - **Webhook channel**: If a webhook URL is configured for the app, the event is dispatched via HTTP POST with optional encryption, signature headers, and retry tracking.
-3. Card actions use one delivery attempt with a three-second deadline. An active WebSocket session takes precedence over the webhook. The pinned Go SDK dispatches `card.action.trigger` from a `type=event` frame and puts the callback JSON in the base64 `data` field of its ACK. Larkbox returns the toast and applies valid card updates to the message and its linked entity in one transaction.
-4. Every delivery attempt, latency, and client response is recorded in the Audit Trace store for inspection.
+3. Card actions use one delivery attempt with a three-second deadline. An active WebSocket session takes precedence over the webhook. The pinned Go SDK dispatches `card.action.trigger` from a `type=event` frame and puts the callback JSON in the base64 `data` field of its ACK. Larkbox returns the toast and applies valid card updates only when both the message and linked card revisions still match the click snapshot. Replacement of a linked card requires its streaming window to be closed.
+4. Every delivery attempt, latency, and client response is recorded in the Audit Trace store for inspection. Outbound audit bodies redact protocol credentials before capture limits are applied.
 
 ---
 

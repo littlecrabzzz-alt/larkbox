@@ -259,3 +259,187 @@ func startSDKCardSocket(t *testing.T, web *httptest.Server, appID, secret string
 		t.Fatal("SDK card socket did not become ready")
 	}
 }
+
+func TestOfficialSDKCardKitIMReadModesAndOwnership(t *testing.T) {
+	cfg := sdkTestConfig()
+	other := cfg.Apps[0]
+	other.AppID, other.BotOpenID = protocol.NewID("cli_"), "ou_reader_app"
+	cfg.Apps = append(cfg.Apps, other)
+	cfg.Chats[0].MemberIDs = append(cfg.Chats[0].MemberIDs, other.BotOpenID)
+	srv, web := sdkEventServer(t, cfg, event.Options{})
+	owner := sdkEventREST(web, cfg.Apps[0])
+	foreign := sdkEventREST(web, other)
+	chatID := cfg.Chats[0].ChatID
+	doc := strings.Replace(sdkStreamingCard, `"body":`, `"header":{"title":{"tag":"plain_text","content":"Status"}},"body":`, 1)
+	id := sdkCardEntity(t, owner, "card_json", doc)
+	ref := sdkEntityReference(id)
+	messageID := value(sdkCardMessage(t, owner, chatID, ref).MessageId)
+	stream, err := owner.Cardkit.V1.CardElement.Content(t.Context(), larkcardkit.NewContentCardElementReqBuilder().CardId(id).ElementId("md").
+		Body(larkcardkit.NewContentCardElementReqBodyBuilder().Sequence(1).Content("owner live content").Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, stream.CodeError, 0)
+
+	for _, tc := range []struct {
+		name         string
+		client       *lark.Client
+		mode, expect string
+		code         int
+	}{
+		{"owner default", owner, "", `{"elements":[[{"tag":"text","text":"owner live content"}]],"title":"Status"}`, 0},
+		{"owner original", owner, "user_card_content", `"schema":"2.0"`, 0},
+		{"foreign default", foreign, "", ref, 0},
+		{"foreign original", foreign, "user_card_content", ref, 0},
+		{"unknown mode", owner, "bogus", "", 99992402},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			get, err := tc.client.Im.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(messageID).CardMsgContentType(tc.mode).Build())
+			requireSDKNetwork(t, err)
+			requireSDKCode(t, get.CodeError, tc.code)
+			list, err := tc.client.Im.Message.List(t.Context(), larkim.NewListMessageReqBuilder().ContainerIdType("chat").
+				ContainerId(chatID).CardMsgContentType(tc.mode).Build())
+			requireSDKNetwork(t, err)
+			requireSDKCode(t, list.CodeError, tc.code)
+			if tc.code != 0 {
+				return
+			}
+			for _, items := range [][]*larkim.Message{get.Data.Items, list.Data.Items} {
+				if len(items) != 1 || value(items[0].MessageId) != messageID || items[0].Body == nil {
+					t.Fatalf("unexpected message result: %+v", items)
+				}
+				content := value(items[0].Body.Content)
+				if tc.client == owner && tc.mode == "user_card_content" {
+					if !strings.Contains(content, tc.expect) || !strings.Contains(content, `"content":"owner live content"`) {
+						t.Fatalf("wrong original card content: %s", content)
+					}
+				} else if content != tc.expect {
+					t.Fatalf("content = %s, want %s", content, tc.expect)
+				}
+			}
+		})
+	}
+
+	patch, err := owner.Im.Message.Patch(t.Context(), larkim.NewPatchMessageReqBuilder().MessageId(messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().Content(sdkStreamingCard).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, patch.CodeError, 230001)
+	message, _ := srv.Store().Messages().Get(messageID)
+	card, _ := srv.Store().Card(id)
+	if message.CardID != id || message.Content != ref || message.Updated || card.Sequence != 1 || card.Elements["md"] != "owner live content" {
+		t.Fatalf("forbidden IM patch altered state: %+v, %+v", message, card)
+	}
+}
+
+func TestOfficialSDKCardActionRejectsStaleRESTOverwrite(t *testing.T) {
+	cfg := sdkTestConfig()
+	received, release := make(chan struct{}), make(chan struct{}, 1)
+	handler := dispatcher.NewEventDispatcher(cfg.Apps[0].VerificationToken, cfg.Apps[0].EncryptKey).
+		OnP2CardActionTrigger(func(ctx context.Context, _ *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			close(received)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "raw", Data: json.RawMessage(sdkStreamingCard)}}, nil
+		})
+	hook := httptest.NewServer(http.HandlerFunc(httpserverext.NewEventHandlerFunc(handler)))
+	t.Cleanup(hook.Close)
+	cfg.Apps[0].WebhookURL = hook.URL
+	srv, web := sdkEventServer(t, cfg, event.Options{})
+	client := sdkEventREST(web, cfg.Apps[0])
+	id := sdkCardEntity(t, client, "card_json", strings.Replace(sdkStreamingCard, `"streaming_mode":true`, `"streaming_mode":false`, 1))
+	messageID := value(sdkCardMessage(t, client, cfg.Chats[0].ChatID, sdkEntityReference(id)).MessageId)
+	type outcome struct {
+		result event.CardActionResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	defer close(release)
+	go func() {
+		result, err := srv.TriggerCardAction(t.Context(), event.CardActionTriggerInput{MessageID: messageID, OperatorOpenID: cfg.Users[0].OpenID})
+		done <- outcome{result, err}
+	}()
+	select {
+	case <-received:
+	case result := <-done:
+		t.Fatalf("callback completed before receiving the request: %v", result.err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback did not reach SDK webhook")
+	}
+	patch, err := client.Cardkit.V1.CardElement.Patch(t.Context(), larkcardkit.NewPatchCardElementReqBuilder().CardId(id).ElementId("md").
+		Body(larkcardkit.NewPatchCardElementReqBodyBuilder().Sequence(12).PartialElement(`{"content":"REST update wins"}`).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, patch.CodeError, 0)
+	// Release the callback only after the REST write has committed.
+	release <- struct{}{}
+	select {
+	case attempt := <-done:
+		if attempt.err == nil || !strings.Contains(attempt.err.Error(), "card entity changed") || attempt.result.Updated {
+			t.Fatalf("stale callback update was not rejected: %+v", attempt)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("callback did not complete")
+	}
+	card, _ := srv.Store().Card(id)
+	got := sdkGetCardMessage(t, client, messageID, false)
+	if card.Sequence != 12 || card.Elements["md"] != "REST update wins" || !strings.Contains(value(got.Body.Content), "REST update wins") {
+		t.Fatalf("REST update was lost: card=%+v message=%s", card, value(got.Body.Content))
+	}
+}
+
+func TestOfficialSDKCardActionTransitionConstraints(t *testing.T) {
+	cfg := sdkTestConfig()
+	responses := make(chan *callback.CardActionTriggerResponse, 1)
+	handler := dispatcher.NewEventDispatcher(cfg.Apps[0].VerificationToken, cfg.Apps[0].EncryptKey).
+		OnP2CardActionTrigger(func(ctx context.Context, _ *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			select {
+			case response := <-responses:
+				return response, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		})
+	hook := httptest.NewServer(http.HandlerFunc(httpserverext.NewEventHandlerFunc(handler)))
+	t.Cleanup(hook.Close)
+	cfg.Apps[0].WebhookURL = hook.URL
+	srv, web := sdkEventServer(t, cfg, event.Options{})
+	client := sdkEventREST(web, cfg.Apps[0])
+	id := sdkCardEntity(t, client, "card_json", sdkStreamingCard)
+	messageID := value(sdkCardMessage(t, client, cfg.Chats[0].ChatID, sdkEntityReference(id)).MessageId)
+	for _, tc := range []struct {
+		name    string
+		disable bool
+		data    string
+		failure string
+	}{
+		{"streaming card replacement", false, sdkStreamingCard, "streaming mode"},
+		{"toast only while streaming", false, "", ""},
+		{"legacy raw card replacement", true, `{"elements":[{"tag":"markdown","content":"legacy"}]}`, "cannot be replaced"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.disable {
+				settings, err := client.Cardkit.V1.Card.Settings(t.Context(), larkcardkit.NewSettingsCardReqBuilder().CardId(id).
+					Body(larkcardkit.NewSettingsCardReqBodyBuilder().Sequence(1).Settings(`{"config":{"streaming_mode":false}}`).Build()).Build())
+				requireSDKNetwork(t, err)
+				requireSDKCode(t, settings.CodeError, 0)
+			}
+			before, _ := srv.Store().Card(id)
+			reply := &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "Clicked"}}
+			if tc.data != "" {
+				reply.Card = &callback.Card{Type: "raw", Data: json.RawMessage(tc.data)}
+			}
+			responses <- reply
+			result, err := srv.TriggerCardAction(t.Context(), event.CardActionTriggerInput{MessageID: messageID, OperatorOpenID: cfg.Users[0].OpenID})
+			if tc.failure == "" {
+				requireSDKNetwork(t, err)
+			} else if err == nil || !strings.Contains(err.Error(), tc.failure) {
+				t.Fatalf("got %v, want %q", err, tc.failure)
+			}
+			after, _ := srv.Store().Card(id)
+			if result.Updated || result.Toast == nil || result.Toast.Content != "Clicked" ||
+				after.Revision != before.Revision || after.Sequence != before.Sequence || string(after.JSON) != string(before.JSON) {
+				t.Fatalf("invalid SDK transition: %+v, %+v", result, after)
+			}
+		})
+	}
+}

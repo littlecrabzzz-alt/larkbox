@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Card entity references in interactive messages and replies, with the current card reflected in message reads.
 - Synchronous `card.action.trigger` callbacks over WebSocket or signed, encrypted webhooks, with toast capture, validated card updates, and outbound audit traces.
 - Official Feishu Go SDK integration tests for CardKit REST endpoints and both callback transports.
+- Registered local CardKit templates, entity and stream expiration, and IM card content read modes.
 - Sample environment for optional live differential testing.
+
+### Fixed
+
+- Restrict live card entity reads to the owning app and reject stale callback overwrites and conflicting UUID reuse.
+- Redact outbound callback credentials in audit bodies while retaining authenticated wire delivery.
 
 ### Changed
 

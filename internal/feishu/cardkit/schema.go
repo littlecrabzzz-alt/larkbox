@@ -4,6 +4,7 @@ package cardkit
 import (
 	"encoding/json"
 	"math"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -192,10 +193,28 @@ func validCardPicker(node map[string]any) bool {
 		optionalCardType[string](node, "name", "width", "margin", "type")
 }
 
+var elementIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,19}$`)
+
+func validHeaderTags(value any) bool {
+	return cardObjects(value, false, validHeaderTag)
+}
+
+func validHeaderTag(node map[string]any) bool {
+	if node["tag"] != "text_tag" || !optionalString(node, "color") {
+		return false
+	}
+	return optionalCardCheck(node, "text", func(value any) bool {
+		text, ok := value.(map[string]any)
+		return ok && text["tag"] == "plain_text" && validCardTextContent(text)
+	})
+}
+
 func validCardHeader(value any) bool {
 	header, ok := value.(map[string]any)
 	return ok && optionalCardCheck(header, "title", validCardText) &&
-		optionalCardCheck(header, "subtitle", validCardText) && optionalObject(header, "icon")
+		optionalCardCheck(header, "subtitle", validCardText) && optionalObject(header, "icon") &&
+		optionalCardCheck(header, "text_tag_list", validHeaderTags) &&
+		optionalCardCheck(header, "i18n_text_tag_list", func(value any) bool { return validCardLocales(value, validHeaderTags) })
 }
 
 func validCardBehavior(behavior map[string]any) bool {
@@ -219,6 +238,8 @@ func validCardComponent(node map[string]any) bool {
 	switch node["tag"] {
 	case "markdown", "plain_text", "lark_md":
 		return validCardTextContent(node)
+	case "text_tag":
+		return validHeaderTag(node)
 	case "div":
 		_, hasText := node["text"]
 		_, hasFields := node["fields"]

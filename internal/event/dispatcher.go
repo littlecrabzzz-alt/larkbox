@@ -233,11 +233,15 @@ func (d *Dispatcher) newJob(appID, kind string, at time.Time, payload any) (deli
 	if at.IsZero() {
 		at = d.state.Now()
 	}
+	createTime := millis(at)
+	if kind == cardActionTrigger {
+		createTime = strconv.FormatInt(at.UnixMicro(), 10)
+	}
 	id := protocol.NewID(protocol.EventID)
 	body, err := json.Marshal(envelope{
 		Schema: "2.0",
 		Header: eventHeader{
-			ID: id, Type: kind, CreateTime: millis(at),
+			ID: id, Type: kind, CreateTime: createTime,
 			AppID: appID, Token: app.VerificationToken, TenantKey: tenantKey(app),
 		},
 		Event: payload,
@@ -416,6 +420,7 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 		// The acknowledgement embeds headers in its JSON body as well.
 		// Store the same safe subset in both places.
 		audit := result.response
+		audit.Data = store.RedactTraceJSON(audit.Data)
 		audit.Headers = make(map[string]string)
 		for key, values := range store.TraceHeaders(headers) {
 			audit.Headers[key] = values[0]

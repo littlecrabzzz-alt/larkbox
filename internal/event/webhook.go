@@ -72,6 +72,9 @@ func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attemp
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := d.postWebhook(ctx, job.app, &trace)
+	if err == nil && job.kind == cardActionTrigger && trace.Status != http.StatusOK {
+		err = fmt.Errorf("webhook HTTP status %d", trace.Status)
+	}
 	if err == nil {
 		err = ctx.Err()
 		if err == nil && verify != nil {
@@ -98,7 +101,6 @@ func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, trace *stor
 			return err
 		}
 	}
-	trace.RequestBody = body
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -127,6 +129,7 @@ func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, trace *stor
 		return err
 	}
 	if len(trace.ResponseBody) > maxFrame {
+		trace.ResponseBodyTruncated = true
 		return errors.New("webhook response exceeds size limit")
 	}
 	if !success(trace.Status) {

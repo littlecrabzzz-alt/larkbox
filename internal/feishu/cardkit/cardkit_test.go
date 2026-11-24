@@ -26,11 +26,12 @@ type fixture struct {
 	elapsed *atomic.Int64
 }
 
-func setup(t *testing.T) fixture {
+func setup(t *testing.T, templates ...config.CardTemplate) fixture {
 	t.Helper()
 	var elapsed atomic.Int64
 	start := time.Now()
 	cfg := config.Default()
+	cfg.CardTemplates = templates
 	other := cfg.Apps[0]
 	other.AppID, other.BotOpenID = "cli_other", "ou_other"
 	cfg.Apps = append(cfg.Apps, other)
@@ -41,7 +42,7 @@ func setup(t *testing.T) fixture {
 		{Value: "t-other", Kind: store.TenantToken, AppID: other.AppID},
 		{Value: "u-owner", Kind: store.UserToken, AppID: cfg.Apps[0].AppID, UserOpenID: cfg.Users[0].OpenID},
 	} {
-		token.ExpiresAt = start.Add(3 * time.Hour)
+		token.ExpiresAt = start.Add(15 * 24 * time.Hour)
 		if err := state.PutToken(token); err != nil {
 			t.Fatal(err)
 		}
@@ -97,11 +98,11 @@ func TestCreateCardValidation(t *testing.T) {
 		`{"type":"template","data":"{\"template_id\":42}"}`,
 		`{"type":"template","data":"{\"template_id\":\"x\",\"template_variable\":[]}"}`,
 		`{"type":"bogus","data":"{}"}`,
-		fmt.Sprintf(`{"type":"card_json","data":%q}`, strings.Replace(testCardJSON, `"element_id":"hr"`, `"element_id":"a"`, 1)),
 		fmt.Sprintf(`{"type":"card_json","data":%q}`, strings.Replace(testCardJSON, `"streaming_mode":true`, `"streaming_mode":"yes"`, 1)),
 	} {
 		f.call(t, "t-owner", "POST", "", body, 99992402)
 	}
+	f.call(t, "t-owner", "POST", "", fmt.Sprintf(`{"type":"card_json","data":%q}`, strings.Replace(testCardJSON, `"element_id":"hr"`, `"element_id":"a"`, 1)), 300301)
 	f.call(t, "", "POST", "", `{}`, 99991661)
 	f.call(t, "u-owner", "POST", "", `{}`, 99991668)
 	if cards := f.state.Cards(); len(cards) != 0 {
@@ -132,7 +133,10 @@ func TestCardMutationTransactions(t *testing.T) {
 		{"PUT", stream, `{"sequence":2147483648,"content":"overflow"}`, 99992402},
 		{"PUT", stream, `{"sequence":1.5,"content":"float"}`, 99992402},
 		{"PUT", stream, `{"sequence":2,"content":"stream 2","uuid":"retry"}`, 0},
-		{"PUT", stream, `{"sequence":2,"content":"changed","uuid":"retry"}`, 0},
+		{"PUT", stream, `{"uuid":"retry","content":"stream 2","sequence":2}`, 0},
+		{"PUT", stream, `{"sequence":2,"content":"changed","uuid":"retry"}`, 200770},
+		{"PUT", stream, `{"sequence":3,"content":"stream 2","uuid":"retry"}`, 200770},
+		{"PUT", base + "/elements/hr/content", `{"sequence":2,"content":"stream 2","uuid":"retry"}`, 200770},
 		{"PUT", stream, `{"sequence":2,"content":"equal"}`, 300317},
 		{"PUT", stream, `{"sequence":1,"content":"lower"}`, 300317},
 		{"PUT", base + "/elements/hr/content", `{"sequence":3,"content":"not text"}`, 300310},
@@ -224,5 +228,94 @@ func TestConcurrentCardSequences(t *testing.T) {
 	card, _ := f.state.Card(id)
 	if accepted.Load() == 0 || card.Sequence != count || card.Elements["a"] != "seq 40" {
 		t.Fatalf("invalid concurrent state: %+v", card)
+	}
+}
+
+func TestCardKitCanonicalUUID(t *testing.T) {
+	f := setup(t)
+	id := f.create(t, "card_json", testCardJSON)
+	path := "/" + id + "/settings"
+	f.call(t, "t-owner", "PATCH", path, `{"sequence":1,"uuid":"settings","settings":"{\"config\":{\"streaming_mode\":false,\"summary\":{\"content\":\"test\"}}}"}`, 0)
+	f.call(t, "t-owner", "PATCH", path, `{"uuid":"settings","settings":"{ \"config\": { \"summary\": { \"content\": \"test\" }, \"streaming_mode\": false } }","sequence":1}`, 0)
+	f.call(t, "t-owner", "PATCH", path, `{"sequence":1,"uuid":"settings","settings":"{\"config\":{\"streaming_mode\":true,\"summary\":{\"content\":\"test\"}}}"}`, 200770)
+	card, _ := f.state.Card(id)
+	if card.Sequence != 1 || card.StreamingMode || !strings.Contains(string(card.JSON), `"content":"test"`) {
+		t.Fatalf("unexpected replay state: %+v", card)
+	}
+}
+
+func TestRegisteredTemplateStreaming(t *testing.T) {
+	definition := `{"schema":"2.0","config":{"streaming_mode":true},"body":{"elements":[{"tag":"markdown","element_id":"Markdown","content":"template"},{"tag":"plain_text","element_id":"Plain","content":"fixed"}]}}`
+	f := setup(t, config.CardTemplate{TemplateID: "live", VersionName: "2", Data: definition})
+	for _, req := range []string{`{"template_id":"live","template_version_name":"2"}`, `{"template_id":"live"}`} {
+		id := f.create(t, "template", req)
+		base := "/" + id
+		f.call(t, "t-owner", "PUT", base, `{"sequence":1,"card":{"type":"template","data":"{\"template_id\":\"live\"}"}}`, 99992402)
+		f.call(t, "t-owner", "PUT", base+"/elements/Plain/content", `{"sequence":1,"content":"blocked"}`, 300310)
+		f.call(t, "t-owner", "PUT", base+"/elements/Markdown/content", `{"sequence":1,"content":"template streamed"}`, 0)
+		card, _ := f.state.Card(id)
+		if card.Type != "template" || len(card.TemplateData) == 0 || card.Sequence != 1 || card.Elements["Markdown"] != "template streamed" || card.Elements["Plain"] != "fixed" {
+			t.Fatalf("unexpected registered template state: %+v", card)
+		}
+	}
+	id := f.create(t, "template", `{"template_id":"live","template_version_name":"missing"}`)
+	f.call(t, "t-owner", "PUT", "/"+id+"/elements/Markdown/content", `{"sequence":1,"content":"blocked"}`, 300303)
+}
+
+func TestCardKitElementIDAndHeaderValidation(t *testing.T) {
+	f := setup(t)
+	const cardDoc = `{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"heading"},"text_tag_list":[{"tag":"text_tag","element_id":"Label_1","text":{"tag":"plain_text","content":"label"}}]},"body":{"elements":[{"tag":"markdown","element_id":"Body_1","content":"body"}]}}`
+	for _, tc := range []struct {
+		doc  string
+		code int
+	}{
+		{strings.Replace(cardDoc, "Body_1", "Label_1", 1), 300301},
+		{strings.Replace(cardDoc, `"tag":"text_tag"`, `"tag":"button"`, 1), 99992402},
+		{strings.Replace(cardDoc, `"content":"label"`, `"content":3`, 1), 99992402},
+		{`{"schema":"2.0","body":{"elements":[` + strings.Repeat(`{"tag":"hr"},`, 200) + `{"tag":"hr"}]}}`, 300305},
+		{strings.Replace(cardDoc, "Body_1", "1StartsWithDigit", 1), 99992402},
+		{strings.Replace(cardDoc, "Label_1", "_StartsWithUnderscore", 1), 99992402},
+		{strings.Replace(cardDoc, "Body_1", "Hyphen-invalid", 1), 99992402},
+		{strings.Replace(cardDoc, "Label_1", "Féishu", 1), 99992402},
+	} {
+		f.call(t, "t-owner", "POST", "", fmt.Sprintf(`{"type":"card_json","data":%q}`, tc.doc), tc.code)
+	}
+	id := f.create(t, "card_json", cardDoc)
+	base := "/" + id
+	f.call(t, "t-owner", "PATCH", base+"/elements/Label_1", `{"sequence":1,"partial_element":"{\"element_id\":\"Body_1\"}"}`, 300301)
+	f.call(t, "t-owner", "PATCH", base+"/elements/Label_1", `{"sequence":1,"partial_element":"{\"element_id\":\"Z-1\"}"}`, 99992402)
+	f.call(t, "t-owner", "PATCH", base+"/elements/Label_1", `{"sequence":1,"partial_element":"{\"text\":{\"content\":\"new label\"}}"}`, 0)
+	f.call(t, "t-owner", "DELETE", base+"/elements/1Invalid", `{"sequence":2}`, 99992402)
+	f.call(t, "t-owner", "POST", base+"/elements", `{"sequence":2,"type":"insert_after","target_element_id":"bad-id","elements":"[{\"tag\":\"hr\"}]"}`, 99992402)
+	f.call(t, "t-owner", "POST", base+"/batch_update", `{"sequence":2,"actions":"[{\"action\":\"delete_elements\",\"params\":{\"element_ids\":[\"_bad\"]}}]"}`, 99992402)
+	card, _ := f.state.Card(id)
+	if card.Sequence != 1 || !strings.Contains(string(card.JSON), "new label") {
+		t.Fatalf("header change did not persist: %+v", card)
+	}
+}
+
+func TestCardKitStreamingWindowAndLifetime(t *testing.T) {
+	f := setup(t)
+	id := f.create(t, "card_json", testCardJSON)
+	base, stream := "/"+id, "/"+id+"/elements/a/content"
+	f.call(t, "t-owner", "PATCH", base+"/settings", `{"sequence":1,"settings":"{\"config\":{\"streaming_config\":{\"print_step\":{\"pc\":2}}}}"}`, 99992402)
+	f.call(t, "t-owner", "PATCH", base+"/settings", `{"sequence":1,"settings":"{\"config\":{\"streaming_config\":{\"print_frequency_ms\":{\"default\":70},\"print_step\":{\"default\":1,\"pc\":2}}}}"}`, 0)
+
+	f.elapsed.Store(int64(10*time.Minute - time.Nanosecond))
+	f.call(t, "t-owner", "PUT", stream, `{"sequence":2,"content":"still streaming"}`, 0)
+	f.elapsed.Store(int64(10 * time.Minute))
+	f.call(t, "t-owner", "PUT", stream, `{"sequence":3,"content":"timed out"}`, 200850)
+	f.call(t, "t-owner", "PATCH", base+"/settings", `{"sequence":3,"settings":"{\"config\":{\"streaming_mode\":true}}"}`, 0)
+	f.call(t, "t-owner", "PUT", stream, `{"sequence":4,"content":"resumed"}`, 0)
+
+	f.elapsed.Store(int64(14*24*time.Hour - time.Nanosecond))
+	f.call(t, "t-owner", "PUT", base, fmt.Sprintf(`{"sequence":5,"card":{"type":"card_json","data":%q}}`, testCardJSON), 0)
+	f.elapsed.Store(int64(14 * 24 * time.Hour))
+	f.call(t, "t-owner", "PUT", stream, `{"sequence":6,"content":"expired"}`, 200750)
+	f.call(t, "t-owner", "PATCH", base+"/settings", `{"sequence":6,"settings":"{\"config\":{\"streaming_mode\":true}}"}`, 200750)
+	f.call(t, "t-other", "PUT", stream, `{"sequence":6,"content":"foreign expired"}`, 300311)
+	card, _ := f.state.Card(id)
+	if card.Sequence != 5 || card.Elements["a"] != "start" {
+		t.Fatalf("expired mutation committed: %+v", card)
 	}
 }
