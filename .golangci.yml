@@ -1,0 +1,43 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errcheck
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    gosec:
+      excludes:
+        - G404 # math/rand acceptable in non-crypto test/mock helpers when explicitly chosen
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: error-strings
+        - name: indent-error-flow
+        - name: var-naming
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
