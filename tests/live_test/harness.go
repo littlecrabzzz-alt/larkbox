@@ -6,6 +6,7 @@ package livetest
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,10 +30,17 @@ import (
 const (
 	botInfoPath = "/open-apis/bot/v3/info"
 	okData      = `{"code":0,"msg":"","data":{}}`
+	liveOKData  = `{"code":0,"msg":"","data?":{}}`
+	diagnostics = `"error?":{"log_id?":"","message?":"","troubleshooter?":"",
+		"helps?":[{"url?":"","description?":""}],
+		"field_violations?":[{"field?":"","description?":"","value?":""}],
+		"permission_violations?":[{"type?":"","subject?":"","description?":""}],
+		"details?":[{"key?":"","value?":""}]}`
 )
 
 type harness struct {
 	base, appID, appSecret, chatID, openID string
+	live                                   bool
 	http                                   *http.Client
 	sdk                                    *lark.Client
 }
@@ -49,7 +57,8 @@ func newHarness(t *testing.T) *harness {
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	if get("FEISHU_LIVE") == "1" {
+	h.live = get("FEISHU_LIVE") == "1"
+	if h.live {
 		h.appID, h.appSecret = get("FEISHU_APP_ID"), get("FEISHU_APP_SECRET")
 		if h.appID == "" || h.appSecret == "" {
 			t.Fatal("FEISHU_LIVE=1 requires FEISHU_APP_ID and FEISHU_APP_SECRET")
@@ -58,10 +67,8 @@ func newHarness(t *testing.T) *harness {
 		if h.base == "" {
 			h.base = "https://open.feishu.cn"
 		}
-		base, err := url.Parse(h.base)
-		if err != nil || base.Host == "" || (base.Scheme != "https" && base.Scheme != "http") ||
-			base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-			t.Fatal("FEISHU_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment")
+		if err := validateBaseURL(h.base); err != nil {
+			t.Fatal(err)
 		}
 		h.chatID, h.openID = get("FEISHU_TEST_CHAT_ID"), get("FEISHU_TEST_OPEN_ID")
 		t.Log("target: Feishu test tenant")
@@ -86,6 +93,22 @@ func newHarness(t *testing.T) *harness {
 	h.sdk = lark.NewClient(h.appID, h.appSecret, lark.WithOpenBaseUrl(h.base),
 		lark.WithHttpClient(h.http), lark.WithEnableTokenCache(false), lark.WithLogger(quietLogger{}))
 	return h
+}
+
+func validateBaseURL(raw string) error {
+	base, err := url.Parse(raw)
+	if err != nil || base.Hostname() == "" || (base.Scheme != "https" && base.Scheme != "http") ||
+		base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" {
+		return errors.New("FEISHU_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment")
+	}
+	switch strings.ToLower(base.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	}
+	if base.Scheme != "https" {
+		return errors.New("FEISHU_BASE_URL requires HTTPS for non-loopback hosts")
+	}
+	return nil
 }
 
 type quietLogger struct{}
@@ -182,14 +205,80 @@ func requireSDK(t *testing.T, operation string, err error) {
 	}
 }
 
-func golden(t *testing.T, name string, resp *larkcore.ApiResp) {
-	t.Helper()
-	fixturetest.Golden(t, name, resp.StatusCode, resp.RawBody, false)
+func liveErrorShape(code int) string {
+	return `{"code":` + strconv.Itoa(code) + `,"msg":"","data?":{},` + diagnostics + `}`
 }
 
-func expectOK(t *testing.T, resp *larkcore.ApiResp) {
+func (h *harness) checkResponse(t *testing.T, name string, resp *larkcore.ApiResp, status int, shape string) {
 	t.Helper()
-	fixturetest.Envelope(t, resp.StatusCode, resp.RawBody, http.StatusOK, okData)
+	h.checkWire(t, name, resp.StatusCode, resp.RawBody, status, shape)
+}
+
+func (h *harness) checkWire(t *testing.T, name string, status int, raw []byte, liveStatus int, liveShape string) {
+	t.Helper()
+	if h.live {
+		fixturetest.Envelope(t, status, raw, liveStatus, liveShape)
+		return
+	}
+	fixturetest.Golden(t, name, status, raw, false)
+}
+
+func (h *harness) expectOK(t *testing.T, resp *larkcore.ApiResp) {
+	t.Helper()
+	shape := okData
+	if h.live {
+		shape = liveOKData
+	}
+	fixturetest.Envelope(t, resp.StatusCode, resp.RawBody, http.StatusOK, shape)
+}
+
+type mutation func(context.Context) (*larkcore.ApiResp, error)
+
+func registerMutation(t *testing.T, operation string, apply, fallback mutation) func() *larkcore.ApiResp {
+	t.Helper()
+	done := false
+	if fallback == nil {
+		fallback = apply
+	}
+	t.Cleanup(func() {
+		if done {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := runMutation(ctx, fallback); err != nil {
+			t.Logf("%s cleanup: %v", operation, err)
+		}
+	})
+	return func() *larkcore.ApiResp {
+		t.Helper()
+		resp, err := runMutation(t.Context(), apply)
+		if err != nil {
+			t.Fatalf("%s: %v", operation, err)
+		}
+		done = true
+		return resp
+	}
+}
+
+func runMutation(ctx context.Context, apply mutation) (*larkcore.ApiResp, error) {
+	response, err := apply(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("SDK failed (%T)", err)
+	}
+	if response == nil {
+		return nil, errors.New("missing SDK response")
+	}
+	var result struct {
+		Code *int `json:"code"`
+	}
+	if json.Unmarshal(response.RawBody, &result) != nil || result.Code == nil {
+		return nil, fmt.Errorf("missing business code (HTTP %d)", response.StatusCode)
+	}
+	if response.StatusCode != http.StatusOK || *result.Code != 0 {
+		return nil, fmt.Errorf("HTTP %d, business code %d", response.StatusCode, *result.Code)
+	}
+	return response, nil
 }
 
 func value[T any](p *T) T {

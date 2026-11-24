@@ -3,6 +3,8 @@
 package livetest
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -17,7 +19,24 @@ func TestCardKitStreamingContract(t *testing.T) {
 	created, err := api.Card.Create(t.Context(), larkcardkit.NewCreateCardReqBuilder().
 		Body(larkcardkit.NewCreateCardReqBodyBuilder().Type("card_json").Data(card).Build()).Build(), tenant)
 	requireSDK(t, "create streaming card", err)
-	golden(t, "cardkit/card_create_ok", created.ApiResp)
+	var closeStream func() *larkcore.ApiResp
+	if created.Data != nil && value(created.Data.CardId) != "" {
+		id := value(created.Data.CardId)
+		closeAt := func(sequence int) mutation {
+			return func(ctx context.Context) (*larkcore.ApiResp, error) {
+				resp, err := api.Card.Settings(ctx, larkcardkit.NewSettingsCardReqBuilder().CardId(id).
+					Body(larkcardkit.NewSettingsCardReqBodyBuilder().Sequence(sequence).
+						Settings(`{"config":{"streaming_mode":false}}`).Build()).Build(), tenant)
+				if err != nil {
+					return nil, err
+				}
+				return resp.ApiResp, nil
+			}
+		}
+		closeStream = registerMutation(t, "close streaming mode", closeAt(2), closeAt(100))
+	}
+	h.checkResponse(t, "cardkit/card_create_ok", created.ApiResp, http.StatusOK,
+		`{"code":0,"msg":"","data":{"card_id":"fixture:card_id"}}`)
 	id := value(created.Data.CardId)
 
 	stream := func(text string) *larkcore.ApiResp {
@@ -27,11 +46,8 @@ func TestCardKitStreamingContract(t *testing.T) {
 		requireSDK(t, "stream card element", err)
 		return resp.ApiResp
 	}
-	expectOK(t, stream("updated"))
-	golden(t, "cardkit/card_element_content_stale_seq_300317", stream("duplicate sequence"))
-
-	closed, err := api.Card.Settings(t.Context(), larkcardkit.NewSettingsCardReqBuilder().CardId(id).
-		Body(larkcardkit.NewSettingsCardReqBodyBuilder().Sequence(2).Settings(`{"config":{"streaming_mode":false}}`).Build()).Build(), tenant)
-	requireSDK(t, "close streaming mode", err)
-	expectOK(t, closed.ApiResp)
+	h.expectOK(t, stream("updated"))
+	h.checkResponse(t, "cardkit/card_element_content_stale_seq_300317", stream("duplicate sequence"),
+		http.StatusBadRequest, liveErrorShape(300317))
+	h.expectOK(t, closeStream())
 }

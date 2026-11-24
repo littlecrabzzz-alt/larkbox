@@ -23,7 +23,12 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/tests/fixturetest"
 )
 
-var sensitiveFixtureValue = regexp.MustCompile(`(?i)(\bbearer[ \t]+[a-z0-9_-]{12,}|\b(?:t|a|u|ur)-[a-z0-9_-]{16,}|\b(?:cli|ou|on|oc|om|omt|omr|evt|img_v3|file_v3)_[a-z0-9_-]{20,}|\b(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|[a-z0-9_.+%-]+@[a-z0-9.-]+\.[a-z]{2,}|\b(?:\+?86[ -]?)?1[3-9][0-9]{9}\b)`)
+var sensitiveFixtureValue = regexp.MustCompile(`(?i)(` +
+	`\bbearer[ \t]+[a-z0-9_-]{12,}|\bbasic[ \t]+[a-z0-9+/]+={0,2}|\b(?:t|a|u|ur|c)-[a-z0-9_-]{16,}|` +
+	`\bcli_[a-z0-9_-]{16,}|\b(?:ou|on|oc|om|omt|omr|evt|img_v3|file_v3)_[a-z0-9_-]{20,}|` +
+	`\bopen\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/(?:v2/)?hook/[a-z0-9_-]+|` +
+	`\b(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|` +
+	`\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|[a-z0-9_.+%-]+@[a-z0-9.-]+\.[a-z]{2,}|\b(?:\+?86[ -]?)?1[3-9][0-9]{9}\b)`)
 var sensitiveFixtureKey = regexp.MustCompile(`(?i)(?:secret|token|tenant[_-]?key|encrypt[_-]?key|password|authorization|cookie|api[_-]?key|private[_-]?key|email|mobile|phone|credential)`)
 
 func TestGoldenFixtureHygiene(t *testing.T) {
@@ -55,7 +60,9 @@ func TestGoldenFixtureHygiene(t *testing.T) {
 				doc.Status < 100 || doc.Status > 599 || doc.Body == nil {
 				t.Fatal("expected a JSON fixture with an HTTP status and an object body")
 			}
-			checkFixtureFields(t, doc.Body)
+			if hasFixtureLeak(doc.Body) {
+				t.Fatal("decoded JSON contains a credential, live ID, PII, or unredacted sensitive field")
+			}
 		})
 		return nil
 	})
@@ -64,32 +71,65 @@ func TestGoldenFixtureHygiene(t *testing.T) {
 	}
 }
 
-func checkFixtureFields(t *testing.T, value any) {
-	t.Helper()
+func hasFixtureLeak(value any) bool {
 	switch node := value.(type) {
 	case map[string]any:
 		for key, child := range node {
-			if sensitiveFixtureKey.MatchString(key) {
+			switch {
+			case strings.EqualFold(key, "encrypt"):
+				if child != "fixture:encrypt" && child != "fixture:redacted" {
+					return true
+				}
+			case sensitiveFixtureKey.MatchString(key):
 				switch child {
-				case "", "fixture:redacted", "fixture:tenant", "fixture:app_token", "fixture:nonce":
+				case "", "fixture:redacted", "fixture:tenant", "fixture:app_token", "fixture:callback_token":
 				default:
-					t.Errorf("%q contains an unredacted sensitive field", key)
+					return true
 				}
 			}
-			checkFixtureFields(t, child)
+			if sensitiveFixtureValue.MatchString(key) || hasFixtureLeak(child) {
+				return true
+			}
 		}
 	case []any:
 		for _, child := range node {
-			checkFixtureFields(t, child)
+			if hasFixtureLeak(child) {
+				return true
+			}
 		}
 	case string:
 		if sensitiveFixtureValue.MatchString(node) {
-			t.Error("decoded string contains a credential, live ID, or PII pattern")
+			return true
 		}
-		var embedded map[string]any
-		if strings.HasPrefix(strings.TrimSpace(node), "{") && json.Unmarshal([]byte(node), &embedded) == nil {
-			checkFixtureFields(t, embedded)
+		text := strings.TrimSpace(node)
+		if strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[") {
+			var embedded any
+			return json.Unmarshal([]byte(text), &embedded) == nil && hasFixtureLeak(embedded)
 		}
+	}
+	return false
+}
+
+func TestGoldenFixtureHygieneRejectsLeaks(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+	}{
+		{"embedded array", `{"content":"[{\"app_secret\":\"example\"}]"}`},
+		{"embedded object", `{"content":"{\"tenantKey\":\"example\"}"}`},
+		{"short app ID", `{"label":"cli_0123456789abcdef"}`},
+		{"bot webhook URL", `{"url":"https://open.feishu.cn/open-apis/bot/v2/hook/example"}`},
+		{"Basic authorization", `{"comment":"Basic dXNlcjpwYXNz"}`},
+		{"raw ciphertext", `{"encrypt":"U3ludGhldGljIGNpcGhlcnRleHQ="}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+			if err := json.Unmarshal([]byte(tc.input), &body); err != nil {
+				t.Fatal("invalid synthetic input")
+			}
+			if !hasFixtureLeak(body) {
+				t.Fatal("hygiene scanner accepted a synthetic leak")
+			}
+		})
 	}
 }
 

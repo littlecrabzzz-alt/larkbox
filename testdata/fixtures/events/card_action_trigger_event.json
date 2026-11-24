@@ -17,7 +17,7 @@
         "open_id": "fixture:id",
         "union_id": "fixture:id"
       },
-      "token": "fixture:nonce",
+      "token": "fixture:callback_token",
       "action": {
         "value": {
           "action": "confirm"

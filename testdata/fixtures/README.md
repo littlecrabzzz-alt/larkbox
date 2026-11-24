@@ -6,9 +6,11 @@ response status. Outbound event fixtures pair the delivered request body with th
 receiver's acknowledgement status. The encrypted URL verification fixture
 covers the outer envelope, and the plain fixture also checks the decrypted body.
 
-The initial fixtures are synthetic examples of the protocol implemented by the
-sandbox. Record the source and capture date in this README when refreshing a
-fixture from Feishu.
+The fixtures are synthetic sandbox reference examples. Record the source and
+capture date in this README when refreshing a fixture from Feishu. Live
+responses can differ through optional diagnostics or message context fields.
+Preserve those fields in sanitized captures and review their types separately
+from the exact sandbox fixture shape.
 
 ## Sanitization
 
@@ -28,7 +30,8 @@ values determined at runtime.
 | `fixture:card_id` | Decimal CardKit entity ID |
 | `fixture:millis`, `fixture:micros` | String Unix timestamps in milliseconds or microseconds |
 | `fixture:tenant`, `fixture:app_token` | Issued tenant and app access tokens |
-| `fixture:nonce` | URL challenge or generated card-action token |
+| `fixture:nonce` | URL verification challenge |
+| `fixture:callback_token` | Generated card-action token. The sandbox sends 32 hex characters. A live callback can carry a `c-` token. |
 | `fixture:encrypt` | Encrypted webhook ciphertext |
 | `fixture:redacted` | Fixed, synthetic replacement for a provisioned credential or tenant key |
 

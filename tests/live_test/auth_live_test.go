@@ -5,6 +5,7 @@ package livetest
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -15,44 +16,57 @@ import (
 
 const tenantPath = "/open-apis/auth/v3/tenant_access_token/internal"
 
+const (
+	tenantEnvelope = `{"code":0,"msg":"","expire":0,"tenant_access_token":"fixture:tenant"}`
+	appEnvelope    = `{"code":0,"msg":"","expire":0,"tenant_access_token":"fixture:tenant","app_access_token":"fixture:live_app_token"}`
+)
+
 func TestAuthContract(t *testing.T) {
 	h := newHarness(t)
 	t.Run("tenant token", func(t *testing.T) {
 		resp, err := h.sdk.Auth.TenantAccessToken.Internal(t.Context(), larkauth.NewInternalTenantAccessTokenReqBuilder().
 			Body(larkauth.NewInternalTenantAccessTokenReqBodyBuilder().AppId(h.appID).AppSecret(h.appSecret).Build()).Build())
 		requireSDK(t, "get tenant token", err)
-		golden(t, "auth/tenant_access_token_ok", resp.ApiResp)
+		h.checkResponse(t, "auth/tenant_access_token_ok", resp.ApiResp, http.StatusOK, tenantEnvelope)
 	})
 	t.Run("app token", func(t *testing.T) {
 		resp, err := h.sdk.Auth.AppAccessToken.Internal(t.Context(), larkauth.NewInternalAppAccessTokenReqBuilder().
 			Body(larkauth.NewInternalAppAccessTokenReqBodyBuilder().AppId(h.appID).AppSecret(h.appSecret).Build()).Build())
 		requireSDK(t, "get app token", err)
-		golden(t, "auth/app_access_token_ok", resp.ApiResp)
+		h.checkResponse(t, "auth/app_access_token_ok", resp.ApiResp, http.StatusOK, appEnvelope)
 	})
 	wrong, err := json.Marshal(map[string]string{"app_id": h.appID, "app_secret": "invalid-fixture-secret"})
 	requireSDK(t, "encode invalid credentials", err)
 	for _, tc := range []struct {
 		name, fixture string
 		body          []byte
+		status, code  int
 	}{
-		{"bad secret", "auth/tenant_access_token_bad_secret", wrong},
-		{"missing parameter", "auth/tenant_access_token_missing_param", []byte("{}")},
-		{"malformed JSON", "auth/tenant_access_token_malformed", []byte("{")},
+		{"bad secret", "auth/tenant_access_token_bad_secret", wrong, http.StatusOK, 10015},
+		{"missing parameter", "auth/tenant_access_token_missing_param", []byte("{}"), http.StatusOK, 10003},
+		{"malformed JSON", "auth/tenant_access_token_malformed", []byte("{"), http.StatusBadRequest, 9499},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, raw := fixturetest.Request(t, h.http, h.base, http.MethodPost, tenantPath, "", tc.body)
-			fixturetest.Golden(t, tc.fixture, status, raw, false)
+			h.checkWire(t, tc.fixture, status, raw, tc.status, liveErrorShape(tc.code))
 		})
 	}
 	for _, tc := range []struct {
-		name, token, shape string
+		name, token string
+		code        int
+		alternate   []int
 	}{
-		{"missing bearer", "", `{"code":99991661,"msg":""}`},
-		{"invalid bearer", "t-invalid-fixture-token", `{"code":99991665,"msg":""}`},
+		{"missing bearer", "", 99991661, nil},
+		{"invalid bearer", "t-invalid-fixture-token", 99991665, []int{99991663}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, raw := fixturetest.Request(t, h.http, h.base, http.MethodGet, botInfoPath, tc.token, nil)
-			fixturetest.Envelope(t, status, raw, http.StatusBadRequest, tc.shape)
+			if h.live {
+				fixturetest.Envelope(t, status, raw, http.StatusBadRequest, liveErrorShape(tc.code), tc.alternate...)
+			} else {
+				shape := `{"code":` + strconv.Itoa(tc.code) + `,"msg":""}`
+				fixturetest.Envelope(t, status, raw, http.StatusBadRequest, shape)
+			}
 		})
 	}
 }

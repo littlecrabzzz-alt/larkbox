@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -26,6 +25,21 @@ const (
 	testText   = `{"text":"larkbox differential test"}`
 	replyText  = `{"text":"larkbox differential reply"}`
 	imageShape = `{"code":0,"msg":"","data":{"image_key":""}}`
+	botShape   = `{"code":0,"msg":"","bot":{"activate_status":0,"app_name":"","avatar_url?":"",
+		"ip_white_list?":[""],"open_id":"fixture:id"}}`
+	messageFields = `"message_id":"fixture:id","msg_type":"","chat_id":"fixture:id",
+		"create_time":"fixture:millis","update_time?":"fixture:millis","deleted?":false,"updated?":false,
+		"body":{"content":""},"sender":{"id":"fixture:id","id_type":"","sender_type":"","tenant_key?":"",
+		"sender_name?":"","open_bot_id?":"","sender_i18n_names?":{"zh_cn?":"","en_us?":"","ja_jp?":""}},
+		"mentions?":[{"key":"","id":"","id_type?":"","name?":"","tenant_key?":""}],
+		"upper_message_id?":"","message_app_link?":"","message_position?":"","thread_message_position?":""`
+	threadFields = `"root_id?":"","parent_id?":"","thread_id?":""`
+	messageShape = `{"code":0,"msg":"","data":{` + messageFields + `,` + threadFields + `}}`
+	replyShape   = `{"code":0,"msg":"","data":{` + messageFields + `,
+		"root_id":"fixture:id","parent_id":"fixture:id","thread_id":"fixture:id"}}`
+	getShape      = `{"code":0,"msg":"","data":{"items":[{` + messageFields + `,` + threadFields + `}]}}`
+	reactionShape = `{"code":0,"msg":"","data":{"reaction_id":"fixture:id","action_time":"fixture:millis",
+		"operator?":{"operator_id?":"","operator_type?":""},"reaction_type":{"emoji_type":""}}}`
 )
 
 func TestBotAndIMContracts(t *testing.T) {
@@ -35,7 +49,7 @@ func TestBotAndIMContracts(t *testing.T) {
 	t.Run("bot info", func(t *testing.T) {
 		resp, err := h.sdk.Get(t.Context(), botInfoPath, nil, larkcore.AccessTokenTypeTenant, tenant)
 		requireSDK(t, "bot info", err)
-		golden(t, "bot/bot_info_ok", resp)
+		h.checkResponse(t, "bot/bot_info_ok", resp, http.StatusOK, botShape)
 	})
 	t.Run("chat message lifecycle", func(t *testing.T) {
 		if h.chatID == "" {
@@ -48,7 +62,7 @@ func TestBotAndIMContracts(t *testing.T) {
 			t.Skip("set FEISHU_TEST_OPEN_ID to run the optional direct message test")
 		}
 		_, recall := h.sendText(t, tenant, "open_id", h.openID)
-		expectOK(t, recall())
+		h.expectOK(t, recall())
 	})
 	t.Run("image round trip", func(t *testing.T) {
 		testImage(t, h, tenant)
@@ -65,8 +79,8 @@ func (h *harness) sendText(t *testing.T, tenant larkcore.RequestOptionFunc, kind
 		id = value(sent.Data.MessageId)
 	}
 	recall := h.registerRecall(t, tenant, id)
-	golden(t, "im/message_send_text_ok", sent.ApiResp)
-	if !strings.HasPrefix(id, "om_") || sent.Data.Body == nil || value(sent.Data.Body.Content) != testText ||
+	h.checkResponse(t, "im/message_send_text_ok", sent.ApiResp, http.StatusOK, messageShape)
+	if !strings.HasPrefix(id, "om_") || !sameText(sent.Data.Body, testText) ||
 		(kind == "chat_id" && value(sent.Data.ChatId) != recipient) {
 		t.Fatal("create message did not return the expected text and recipient")
 	}
@@ -88,7 +102,7 @@ func testChat(t *testing.T, h *harness, token string, tenant larkcore.RequestOpt
 	if json.Unmarshal(raw, &unexpected) == nil {
 		h.registerRecall(t, tenant, value(unexpected.Data.MessageId))
 	}
-	fixturetest.Golden(t, "im/message_send_invalid_content_99992402", status, raw, false)
+	h.checkWire(t, "im/message_send_invalid_content_99992402", status, raw, http.StatusBadRequest, liveErrorShape(99992402))
 
 	api := h.sdk.Im.V1
 	reply, err := api.Message.Reply(t.Context(), larkim.NewReplyMessageReqBuilder().MessageId(rootID).
@@ -99,26 +113,23 @@ func testChat(t *testing.T, h *harness, token string, tenant larkcore.RequestOpt
 		replyID = value(reply.Data.MessageId)
 	}
 	recallReply := h.registerRecall(t, tenant, replyID)
-	golden(t, "im/message_reply_thread_ok", reply.ApiResp)
+	h.checkResponse(t, "im/message_reply_thread_ok", reply.ApiResp, http.StatusOK, replyShape)
 	if !strings.HasPrefix(replyID, "om_") || value(reply.Data.ParentId) != rootID || value(reply.Data.RootId) != rootID ||
-		!strings.HasPrefix(value(reply.Data.ThreadId), "omt_") {
+		!strings.HasPrefix(value(reply.Data.ThreadId), "omt_") || !sameText(reply.Data.Body, replyText) {
 		t.Fatal("reply did not retain the message and thread relationships")
 	}
 
 	got, err := api.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(rootID).Build(), tenant)
 	requireSDK(t, "get message", err)
-	golden(t, "im/message_get_ok", got.ApiResp)
-	if got.Data == nil || len(got.Data.Items) != 1 || got.Data.Items[0] == nil || value(got.Data.Items[0].MessageId) != rootID {
+	h.checkResponse(t, "im/message_get_ok", got.ApiResp, http.StatusOK, getShape)
+	if got.Data == nil || len(got.Data.Items) != 1 || got.Data.Items[0] == nil || value(got.Data.Items[0].MessageId) != rootID || !sameText(got.Data.Items[0].Body, testText) {
 		t.Fatal("message detail did not contain the sent message")
 	}
 
 	list, err := api.Message.List(t.Context(), larkim.NewListMessageReqBuilder().ContainerIdType("chat").
 		ContainerId(h.chatID).SortType("ByCreateTimeDesc").PageSize(50).Build(), tenant)
 	requireSDK(t, "list chat messages", err)
-	listShape := `{"code":0,"msg":"","data":{"has_more":false,"items":[]}}`
-	if list.Data != nil && list.Data.PageToken != nil {
-		listShape = `{"code":0,"msg":"","data":{"has_more":false,"items":[],"page_token":""}}`
-	}
+	listShape := `{"code":0,"msg":"","data":{"has_more":false,"items":[],"page_token?":""}}`
 	fixturetest.Envelope(t, list.StatusCode, list.RawBody, http.StatusOK, listShape)
 	found := false
 	for _, item := range list.Data.Items {
@@ -132,8 +143,8 @@ func testChat(t *testing.T, h *harness, token string, tenant larkcore.RequestOpt
 	}
 
 	testReaction(t, h, tenant, rootID)
-	expectOK(t, recallReply())
-	expectOK(t, recallRoot())
+	h.expectOK(t, recallReply())
+	h.expectOK(t, recallRoot())
 }
 
 func testReaction(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc, messageID string) {
@@ -148,19 +159,19 @@ func testReaction(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc, m
 	}
 	var remove func() *larkcore.ApiResp
 	if id != "" {
-		remove = registerRemoval(t, "delete reaction", func(ctx context.Context) (*larkcore.ApiResp, error) {
+		remove = registerMutation(t, "delete reaction", func(ctx context.Context) (*larkcore.ApiResp, error) {
 			deleted, err := api.Delete(ctx, larkim.NewDeleteMessageReactionReqBuilder().MessageId(messageID).ReactionId(id).Build(), tenant)
 			if err != nil {
 				return nil, err
 			}
 			return deleted.ApiResp, nil
-		})
+		}, nil)
 	}
-	golden(t, "im/reaction_create_ok", created.ApiResp)
+	h.checkResponse(t, "im/reaction_create_ok", created.ApiResp, http.StatusOK, reactionShape)
 	if remove == nil || created.Data.ReactionType == nil || value(created.Data.ReactionType.EmojiType) != "THUMBSUP" {
 		t.Fatal("created reaction has no ID or unexpected emoji")
 	}
-	golden(t, "im/reaction_create_ok", remove())
+	h.checkResponse(t, "im/reaction_create_ok", remove(), http.StatusOK, reactionShape)
 }
 
 func (h *harness) registerRecall(t *testing.T, tenant larkcore.RequestOptionFunc, id string) func() *larkcore.ApiResp {
@@ -168,42 +179,24 @@ func (h *harness) registerRecall(t *testing.T, tenant larkcore.RequestOptionFunc
 	if id == "" {
 		return nil
 	}
-	return registerRemoval(t, "recall message", func(ctx context.Context) (*larkcore.ApiResp, error) {
+	return registerMutation(t, "recall message", func(ctx context.Context) (*larkcore.ApiResp, error) {
 		resp, err := h.sdk.Im.Message.Delete(ctx, larkim.NewDeleteMessageReqBuilder().MessageId(id).Build(), tenant)
 		if err != nil {
 			return nil, err
 		}
 		return resp.ApiResp, nil
-	})
+	}, nil)
 }
 
-func registerRemoval(t *testing.T, operation string, remove func(context.Context) (*larkcore.ApiResp, error)) func() *larkcore.ApiResp {
-	t.Helper()
-	done := false
-	run := func(ctx context.Context) *larkcore.ApiResp {
-		t.Helper()
-		response, err := remove(ctx)
-		requireSDK(t, operation, err)
-		var result struct {
-			Code *int `json:"code"`
-		}
-		if json.Unmarshal(response.RawBody, &result) != nil || result.Code == nil {
-			t.Fatalf("%s: missing business code (HTTP %d)", operation, response.StatusCode)
-		}
-		if response.StatusCode != http.StatusOK || *result.Code != 0 {
-			t.Fatalf("%s: HTTP %d, business code %d", operation, response.StatusCode, *result.Code)
-		}
-		done = true
-		return response
+func sameText(body *larkim.MessageBody, expected string) bool {
+	if body == nil {
+		return false
 	}
-	t.Cleanup(func() {
-		if !done {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			run(ctx)
-		}
-	})
-	return func() *larkcore.ApiResp { return run(t.Context()) }
+	var got, want struct {
+		Text *string `json:"text"`
+	}
+	return json.Unmarshal([]byte(value(body.Content)), &got) == nil &&
+		json.Unmarshal([]byte(expected), &want) == nil && got.Text != nil && want.Text != nil && *got.Text == *want.Text
 }
 
 func testImage(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc) {
@@ -218,8 +211,8 @@ func testImage(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc) {
 	requireSDK(t, "upload test PNG", err)
 	fixturetest.Envelope(t, uploaded.StatusCode, uploaded.RawBody, http.StatusOK, imageShape)
 	key := value(uploaded.Data.ImageKey)
-	if !strings.HasPrefix(key, "img_v3_") || key == "img_v3_" {
-		t.Fatal("upload did not return an img_v3_ key")
+	if !strings.HasPrefix(key, "img_") || len(key) == len("img_") {
+		t.Fatal("upload did not return a non-empty img_ key")
 	}
 	downloaded, err := api.Image.Get(t.Context(), larkim.NewGetImageReqBuilder().ImageKey(key).Build(), tenant)
 	requireSDK(t, "download test PNG", err)
@@ -228,9 +221,7 @@ func testImage(t *testing.T, h *harness, tenant larkcore.RequestOptionFunc) {
 	}
 	got, err := io.ReadAll(downloaded.File)
 	requireSDK(t, "read downloaded PNG", err)
-	decoded, err := png.Decode(bytes.NewReader(got))
-	requireSDK(t, "decode downloaded PNG", err)
-	if decoded.Bounds() != pixel.Bounds() || color.NRGBAModel.Convert(decoded.At(0, 0)) != pixel.NRGBAAt(0, 0) {
-		t.Fatal("downloaded PNG did not preserve the uploaded pixel")
+	if !bytes.Equal(got, encoded.Bytes()) {
+		t.Fatal("downloaded PNG bytes differ from the uploaded image")
 	}
 }

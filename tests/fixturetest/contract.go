@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -39,10 +40,11 @@ func Golden(t *testing.T, name string, status int, body []byte, exact bool) {
 	compare(t, name, status, body, want.Status, decode(t, want.Body), exact)
 }
 
-// Envelope checks an HTTP response with a small inline contract.
-func Envelope(t *testing.T, status int, body []byte, wantStatus int, shape string) {
+// Envelope checks an inline contract. A key ending in ? is optional, with
+// its value checked when present. Alternate codes apply to the envelope only.
+func Envelope(t *testing.T, status int, body []byte, wantStatus int, shape string, alternateCodes ...int) {
 	t.Helper()
-	compare(t, "envelope", status, body, wantStatus, decode(t, []byte(shape)), false)
+	compare(t, "envelope", status, body, wantStatus, decode(t, []byte(shape)), false, alternateCodes...)
 }
 
 func decode(t *testing.T, body []byte) map[string]any {
@@ -54,7 +56,7 @@ func decode(t *testing.T, body []byte) map[string]any {
 	return object
 }
 
-func compare(t *testing.T, name string, status int, body []byte, wantStatus int, want map[string]any, exact bool) {
+func compare(t *testing.T, name string, status int, body []byte, wantStatus int, want map[string]any, exact bool, alternateCodes ...int) {
 	t.Helper()
 	if status != wantStatus {
 		t.Errorf("%s: HTTP status = %d, want %d", name, status, wantStatus)
@@ -63,7 +65,9 @@ func compare(t *testing.T, name string, status int, body []byte, wantStatus int,
 	if code, ok := want["code"]; ok && got["code"] != code {
 		// Only print numeric business codes. Unexpected bodies can carry credentials.
 		number, _ := got["code"].(float64)
-		t.Errorf("%s: business code = %v, want %v", name, number, code)
+		if !slices.ContainsFunc(alternateCodes, func(code int) bool { return float64(code) == number }) {
+			t.Errorf("%s: business code = %v, want %v or one of %v", name, number, code, alternateCodes)
+		}
 	}
 	if err := match(name, got, want, exact); err != nil {
 		t.Fatal(err)
@@ -71,14 +75,16 @@ func compare(t *testing.T, name string, status int, body []byte, wantStatus int,
 }
 
 var dynamic = map[string]*regexp.Regexp{
-	"fixture:id":        regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`),
-	"fixture:micros":    regexp.MustCompile(`^[0-9]{16}$`),
-	"fixture:card_id":   regexp.MustCompile(`^[0-9]{1,20}$`),
-	"fixture:millis":    regexp.MustCompile(`^[0-9]{13}$`),
-	"fixture:encrypt":   regexp.MustCompile(`^[A-Za-z0-9+/]{24,}={0,2}$`),
-	"fixture:tenant":    regexp.MustCompile(`^t-.+$`),
-	"fixture:app_token": regexp.MustCompile(`^a-.+$`),
-	"fixture:nonce":     regexp.MustCompile(`^[[:xdigit:]]{32}$`),
+	"fixture:id":             regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`),
+	"fixture:micros":         regexp.MustCompile(`^[0-9]{16}$`),
+	"fixture:card_id":        regexp.MustCompile(`^[0-9]{1,20}$`),
+	"fixture:millis":         regexp.MustCompile(`^[0-9]{13}$`),
+	"fixture:encrypt":        regexp.MustCompile(`^[A-Za-z0-9+/]{24,}={0,2}$`),
+	"fixture:tenant":         regexp.MustCompile(`^t-.+$`),
+	"fixture:app_token":      regexp.MustCompile(`^a-.+$`),
+	"fixture:live_app_token": regexp.MustCompile(`^[at]-.+$`),
+	"fixture:callback_token": regexp.MustCompile(`^(?:c-[A-Za-z0-9_-]+|[[:xdigit:]]{32})$`),
+	"fixture:nonce":          regexp.MustCompile(`^[[:xdigit:]]{32}$`),
 }
 
 func match(path string, got, want any, exact bool) error {
@@ -88,17 +94,28 @@ func match(path string, got, want any, exact bool) error {
 	switch expected := want.(type) {
 	case map[string]any:
 		actual := got.(map[string]any)
-		if len(actual) != len(expected) {
-			return fmt.Errorf("%s: got %d keys, want %v", path, len(actual), slices.Sorted(maps.Keys(expected)))
-		}
-		for _, key := range slices.Sorted(maps.Keys(expected)) {
+		keys := slices.Sorted(maps.Keys(expected))
+		matched := 0
+		for _, field := range keys {
+			key := field
+			optional := !exact && strings.HasSuffix(field, "?")
+			if optional {
+				key = strings.TrimSuffix(field, "?")
+			}
 			value, ok := actual[key]
 			if !ok {
+				if optional {
+					continue
+				}
 				return fmt.Errorf("%s: missing key %q", path, key)
 			}
-			if err := match(path+"."+key, value, expected[key], exact); err != nil {
+			matched++
+			if err := match(path+"."+key, value, expected[field], exact); err != nil {
 				return err
 			}
+		}
+		if matched != len(actual) {
+			return fmt.Errorf("%s: got %d unrecognized keys, expected fields %v", path, len(actual)-matched, keys)
 		}
 	case []any:
 		actual := got.([]any)
