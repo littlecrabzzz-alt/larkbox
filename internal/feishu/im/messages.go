@@ -98,9 +98,26 @@ func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.Ne
 	}, true
 }
 
+func decodeContentObject(encoded string) map[string]any {
+	if !json.Valid([]byte(encoded)) {
+		return nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	// Retain the original numeric spelling so integer fields can reject floats.
+	decoder.UseNumber()
+	var content map[string]any
+	if err := decoder.Decode(&content); err != nil {
+		return nil
+	}
+	return content
+}
+
 func checkContent(w http.ResponseWriter, kind string, encoded *string) (map[string]any, bool) {
 	var content map[string]any
-	if encoded == nil || json.Unmarshal([]byte(*encoded), &content) != nil || content == nil {
+	if encoded != nil {
+		content = decodeContentObject(*encoded)
+	}
+	if content == nil {
 		badField(w, "content", "Expected a JSON-encoded object in a string.")
 		return nil, false
 	}
@@ -388,8 +405,7 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 			return protocol.NewError(protocol.IMInvalidParameter, nil)
 		}
 		if patch {
-			var current map[string]any
-			if json.Unmarshal([]byte(m.Content), &current) != nil || !sharedCard(current) || !sharedCard(content) {
+			if !sharedCard(decodeContentObject(m.Content)) || !sharedCard(content) {
 				return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
 			}
 		}

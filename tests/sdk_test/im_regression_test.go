@@ -273,10 +273,18 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 		requireSDKNetwork(t, err)
 		return res
 	}
-	for _, invalid := range []string{
+	invalidCards := []string{
 		`{}`, `{"elements":{}}`, `{"elements":[{"content":"no tag"}]}`,
 		`{"elements":[],"header":[]}`, `{"elements":[],"config":"bad"}`,
 		`{"schema":"2.0","body":[]}`, `{"schema":"2.0","config":{"update_multi":false},"body":{"elements":[]}}`,
+		`{"schema":"2.0"}`, `{"schema":"2.0","header":{}}`,
+		`{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"Title"}},"body":null}`,
+		`{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"Title"}},"body":{"elements":"invalid"}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"button","text":{"tag":"plain_text","content":"Button"},"size":5}]}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"select_static","options":[{"value":"one"}],"width":10}]}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"select_static","options":{"value":"one"}}]}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"date_picker","initial_date":20260101}]}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"checker","checked":"true"}]}}`,
 		`{"type":"template","data":{"template_id":7}}`,
 		`{"i18n_elements":{}}`, `{"i18n_elements":{"en_us":[]}}`, `{"i18n_elements":{"en_us":{"tag":"hr"}}}`,
 		`{"i18n_elements":{"en_us":[{"tag":"markdown","content":42}]}}`,
@@ -288,7 +296,20 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 		`{"elements":[{"tag":"note","elements":[{"tag":"plain_text","content":[] }]}]}`,
 		`{"elements":[{"tag":"form","name":"feedback","elements":[{"tag":"input","name":"reason"}]}]}`,
 		`{"elements":[{"tag":"collapsible_panel","header":{"title":{"tag":"plain_text","content":3}}}]}`,
+	}
+	nestedInput := func(fields string) string {
+		return `{"schema":"2.0","body":{"elements":[{"tag":"column_set","columns":[{"tag":"column","elements":[{"tag":"input",` +
+			fields + `}]}]}]}}`
+	}
+	for _, field := range []string{
+		`"max_length":"123"`, `"max_length":1.0`, `"max_length":5.2`, `"max_length":0`, `"max_length":1001`,
+		`"default_value":2`, `"required":"true"`, `"disabled":1`, `"input_type":true`, `"rows":0`, `"rows":2.0`,
+		`"max_rows":"3"`, `"max_rows":-1`, `"show_icon":"false"`, `"width":20`, `"name":[]`,
+		`"placeholder":"Plain text"`, `"label":{"tag":"plain_text","content":4}`,
 	} {
+		invalidCards = append(invalidCards, nestedInput(field))
+	}
+	for _, invalid := range invalidCards {
 		sent, err := api.Create(t.Context(), larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").
 			Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType("interactive").Content(invalid).Build()).Build())
 		requireSDKNetwork(t, err)
@@ -318,5 +339,23 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	}
 	requireSDKCode(t, patch(value(localizedMessage.MessageId),
 		`{"config":{"update_multi":true},"i18n_elements":{"en_us":[{"tag":"markdown","content":"Updated"}]}}`).CodeError, 0)
+	titleOnly := `{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"Initial title"}}}`
+	newTitle := `{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"Updated title"}}}`
+	titleMessage := sdkSend(t, client, "chat_id", chatID, "interactive", titleOnly)
+	titleID := value(titleMessage.MessageId)
+	requireSDKCode(t, patch(titleID, newTitle).CodeError, 0)
+	titleDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(titleID).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, titleDetail.CodeError, 0)
+	if len(titleDetail.Data.Items) != 1 || value(titleDetail.Data.Items[0].Body.Content) != newTitle ||
+		!value(titleDetail.Data.Items[0].Updated) {
+		t.Fatalf("title-only card PATCH was not persisted: %s", titleDetail.RawBody)
+	}
+
+	validInput := nestedInput(`"max_length":1000,"default_value":"Draft","required":true,"disabled":false,
+		"input_type":"multiline_text","rows":1,"max_rows":5,"auto_resize":true,"show_icon":false,"width":"fill","name":"feedback",
+		"placeholder":{"content":"Type here"},"label":{"tag":"plain_text","content":"Feedback"}`)
+	inputMessage := sdkSend(t, client, "chat_id", chatID, "interactive", validInput)
+	requireSDKCode(t, patch(value(inputMessage.MessageId), nestedInput(`"max_length":1,"rows":1,"max_rows":1`)).CodeError, 0)
 	requireSDKCode(t, patch(id, `{"schema":"2.0","body":{"elements":[]}}`).CodeError, 0)
 }

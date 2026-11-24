@@ -1,6 +1,10 @@
 package im
 
-import "slices"
+import (
+	"encoding/json"
+	"math"
+	"slices"
+)
 
 func validCard(card map[string]any) bool {
 	if kind, exists := card["type"]; exists {
@@ -21,9 +25,15 @@ func validCard(card map[string]any) bool {
 	}
 	switch schema {
 	case "2.0":
-		body, ok := card["body"].(map[string]any)
-		_, localized := card["i18n_elements"]
-		return !localized && config["update_multi"] != false && ok && validCardElements(body["elements"])
+		if _, localized := card["i18n_elements"]; localized || config["update_multi"] == false {
+			return false
+		}
+		if value, present := card["body"]; present {
+			body, ok := value.(map[string]any)
+			return ok && validCardElements(body["elements"])
+		}
+		header, _ := card["header"].(map[string]any)
+		return header["title"] != nil || header["subtitle"] != nil
 	case "1.0":
 		if localized, supplied := card["i18n_elements"]; supplied {
 			_, plain := card["elements"]
@@ -45,6 +55,22 @@ func optionalCardType[T any](obj map[string]any, names ...string) bool {
 	for _, name := range names {
 		if value, exists := obj[name]; exists {
 			if _, ok := value.(T); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func optionalCardInts(obj map[string]any, max int64, names ...string) bool {
+	for _, name := range names {
+		if value, exists := obj[name]; exists {
+			number, ok := value.(json.Number)
+			if !ok {
+				return false
+			}
+			n, err := number.Int64()
+			if err != nil || n < 1 || n > max {
 				return false
 			}
 		}
@@ -123,6 +149,28 @@ func validCardTextContent(text map[string]any) bool {
 	return hasContent
 }
 
+func validInputText(value any) bool {
+	text, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	tag, supplied := text["tag"]
+	return (!supplied || tag == "plain_text") && optionalString(text, "content")
+}
+
+func validCardStrings(value any) bool {
+	list, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	return !slices.ContainsFunc(list, func(item any) bool { return !cardString(item) })
+}
+
+func validCardPicker(node map[string]any) bool {
+	return optionalCardCheck(node, "placeholder", validCardText) &&
+		optionalCardType[string](node, "name", "width", "margin", "type")
+}
+
 func validCardHeader(value any) bool {
 	header, ok := value.(map[string]any)
 	return ok && optionalCardCheck(header, "title", validCardText) &&
@@ -183,7 +231,7 @@ func validCardComponent(node map[string]any) bool {
 			return column["tag"] == "column" && validCardComponent(column)
 		})
 	case "column":
-		return optionalCardType[float64](node, "weight") &&
+		return optionalCardType[json.Number](node, "weight") &&
 			optionalCardType[string](node, "width", "vertical_align") &&
 			optionalCardCheck(node, "elements", validCardElements)
 	case "action":
@@ -197,13 +245,33 @@ func validCardComponent(node map[string]any) bool {
 			optionalCardCheck(node, "elements", validCardElements)
 	case "button":
 		return (node["text"] != nil || node["icon"] != nil) && optionalCardCheck(node, "text", validCardText) &&
-			optionalCardType[string](node, "type", "url", "name", "form_action_type", "action_type") &&
+			optionalCardType[string](node, "type", "url", "name", "form_action_type", "action_type", "size", "width", "margin") &&
 			optionalObject(node, "value") && optionalObject(node, "multi_url")
-	case "input", "checker", "date_picker", "picker_datetime", "picker_time", "select_person", "multi_select_person":
-		return optionalCardCheck(node, "text", validCardText) && optionalCardCheck(node, "placeholder", validCardText) &&
-			optionalCardType[string](node, "name")
+	case "input":
+		return optionalCardCheck(node, "placeholder", validInputText) && optionalCardCheck(node, "label", validInputText) &&
+			optionalCardCheck(node, "text", validCardText) &&
+			optionalCardType[string](node, "name", "width", "margin", "default_value", "input_type", "label_position") &&
+			optionalCardType[bool](node, "show_icon", "auto_resize") &&
+			optionalCardInts(node, 1000, "max_length") &&
+			optionalCardInts(node, math.MaxInt64, "rows", "max_rows")
+	case "checker":
+		return validCardPicker(node) && optionalCardCheck(node, "text", validCardText) &&
+			optionalCardType[bool](node, "checked", "overall_checkable")
+	case "date_picker", "picker_datetime", "picker_time":
+		return validCardPicker(node) && optionalCardCheck(node, "text", validCardText) &&
+			optionalCardType[string](node, "initial_date", "initial_datetime", "initial_time") &&
+			optionalObject(node, "value")
+	case "select_person", "multi_select_person":
+		return validCardPicker(node) && optionalCardType[string](node, "initial_option") &&
+			optionalCardCheck(node, "selected_values", validCardStrings) &&
+			optionalCardCheck(node, "options", func(value any) bool {
+				return cardObjects(value, false, func(option map[string]any) bool {
+					return optionalString(option, "value")
+				})
+			})
 	case "select_static", "multi_select_static", "overflow":
-		return optionalCardCheck(node, "placeholder", validCardText) && cardObjects(node["options"], true, func(option map[string]any) bool {
+		return validCardPicker(node) && optionalCardType[string](node, "initial_option") &&
+			optionalCardCheck(node, "selected_values", validCardStrings) && cardObjects(node["options"], true, func(option map[string]any) bool {
 			return optionalCardCheck(option, "text", validCardText) &&
 				optionalCardType[string](option, "value", "url") && optionalObject(option, "multi_url")
 		})
