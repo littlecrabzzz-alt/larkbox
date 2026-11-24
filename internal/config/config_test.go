@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func TestDefault(t *testing.T) {
 		t.Fatalf("unexpected defaults: addr=%q strict=%t ttls=%+v", cfg.Addr, cfg.StrictMode, cfg.TokenTTLs)
 	}
 	bot := DefaultApp()
-	if len(cfg.Apps) != 1 || cfg.Apps[0] != bot || len(cfg.Users) == 0 {
+	if len(cfg.Apps) != 1 || !reflect.DeepEqual(cfg.Apps[0], bot) || len(cfg.Users) == 0 {
 		t.Fatal("expected a built-in app, bot, and user")
 	}
 	for _, mode := range []string{"p2p", "group"} {
@@ -90,7 +91,7 @@ func TestLoad(t *testing.T) {
 			if cfg.Addr != "127.0.0.1:9000" || cfg.StrictMode || cfg.TokenTTLs.Tenant != 30 || cfg.TokenTTLs.App != Default().TokenTTLs.App {
 				t.Fatalf("unexpected file overlay: addr=%q strict=%t ttls=%+v", cfg.Addr, cfg.StrictMode, cfg.TokenTTLs)
 			}
-			if len(cfg.Apps) != 1 || cfg.Apps[0] != (App{AppID: "cli_other"}) || len(cfg.Users) != 0 || len(cfg.Chats) == 0 {
+			if len(cfg.Apps) != 1 || !reflect.DeepEqual(cfg.Apps[0], App{AppID: "cli_other"}) || len(cfg.Users) != 0 || len(cfg.Chats) == 0 {
 				t.Fatal("expected supplied seed lists to replace defaults and omitted lists to inherit them")
 			}
 			t.Setenv("LARKBOX_ADDR", "[::1]:0")
@@ -104,7 +105,7 @@ func TestLoad(t *testing.T) {
 			if err := cfg.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Addr != "[::1]:0" || !cfg.StrictMode || cfg.TokenTTLs.Tenant != 15 || len(cfg.Apps) != 1 || cfg.Apps[0] != (App{AppID: "cli_env", BotName: "Environment bot"}) {
+			if cfg.Addr != "[::1]:0" || !cfg.StrictMode || cfg.TokenTTLs.Tenant != 15 || len(cfg.Apps) != 1 || !reflect.DeepEqual(cfg.Apps[0], App{AppID: "cli_env", BotName: "Environment bot"}) {
 				t.Fatal("environment did not override file settings")
 			}
 		})
@@ -150,6 +151,43 @@ func TestValidate(t *testing.T) {
 			tc.edit(&cfg)
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("expected validation failure")
+			}
+		})
+	}
+}
+
+func TestLoadRedirectURIs(t *testing.T) {
+	cleanEnvironment(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"http://127.0.0.1:8080/callback", "http://localhost:8080/callback"}
+	if !slices.Equal(cfg.Apps[0].RedirectURIs, want) {
+		t.Fatalf("demo callbacks = %v, want %v", cfg.Apps[0].RedirectURIs, want)
+	}
+
+	path := filepath.Join(t.TempDir(), "callbacks.yaml")
+	yaml := "apps:\n  - app_id: cli_test\n    redirect_uris:\n      - 'http://[::1]:49152/callback?encoded=%23'\n"
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil || !slices.Equal(cfg.Apps[0].RedirectURIs, []string{"http://[::1]:49152/callback?encoded=%23"}) {
+		t.Fatalf("expected a registered IPv6 callback from YAML, got %v", err)
+	}
+
+	for _, callback := range []string{
+		"https://example.test/callback#", "https://example.test/callback#fragment",
+		"https://example.test:0/callback", "https://example.test:65536/callback",
+		"https://example.test:bad/callback", "https://example.test:/callback",
+		"https://[example.test]/callback", "https://[::1]extra/callback", "https://::1/callback",
+		"https://user@example.test/callback", "https://example..test/callback", "https://example.test/call back",
+	} {
+		t.Run(callback, func(t *testing.T) {
+			t.Setenv("LARKBOX_APPS", `[{"app_id":"cli_test","redirect_uris":["`+callback+`"]}]`)
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "redirect_uris[0]") {
+				t.Fatalf("expected invalid callback configuration, got %v", err)
 			}
 		})
 	}

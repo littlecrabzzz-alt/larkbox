@@ -56,6 +56,10 @@ Configuration precedence is built-in defaults, then the YAML or JSON file passed
 - `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
 - `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS` (JSON arrays)
 
+For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exactly matches one of the app's configured `redirect_uris`. The demo app registers `http://127.0.0.1:8080/callback` and `http://localhost:8080/callback`. Callbacks must use HTTP or HTTPS and have no fragment. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user.
+
+Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
+
 ## Non-Goals
 
 - **Pixel-perfect native Feishu rendering**. The planned Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.
@@ -115,13 +119,13 @@ Status Legend:
 
 | Endpoint | Notes | Status |
 |---|---|---|
-| `POST /open-apis/auth/v3/tenant_access_token/internal` | App credentials check, TTL, `t-...` token | `Planned` |
-| `POST /open-apis/auth/v3/app_access_token/internal` | Issues `a-...` and `tenant_access_token` | `Planned` |
-| `GET /open-apis/authen/v1/authorize` & `/v1/index` | OAuth authorize redirect (`code` & `state`) | `Planned` |
-| `POST /open-apis/authen/v1/oidc/access_token` | Exchange `code` for `u-...` & `refresh_token` | `Planned` |
-| `POST /open-apis/authen/v1/oidc/refresh_access_token` | Refresh user access token | `Planned` |
-| `POST /open-apis/authen/v2/oauth/token` | OAuth v2 token exchange & refresh | `Planned` |
-| `GET /open-apis/authen/v1/user_info` | Authenticated user profile (`u-...`) | `Planned` |
+| `POST /open-apis/auth/v3/tenant_access_token/internal` | App credentials check, TTL, `t-...` token | `SDK-Tested` |
+| `POST /open-apis/auth/v3/app_access_token/internal` | Issues `a-...` and `tenant_access_token` | `SDK-Tested` |
+| `GET /open-apis/authen/v1/authorize` & `/v1/index` | OAuth redirect with `code` and optional `state` and PKCE | `SDK-Tested` |
+| `POST /open-apis/authen/v1/oidc/access_token` | Exchange `code` for `u-...` & `refresh_token` | `SDK-Tested` |
+| `POST /open-apis/authen/v1/oidc/refresh_access_token` | Refresh user access token | `SDK-Tested` |
+| `POST /open-apis/authen/v2/oauth/token` | JSON or form token exchange and refresh | `SDK-Tested` |
+| `GET /open-apis/authen/v1/user_info` | Authenticated user profile (`u-...`) | `SDK-Tested` |
 
 ### Bot, IM, Media & CardKit
 

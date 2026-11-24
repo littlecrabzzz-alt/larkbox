@@ -19,23 +19,32 @@ import (
 
 // App describes a virtual Feishu application and its bot.
 type App struct {
-	AppID             string `json:"app_id" yaml:"app_id"`
-	AppSecret         string `json:"app_secret" yaml:"app_secret"`
-	BotOpenID         string `json:"bot_open_id" yaml:"bot_open_id"`
-	BotName           string `json:"bot_name" yaml:"bot_name"`
-	VerificationToken string `json:"verification_token" yaml:"verification_token"`
-	EncryptKey        string `json:"encrypt_key" yaml:"encrypt_key"`
-	WebhookURL        string `json:"webhook_url" yaml:"webhook_url"`
+	AppID             string   `json:"app_id" yaml:"app_id"`
+	AppSecret         string   `json:"app_secret" yaml:"app_secret"`
+	BotOpenID         string   `json:"bot_open_id" yaml:"bot_open_id"`
+	BotName           string   `json:"bot_name" yaml:"bot_name"`
+	VerificationToken string   `json:"verification_token" yaml:"verification_token"`
+	EncryptKey        string   `json:"encrypt_key" yaml:"encrypt_key"`
+	WebhookURL        string   `json:"webhook_url" yaml:"webhook_url"`
+	RedirectURIs      []string `json:"redirect_uris,omitempty" yaml:"redirect_uris,omitempty"`
 }
 
 // User describes a virtual Feishu user.
 type User struct {
-	OpenID  string `json:"open_id" yaml:"open_id"`
-	UserID  string `json:"user_id" yaml:"user_id"`
-	UnionID string `json:"union_id" yaml:"union_id"`
-	Name    string `json:"name" yaml:"name"`
-	Email   string `json:"email" yaml:"email"`
-	Avatar  string `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	OpenID          string `json:"open_id" yaml:"open_id"`
+	UserID          string `json:"user_id" yaml:"user_id"`
+	UnionID         string `json:"union_id" yaml:"union_id"`
+	Name            string `json:"name" yaml:"name"`
+	Email           string `json:"email" yaml:"email"`
+	Avatar          string `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	EnName          string `json:"en_name,omitempty" yaml:"en_name,omitempty"`
+	AvatarThumb     string `json:"avatar_thumb,omitempty" yaml:"avatar_thumb,omitempty"`
+	AvatarMiddle    string `json:"avatar_middle,omitempty" yaml:"avatar_middle,omitempty"`
+	AvatarBig       string `json:"avatar_big,omitempty" yaml:"avatar_big,omitempty"`
+	EnterpriseEmail string `json:"enterprise_email,omitempty" yaml:"enterprise_email,omitempty"`
+	Mobile          string `json:"mobile,omitempty" yaml:"mobile,omitempty"`
+	TenantKey       string `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
+	EmployeeNo      string `json:"employee_no,omitempty" yaml:"employee_no,omitempty"`
 }
 
 // Chat describes a virtual p2p or group chat.
@@ -72,6 +81,7 @@ func DefaultApp() App {
 		AppID: "cli_larkbox", AppSecret: "larkbox-local-secret",
 		BotOpenID: "ou_larkbox_bot", BotName: "Larkbox Bot",
 		VerificationToken: "larkbox-local-verification", EncryptKey: "larkbox-local-encryption",
+		RedirectURIs: []string{"http://127.0.0.1:8080/callback", "http://localhost:8080/callback"},
 	}
 }
 
@@ -101,6 +111,9 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateRedirectURIs(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -260,7 +273,7 @@ func (cfg Config) validateSeeds() error {
 			return fmt.Errorf("chat %q must have chat_mode p2p or group", chat.ChatID)
 		}
 	}
-	return nil
+	return cfg.validateRedirectURIs()
 }
 
 func validateKeys[T any](name string, list []T, key func(T) string) error {

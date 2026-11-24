@@ -13,7 +13,9 @@ type Code int
 // Common Feishu Open API result codes.
 const (
 	Success            Code = 0        // Successful request.
+	MalformedRequest   Code = 9499     // Request body could not be parsed.
 	InvalidParameter   Code = 10003    // Missing or invalid request parameter.
+	AppUnauthorized    Code = 10014    // App is unavailable.
 	WrongAppSecret     Code = 10015    // App secret does not match.
 	InvalidOAuthCode   Code = 20003    // Authorization code is invalid or already used.
 	ExpiredOAuthCode   Code = 20004    // Authorization code has expired.
@@ -82,7 +84,9 @@ type codeInfo struct {
 
 var codes = map[Code]codeInfo{
 	Success:            {http.StatusOK, "ok"},
+	MalformedRequest:   {http.StatusBadRequest, "bad request or invalid param"},
 	InvalidParameter:   {http.StatusOK, "invalid parameter"},
+	AppUnauthorized:    {http.StatusOK, "app unauthorized"},
 	WrongAppSecret:     {http.StatusOK, "wrong app secret"},
 	InvalidOAuthCode:   {http.StatusOK, "invalid request with code"},
 	ExpiredOAuthCode:   {http.StatusOK, "expired code"},
@@ -128,19 +132,32 @@ func WriteSuccess(w http.ResponseWriter, data any) error {
 	return WriteJSON(w, http.StatusOK, Envelope{Code: Success, Msg: "ok", Data: data})
 }
 
+// WriteResult writes a Feishu response with its code exposed to the audit writer.
+func WriteResult(w http.ResponseWriter, status int, code Code, data any) error {
+	return writeJSON(w, status, data, &code)
+}
+
 // WriteJSON marshals a JSON response before committing its HTTP status.
 func WriteJSON(w http.ResponseWriter, status int, data any) error {
+	var code *Code
+	switch envelope := data.(type) {
+	case Envelope:
+		code = &envelope.Code
+	case *Envelope:
+		if envelope != nil {
+			code = &envelope.Code
+		}
+	}
+	return writeJSON(w, status, data, code)
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any, code *Code) error {
 	body, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("marshal response: %w", err)
 	}
-	switch envelope := data.(type) {
-	case Envelope:
-		setFeishuCode(w, envelope.Code)
-	case *Envelope:
-		if envelope != nil {
-			setFeishuCode(w, envelope.Code)
-		}
+	if code != nil {
+		setFeishuCode(w, *code)
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)

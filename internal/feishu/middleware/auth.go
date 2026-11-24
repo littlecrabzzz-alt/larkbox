@@ -50,9 +50,7 @@ func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.H
 			switch {
 			case failure.Code == protocol.Success:
 				ctx := context.WithValue(r.Context(), authKey{}, auth)
-				if appID, ok := ctx.Value(traceAppKey{}).(*string); ok {
-					*appID = auth.AppID
-				}
+				SetTraceApp(r, auth.AppID)
 				r = r.WithContext(ctx)
 			case strict:
 				_ = protocol.WriteError(w, failure)
