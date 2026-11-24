@@ -21,10 +21,12 @@ const (
 	IMBotOutsideChat   Code = 230002   // The bot is not a member of the chat.
 	ResourceNotFound   Code = 99991201 // Unknown Open API resource.
 	RateLimited        Code = 99991400 // Request frequency limit triggered.
-	InvalidToken       Code = 99991661 // Missing or invalid Bearer credential.
+	InvalidToken       Code = 99991661 // Missing Bearer credential or wrong scheme.
 	ExpiredTenantToken Code = 99991663 // Tenant credential is expired or unsupported.
 	InvalidAppToken    Code = 99991664 // App credential is invalid.
+	InvalidTenantToken Code = 99991665 // Tenant credential is unknown or illegal.
 	InvalidUserToken   Code = 99991668 // User credential is invalid or unsupported.
+	InvalidTokenFormat Code = 99991671 // Bearer credential format is invalid.
 	InsufficientScope  Code = 99991672 // Required API permission is missing.
 	FieldValidation    Code = 99992402 // Request fields failed validation.
 )
@@ -91,7 +93,9 @@ var codes = map[Code]codeInfo{
 	InvalidToken:       {http.StatusBadRequest, "Missing access token for authorization. Please make a request with token attached."},
 	ExpiredTenantToken: {http.StatusBadRequest, "Invalid access token for authorization. Please make a request with token attached."},
 	InvalidAppToken:    {http.StatusBadRequest, "invalid app token"},
+	InvalidTenantToken: {http.StatusBadRequest, "invalid tenant code"},
 	InvalidUserToken:   {http.StatusBadRequest, "Invalid access token for authorization. Please make a request with token attached."},
+	InvalidTokenFormat: {http.StatusBadRequest, "Invalid token: must start with t-/u-"},
 	InsufficientScope:  {http.StatusForbidden, "Access denied. One of the following scopes is required"},
 	FieldValidation:    {http.StatusBadRequest, "field validation failed"},
 }
@@ -130,10 +134,34 @@ func WriteJSON(w http.ResponseWriter, status int, data any) error {
 	if err != nil {
 		return fmt.Errorf("marshal response: %w", err)
 	}
+	switch envelope := data.(type) {
+	case Envelope:
+		setFeishuCode(w, envelope.Code)
+	case *Envelope:
+		if envelope != nil {
+			setFeishuCode(w, envelope.Code)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write(body); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
 	return nil
+}
+
+// setFeishuCode passes envelope metadata through response writer wrappers
+// without exposing it as an HTTP header.
+func setFeishuCode(w http.ResponseWriter, code Code) {
+	for {
+		switch writer := w.(type) {
+		case interface{ SetFeishuCode(Code) }:
+			writer.SetFeishuCode(code)
+			return
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = writer.Unwrap()
+		default:
+			return
+		}
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,9 @@ func TestWriteError(t *testing.T) {
 		{InvalidToken, 99991661, http.StatusBadRequest},
 		{ExpiredTenantToken, 99991663, http.StatusBadRequest},
 		{InvalidAppToken, 99991664, http.StatusBadRequest},
+		{InvalidTenantToken, 99991665, http.StatusBadRequest},
 		{InvalidUserToken, 99991668, http.StatusBadRequest},
+		{InvalidTokenFormat, 99991671, http.StatusBadRequest},
 		{InsufficientScope, 99991672, http.StatusForbidden},
 		{RateLimited, 99991400, http.StatusTooManyRequests},
 		{ResourceNotFound, 99991201, http.StatusNotFound},
@@ -78,7 +81,7 @@ func TestWriteSuccess(t *testing.T) {
 }
 
 func TestNewID(t *testing.T) {
-	for _, prefix := range []IDPrefix{OpenID, UnionID, ChatID, MessageID, ImageKey, FileKey, TenantToken, AppToken, UserToken, RefreshToken, CardID, EventID, FrameID} {
+	for _, prefix := range []IDPrefix{OpenID, UnionID, ChatID, MessageID, ImageKey, FileKey, TenantToken, AppToken, UserToken, RefreshToken, EventID, FrameID} {
 		t.Run(string(prefix), func(t *testing.T) {
 			id := NewID(prefix)
 			suffix, ok := strings.CutPrefix(id, string(prefix))
@@ -87,5 +90,13 @@ func TestNewID(t *testing.T) {
 				t.Fatalf("invalid or repeated ID %s", id)
 			}
 		})
+	}
+}
+
+func TestNewCardID(t *testing.T) {
+	decimal := regexp.MustCompile(`^[1-9][0-9]*$`)
+	id := NewID(CardID)
+	if len(id) > 20 || !decimal.MatchString(id) || id == NewID(CardID) {
+		t.Fatalf("invalid or repeated CardKit ID %q", id)
 	}
 }

@@ -3,6 +3,8 @@ package protocol
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"math/big"
+	"strconv"
 )
 
 // IDPrefix identifies the prefix of a generated Feishu or sandbox ID.
@@ -20,13 +22,22 @@ const (
 	AppToken     IDPrefix = "a-"       // App access token.
 	UserToken    IDPrefix = "u-"       // User access token.
 	RefreshToken IDPrefix = "r-"       // OAuth refresh token.
-	CardID       IDPrefix = "card_"    // CardKit card ID.
+	CardID       IDPrefix = "card_"    // Selects a decimal CardKit ID.
 	EventID      IDPrefix = "evt_"     // Event ID.
 	FrameID      IDPrefix = "msg_"     // Message frame ID.
 )
 
-// NewID appends 128 random bits, encoded in hexadecimal, to prefix.
+// NewID appends 128 random bits in hexadecimal to prefix. CardID instead
+// selects a 19-digit decimal ID that fits the CardKit wire format.
 func NewID(prefix IDPrefix) string {
+	if prefix == CardID {
+		const floor = 1_000_000_000_000_000_000
+		value, err := rand.Int(rand.Reader, big.NewInt(8*floor))
+		if err != nil {
+			panic(err) // The Go 1.24 default crypto/rand reader cannot return an error.
+		}
+		return strconv.FormatInt(floor+value.Int64(), 10)
+	}
 	var random [16]byte
 	// Go 1.24 guarantees that rand.Read fills the buffer or terminates the process.
 	_, _ = rand.Read(random[:])

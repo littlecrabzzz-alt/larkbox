@@ -3,7 +3,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -31,6 +30,7 @@ type Auth struct {
 }
 
 type authKey struct{}
+type traceAppKey struct{}
 
 var bearerValue = regexp.MustCompile(`^[A-Za-z0-9._~+/-]+=*$`)
 
@@ -48,7 +48,11 @@ func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.H
 			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
 			switch {
 			case failure.Code == protocol.Success:
-				r = r.WithContext(context.WithValue(r.Context(), authKey{}, auth))
+				ctx := context.WithValue(r.Context(), authKey{}, auth)
+				if appID, ok := ctx.Value(traceAppKey{}).(*string); ok {
+					*appID = auth.AppID
+				}
+				r = r.WithContext(ctx)
 			case strict:
 				_ = protocol.WriteError(w, failure)
 				return
@@ -59,47 +63,46 @@ func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.H
 }
 
 func authenticate(state *store.Store, required RequiredToken, headers []string) (Auth, protocol.APIError) {
-	value := bearerToken(headers)
-	if value == "" {
+	value, bearer := bearerToken(headers)
+	if !bearer {
 		return Auth{}, protocol.NewError(protocol.InvalidToken, nil)
 	}
+	kind := credentialKind(value)
+	if kind == "" {
+		return Auth{}, protocol.NewError(protocol.InvalidTokenFormat, nil)
+	}
 	token, err := state.CheckToken(value)
-	if errors.Is(err, store.ErrNotFound) {
-		kind := credentialKind(value)
-		return Auth{}, credentialError(kind, !accepts(required, kind))
+	// The store returns a token on failure only for expiry and revocation.
+	if token.Kind != kind {
+		return Auth{}, credentialError(kind, invalidCredential)
 	}
 	if err != nil {
-		failure := credentialError(token.Kind, false)
-		if token.Kind == store.UserToken {
-			failure.Message = "token invalid"
-		}
-		return Auth{}, failure
+		return Auth{}, credentialError(kind, inactiveCredential)
 	}
-	if !accepts(required, token.Kind) {
-		return Auth{}, credentialError(token.Kind, true)
+	if !accepts(required, kind) {
+		return Auth{}, credentialError(kind, unsupportedCredential)
 	}
 	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind}, protocol.APIError{}
 }
 
-func bearerToken(headers []string) string {
+func bearerToken(headers []string) (string, bool) {
 	if len(headers) != 1 {
-		return ""
+		return "", false
 	}
-	scheme, value, found := strings.Cut(headers[0], " ")
-	value = strings.TrimLeft(value, " ")
-	if !found || !strings.EqualFold(scheme, "Bearer") || !bearerValue.MatchString(value) {
-		return ""
-	}
-	return value
+	scheme, value, _ := strings.Cut(headers[0], " ")
+	return strings.TrimLeft(value, " "), strings.EqualFold(scheme, "Bearer")
 }
 
 func credentialKind(value string) store.TokenKind {
-	switch {
-	case strings.HasPrefix(value, string(protocol.TenantToken)):
+	if len(value) <= 2 || !bearerValue.MatchString(value[2:]) {
+		return ""
+	}
+	switch protocol.IDPrefix(value[:2]) {
+	case protocol.TenantToken:
 		return store.TenantToken
-	case strings.HasPrefix(value, string(protocol.AppToken)):
+	case protocol.AppToken:
 		return store.AppToken
-	case strings.HasPrefix(value, string(protocol.UserToken)):
+	case protocol.UserToken:
 		return store.UserToken
 	default:
 		return ""
@@ -119,19 +122,33 @@ func accepts(required RequiredToken, kind store.TokenKind) bool {
 	}
 }
 
-func credentialError(kind store.TokenKind, unsupported bool) protocol.APIError {
+type credentialFailure int
+
+const (
+	invalidCredential credentialFailure = iota
+	inactiveCredential
+	unsupportedCredential
+)
+
+func credentialError(kind store.TokenKind, reason credentialFailure) protocol.APIError {
 	switch kind {
 	case store.TenantToken:
+		if reason == invalidCredential {
+			return protocol.NewError(protocol.InvalidTenantToken, nil)
+		}
 		return protocol.NewError(protocol.ExpiredTenantToken, nil)
 	case store.AppToken:
 		return protocol.NewError(protocol.InvalidAppToken, nil)
 	case store.UserToken:
 		failure := protocol.NewError(protocol.InvalidUserToken, nil)
-		if unsupported {
+		switch reason {
+		case inactiveCredential:
+			failure.Message = "token invalid"
+		case unsupportedCredential:
 			failure.Message = "user access token not support"
 		}
 		return failure
 	default:
-		return protocol.NewError(protocol.InvalidToken, nil)
+		return protocol.NewError(protocol.InvalidTokenFormat, nil)
 	}
 }

@@ -30,10 +30,14 @@ func TestTokenValidity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := New(func() time.Time { return issued.Add(tc.elapsed) }, 0)
+			state.Apps().Put(App{AppID: "cli_demo"})
+			state.Users().Put(User{OpenID: "ou_demo"})
 			for _, kind := range []TokenKind{TenantToken, AppToken, UserToken, RefreshToken, OAuthCode} {
 				token := Token{Value: string(kind), Kind: kind, AppID: "cli_demo", UserOpenID: "ou_demo", ExpiresAt: issued.Add(time.Second)}
 				if !tc.missing {
-					state.Tokens().Put(token)
+					if err := state.PutToken(token); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if tc.revoked {
 					if !state.RevokeToken(token.Value) {
@@ -122,9 +126,11 @@ func TestSeedAndReset(t *testing.T) {
 	if !slices.Equal(chat.MemberIDs, wantMembers) {
 		t.Fatalf("chat members = %v, want %v", chat.MemberIDs, wantMembers)
 	}
+	if err := state.PutToken(Token{Value: "t-test", AppID: cfg.Apps[0].AppID, Kind: TenantToken}); err != nil {
+		t.Fatal(err)
+	}
 	state.Apps().Delete(cfg.Apps[0].AppID)
 	state.Users().Delete(cfg.Users[0].OpenID)
-	state.Tokens().Put(Token{Value: "t-test"})
 	state.Messages().Put(Message{ID: "om_test"})
 	state.Media().Put(Media{Key: "file_v3_test"})
 	if err := state.CreateCard(Card{ID: "card_test"}); err != nil {
@@ -139,7 +145,10 @@ func TestSeedAndReset(t *testing.T) {
 	if !appFound || app != cfg.Apps[0] || !userFound || user != cfg.Users[0] || !chatFound || chat.MemberIDs[0] != owner || slices.Contains(chat.MemberIDs, "ou_added") {
 		t.Fatal("reset did not restore the original seed")
 	}
-	if len(state.Tokens().List())+len(state.Messages().List())+len(state.Media().List())+len(state.Cards())+len(state.Traces()) != 0 {
+	if _, err := state.CheckToken("t-test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reset retained credential: %v", err)
+	}
+	if len(state.Messages().List())+len(state.Media().List())+len(state.Cards())+len(state.Traces()) != 0 {
 		t.Fatal("reset retained runtime state")
 	}
 	state.Seed(config.Config{})
@@ -214,7 +223,9 @@ func TestConcurrentStoreAccess(t *testing.T) {
 			defer wg.Done()
 			id := fmt.Sprintf("member-%d", i)
 			state.Users().Put(User{OpenID: id})
-			state.Tokens().Put(Token{Value: id, ExpiresAt: state.Now().Add(time.Hour)})
+			if err := state.PutToken(Token{Value: id, Kind: UserToken, AppID: "cli_larkbox", UserOpenID: id, ExpiresAt: state.Now().Add(time.Hour)}); err != nil {
+				t.Errorf("put token: %v", err)
+			}
 			state.AddChatMember("oc_larkbox_group", id)
 			state.AppendTrace(Trace{Path: id})
 			if err := state.UpdateCard(Card{ID: "card_test", Sequence: int64(i)}); err != nil && !errors.Is(err, ErrStaleSequence) {
@@ -231,7 +242,90 @@ func TestConcurrentStoreAccess(t *testing.T) {
 	card, _ := state.Card("card_test")
 	chat, _ := state.Chats().Get("oc_larkbox_group")
 	if card.Sequence != workers || len(chat.MemberIDs) != len(config.Default().Chats[0].MemberIDs)+workers ||
-		len(state.Tokens().List()) != workers || len(state.Traces()) != 8 {
+		len(state.Traces()) != 8 {
 		t.Fatal("concurrent writers lost updates or exceeded trace capacity")
+	}
+}
+
+func TestTokenOwnersAndBinding(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	for _, tc := range []struct {
+		name                  string
+		kind                  TokenKind
+		app, user             string
+		deleteApp, deleteUser bool
+		expectApp, expectUser string
+		putErr, lookupErr     error
+	}{
+		{"valid", UserToken, "cli_a", "ou_a", false, false, "cli_a", "ou_a", nil, nil},
+		{"missing app", TenantToken, "", "", false, false, "", "", ErrTokenOwner, ErrNotFound},
+		{"unknown app", OAuthCode, "cli_unknown", "", false, false, "", "", ErrTokenOwner, ErrNotFound},
+		{"missing user", UserToken, "cli_a", "", false, false, "", "", ErrTokenOwner, ErrNotFound},
+		{"unknown user", UserToken, "cli_a", "ou_unknown", false, false, "", "", ErrTokenOwner, ErrNotFound},
+		{"unknown attached user", RefreshToken, "cli_a", "ou_unknown", false, false, "", "", ErrTokenOwner, ErrNotFound},
+		{"deleted app", AppToken, "cli_a", "", true, false, "", "", nil, ErrTokenOwner},
+		{"deleted user", UserToken, "cli_a", "ou_a", false, true, "", "", nil, ErrTokenOwner},
+		{"cross-app", UserToken, "cli_a", "ou_a", false, false, "cli_b", "ou_a", nil, ErrTokenBinding},
+		{"cross-user", UserToken, "cli_a", "ou_a", false, false, "cli_a", "ou_b", nil, ErrTokenBinding},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := New(func() time.Time { return now }, 0)
+			state.Apps().Put(App{AppID: "cli_a"})
+			state.Apps().Put(App{AppID: "cli_b"})
+			state.Users().Put(User{OpenID: "ou_a"})
+			state.Users().Put(User{OpenID: "ou_b"})
+			token := Token{Value: "test-token", Kind: tc.kind, AppID: tc.app, UserOpenID: tc.user, ExpiresAt: now.Add(time.Hour)}
+			if err := state.PutToken(token); !errors.Is(err, tc.putErr) {
+				t.Fatalf("PutToken error = %v, want %v", err, tc.putErr)
+			}
+			if tc.deleteApp {
+				state.Apps().Delete(tc.app)
+			}
+			if tc.deleteUser {
+				state.Users().Delete(tc.user)
+			}
+			got, err := state.CheckTokenBinding(token.Value, tc.expectApp, tc.expectUser)
+			if !errors.Is(err, tc.lookupErr) || (err == nil && got != token) {
+				t.Fatalf("CheckTokenBinding = %+v, %v, want %v", got, err, tc.lookupErr)
+			}
+			if state.DeleteToken(token.Value) != (tc.putErr == nil) || state.DeleteToken(token.Value) {
+				t.Fatal("unexpected result deleting token")
+			}
+		})
+	}
+}
+
+func TestQueryTracesAfterRingWrap(t *testing.T) {
+	state := New(nil, 6)
+	for _, tc := range []struct{ app, method, path string }{
+		{"cli_a", http.MethodGet, "/open-apis/a/evicted"},
+		{"cli_a", http.MethodGet, "/open-apis/a/oldest"},
+		{"cli_b", http.MethodGet, "/open-apis/a/foreign"},
+		{"cli_a", http.MethodPost, "/open-apis/a/post"},
+		{"cli_a", http.MethodGet, "/open-apis/a/previous"},
+		{"cli_a", http.MethodGet, "/open-apis/b/other"},
+		{"cli_a", http.MethodGet, "/open-apis/a/latest"},
+	} {
+		state.AppendTrace(Trace{AppID: tc.app, Method: tc.method, Path: tc.path, RequestBody: []byte("body")})
+	}
+	filter := TraceFilter{AppID: "cli_a", Method: http.MethodGet, PathPrefix: "/open-apis/a/"}
+	for _, tc := range []struct {
+		limit int
+		want  []string
+	}{
+		{0, []string{"/open-apis/a/oldest", "/open-apis/a/previous", "/open-apis/a/latest"}},
+		{2, []string{"/open-apis/a/previous", "/open-apis/a/latest"}},
+	} {
+		filter.Limit = tc.limit
+		traces := state.QueryTraces(filter)
+		if len(traces) != len(tc.want) {
+			t.Fatalf("limit %d: got %d results, want %d", tc.limit, len(traces), len(tc.want))
+		}
+		for i, trace := range traces {
+			if trace.Path != tc.want[i] || string(trace.RequestBody) != "body" {
+				t.Fatalf("limit %d: unexpected trace %+v", tc.limit, trace)
+			}
+			trace.RequestBody[0] = 'x'
+		}
 	}
 }

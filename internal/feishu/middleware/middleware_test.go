@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,50 +17,75 @@ import (
 func TestBearer(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	state := store.New(func() time.Time { return now }, 0)
+	state.Apps().Put(store.App{AppID: "cli_test"})
+	state.Apps().Put(store.App{AppID: "cli_removed"})
+	state.Users().Put(store.User{OpenID: "ou_test"})
+	state.Users().Put(store.User{OpenID: "ou_removed"})
 	for _, token := range []store.Token{
 		{Value: "t-valid", Kind: store.TenantToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
 		{Value: "a-valid", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
 		{Value: "u-valid", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_test", ExpiresAt: now.Add(time.Second)},
-		{Value: "r-valid", Kind: store.RefreshToken, ExpiresAt: now.Add(time.Second)},
-		{Value: "t-expired", Kind: store.TenantToken, ExpiresAt: now},
-		{Value: "a-expired", Kind: store.AppToken, ExpiresAt: now},
-		{Value: "u-expired", Kind: store.UserToken, ExpiresAt: now},
-		{Value: "u-revoked", Kind: store.UserToken, Revoked: true, ExpiresAt: now.Add(time.Second)},
+		{Value: "r-valid", Kind: store.RefreshToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
+		{Value: "t-expired", Kind: store.TenantToken, AppID: "cli_test", ExpiresAt: now},
+		{Value: "t-revoked", Kind: store.TenantToken, AppID: "cli_test", Revoked: true, ExpiresAt: now.Add(time.Second)},
+		{Value: "a-expired", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now},
+		{Value: "u-expired", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_test", ExpiresAt: now},
+		{Value: "u-revoked", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_test", Revoked: true, ExpiresAt: now.Add(time.Second)},
+		{Value: "t-illegal", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
+		{Value: "t-owner-deleted", Kind: store.TenantToken, AppID: "cli_removed", ExpiresAt: now.Add(time.Second)},
+		{Value: "u-owner-deleted", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_removed", ExpiresAt: now.Add(time.Second)},
 	} {
-		state.Tokens().Put(token)
+		if err := state.PutToken(token); err != nil {
+			t.Fatal(err)
+		}
 	}
+	state.Apps().Delete("cli_removed")
+	state.Users().Delete("ou_removed")
+	const (
+		missing = "Missing access token for authorization. Please make a request with token attached."
+		format  = "Invalid token: must start with t-/u-"
+		invalid = "Invalid access token for authorization. Please make a request with token attached."
+	)
 	for _, tc := range []struct {
 		name      string
 		required  RequiredToken
 		headers   []string
-		wantCode  protocol.Code
+		status    int
+		code      int
+		message   string
 		wantToken store.TokenKind
 		loose     bool
 	}{
-		{"missing", Tenant, nil, protocol.InvalidToken, "", false},
-		{"wrong scheme", Tenant, []string{"Basic t-valid"}, protocol.InvalidToken, "", false},
-		{"empty value", Tenant, []string{"Bearer"}, protocol.InvalidToken, "", false},
-		{"extra component", Tenant, []string{"Bearer t-valid extra"}, protocol.InvalidToken, "", false},
-		{"non-token character", Tenant, []string{"Bearer t-valid!"}, protocol.InvalidToken, "", false},
-		{"duplicate header", Tenant, []string{"Bearer t-valid", "Bearer t-valid"}, protocol.InvalidToken, "", false},
-		{"unknown", Tenant, []string{"Bearer unrecognized"}, protocol.InvalidToken, "", false},
-		{"unknown tenant", Tenant, []string{"Bearer t-unknown"}, protocol.ExpiredTenantToken, "", false},
-		{"unknown user", TenantOrUser, []string{"Bearer u-unknown"}, protocol.InvalidUserToken, "", false},
-		{"expired tenant", Tenant, []string{"Bearer t-expired"}, protocol.ExpiredTenantToken, "", false},
-		{"expired app", App, []string{"Bearer a-expired"}, protocol.InvalidAppToken, "", false},
-		{"expired user", User, []string{"Bearer u-expired"}, protocol.InvalidUserToken, "", false},
-		{"revoked user", User, []string{"Bearer u-revoked"}, protocol.InvalidUserToken, "", false},
-		{"tenant on a user route", User, []string{"Bearer t-valid"}, protocol.ExpiredTenantToken, "", false},
-		{"user on a tenant route", Tenant, []string{"Bearer u-valid"}, protocol.InvalidUserToken, "", false},
-		{"app on tenant or user route", TenantOrUser, []string{"Bearer a-valid"}, protocol.InvalidAppToken, "", false},
-		{"refresh in authorization", TenantOrUser, []string{"Bearer r-valid"}, protocol.InvalidToken, "", false},
-		{"tenant", Tenant, []string{"bearer  t-valid"}, protocol.Success, store.TenantToken, false},
-		{"app", App, []string{"Bearer a-valid"}, protocol.Success, store.AppToken, false},
-		{"user", User, []string{"Bearer u-valid"}, protocol.Success, store.UserToken, false},
-		{"tenant or user uses tenant", TenantOrUser, []string{"Bearer t-valid"}, protocol.Success, store.TenantToken, false},
-		{"tenant or user uses user", TenantOrUser, []string{"Bearer u-valid"}, protocol.Success, store.UserToken, false},
-		{"loose missing", Tenant, nil, protocol.Success, "", true},
-		{"loose valid", Tenant, []string{"Bearer t-valid"}, protocol.Success, store.TenantToken, true},
+		{"missing", Tenant, nil, 400, 99991661, missing, "", false},
+		{"wrong scheme", Tenant, []string{"Basic t-valid"}, 400, 99991661, missing, "", false},
+		{"duplicate header", Tenant, []string{"Bearer t-valid", "Bearer t-valid"}, 400, 99991661, missing, "", false},
+		{"empty value", Tenant, []string{"Bearer"}, 400, 99991671, format, "", false},
+		{"bare prefix", Tenant, []string{"Bearer t-"}, 400, 99991671, format, "", false},
+		{"extra component", Tenant, []string{"Bearer t-valid extra"}, 400, 99991671, format, "", false},
+		{"non-token character", Tenant, []string{"Bearer t-valid!"}, 400, 99991671, format, "", false},
+		{"unrecognized prefix", Tenant, []string{"Bearer unrecognized"}, 400, 99991671, format, "", false},
+		{"refresh in authorization", TenantOrUser, []string{"Bearer r-valid"}, 400, 99991671, format, "", false},
+		{"unknown tenant", Tenant, []string{"Bearer t-unknown"}, 400, 99991665, "invalid tenant code", "", false},
+		{"illegal tenant", Tenant, []string{"Bearer t-illegal"}, 400, 99991665, "invalid tenant code", "", false},
+		{"tenant missing owner", Tenant, []string{"Bearer t-owner-deleted"}, 400, 99991665, "invalid tenant code", "", false},
+		{"user missing owner", User, []string{"Bearer u-owner-deleted"}, 400, 99991668, invalid, "", false},
+		{"unknown user", TenantOrUser, []string{"Bearer u-unknown"}, 400, 99991668, invalid, "", false},
+		{"unknown app", App, []string{"Bearer a-unknown"}, 400, 99991664, "invalid app token", "", false},
+		{"expired tenant", Tenant, []string{"Bearer t-expired"}, 400, 99991663, invalid, "", false},
+		{"revoked tenant", Tenant, []string{"Bearer t-revoked"}, 400, 99991663, invalid, "", false},
+		{"expired app", App, []string{"Bearer a-expired"}, 400, 99991664, "invalid app token", "", false},
+		{"expired user", User, []string{"Bearer u-expired"}, 400, 99991668, "token invalid", "", false},
+		{"revoked user", User, []string{"Bearer u-revoked"}, 400, 99991668, "token invalid", "", false},
+		{"tenant on a user route", User, []string{"Bearer t-valid"}, 400, 99991663, invalid, "", false},
+		{"user on a tenant route", Tenant, []string{"Bearer u-valid"}, 400, 99991668, "user access token not support", "", false},
+		{"app on tenant or user route", TenantOrUser, []string{"Bearer a-valid"}, 400, 99991664, "invalid app token", "", false},
+		{"tenant", Tenant, []string{"bearer  t-valid"}, 200, 0, "ok", store.TenantToken, false},
+		{"app", App, []string{"Bearer a-valid"}, 200, 0, "ok", store.AppToken, false},
+		{"user", User, []string{"Bearer u-valid"}, 200, 0, "ok", store.UserToken, false},
+		{"tenant or user uses tenant", TenantOrUser, []string{"Bearer t-valid"}, 200, 0, "ok", store.TenantToken, false},
+		{"tenant or user uses user", TenantOrUser, []string{"Bearer u-valid"}, 200, 0, "ok", store.UserToken, false},
+		{"loose missing", Tenant, nil, 200, 0, "ok", "", true},
+		{"loose valid", Tenant, []string{"Bearer t-valid"}, 200, 0, "ok", store.TenantToken, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/open-apis/example", nil)
@@ -84,11 +110,8 @@ func TestBearer(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 				t.Fatal(err)
 			}
-			if envelope.Code != tc.wantCode || called != (tc.wantCode == protocol.Success) || w.Code != protocol.NewError(tc.wantCode, nil).Status {
+			if int(envelope.Code) != tc.code || envelope.Msg != tc.message || called != (tc.code == 0) || w.Code != tc.status {
 				t.Fatalf("HTTP %d: %s, handler called=%t", w.Code, w.Body, called)
-			}
-			if tc.name == "user on a tenant route" && envelope.Msg != "user access token not support" {
-				t.Errorf("unexpected mismatch message: %s", envelope.Msg)
 			}
 		})
 	}
@@ -169,31 +192,108 @@ func TestAuditBodyLimit(t *testing.T) {
 	}
 }
 
+type observedBody struct {
+	data   string
+	err    error
+	reads  int
+	closed bool
+}
+
+func (b *observedBody) Read(data []byte) (int, error) {
+	b.reads++
+	n := copy(data, b.data)
+	b.data = b.data[n:]
+	return n, b.err
+}
+
+func (b *observedBody) Close() error {
+	b.closed = true
+	return b.err
+}
+
 func TestAuditWithoutConsumingRequest(t *testing.T) {
 	for _, tc := range []struct {
-		name, contentType, body, want string
+		name string
+		wrap func(*store.Store, http.Handler) http.Handler
+		code int
 	}{
-		{"clear JSON", "application/json", `{"msg":"hello"}`, `{"msg":"hello"}`},
-		{"credential and large integer", "application/json", `{"app_secret":"private","value":9007199254740993}`, `{"app_secret":"[REDACTED]","value":9007199254740993}`},
-		{"truncated JSON", "application/json", `{"app_secret":"` + strings.Repeat("x", auditBodyLimit), ""},
-		{"invalid JSON without content type", "", `{"app_secret":"private",`, ""},
-		{"multipart", "multipart/form-data; boundary=segment", "--segment", ""},
+		{"bearer", func(state *store.Store, next http.Handler) http.Handler {
+			return Bearer(state, Tenant, true)(next)
+		}, 99991661},
+		{"fault", func(_ *store.Store, next http.Handler) http.Handler {
+			return Fault(faultFunc(func(w http.ResponseWriter, _ *http.Request) bool {
+				_ = protocol.WriteError(w, protocol.NewError(protocol.RateLimited, nil))
+				return true
+			}), next)
+		}, 99991400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := store.New(nil, 0)
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest(http.MethodPost, "/open-apis/example", strings.NewReader(tc.body))
-			r.Header.Set("Content-Type", tc.contentType)
+			body := &observedBody{data: "untouched"}
+			r := httptest.NewRequest(http.MethodPost, "/open-apis/example", body)
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-				t.Error("unauthenticated request reached the handler")
+				t.Error("rejected request reached the handler")
 			})
-			Audit(state, Bearer(state, Tenant, true)(next)).ServeHTTP(w, r)
+			Audit(state, tc.wrap(state, next)).ServeHTTP(w, r)
 			trace := state.Traces()[0]
-			if string(trace.RequestBody) != tc.want || trace.RequestBodyTruncated != (len(tc.body) > auditBodyLimit) ||
-				trace.Code == nil || *trace.Code != 99991661 || w.Code != http.StatusBadRequest {
-				t.Fatalf("unexpected request body and status: %q, status=%d", trace.RequestBody, w.Code)
+			if body.reads != 0 || body.closed || len(trace.RequestBody) != 0 || trace.RequestBodyTruncated ||
+				trace.Code == nil || *trace.Code != tc.code {
+				t.Fatalf("request body was touched or response was not captured: %+v", trace)
 			}
 		})
+	}
+}
+
+func TestAuditPreservesReadAndCloseErrors(t *testing.T) {
+	const payload = "bytes delivered along with an error"
+	readErr := errors.New("fixture read error")
+	body := &observedBody{data: payload, err: readErr}
+	r := httptest.NewRequest(http.MethodPost, "/open-apis/example", body)
+	state := store.New(nil, 0)
+	Audit(state, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got, err := io.ReadAll(r.Body)
+		if string(got) != payload || err != readErr || body.reads != 1 {
+			t.Errorf("downstream read = %q, %v after %d reads", got, err, body.reads)
+		}
+		if err := r.Body.Close(); err != readErr || !body.closed {
+			t.Errorf("downstream close = %v, wrapped close called=%t", err, body.closed)
+		}
+	})).ServeHTTP(httptest.NewRecorder(), r)
+	trace := state.Traces()[0]
+	if string(trace.RequestBody) != payload || !trace.RequestBodyTruncated {
+		t.Fatalf("did not capture partial request body: %+v", trace)
+	}
+}
+
+type withoutFlush struct{ http.ResponseWriter }
+
+func TestAuditFlushCommitsHeaders(t *testing.T) {
+	for _, supported := range []bool{true, false} {
+		state := store.New(nil, 0)
+		recorder := httptest.NewRecorder()
+		var writer http.ResponseWriter = recorder
+		if !supported {
+			writer = withoutFlush{recorder}
+		}
+		Audit(state, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Request-Id", "before flush")
+			err := http.NewResponseController(w).Flush()
+			if supported && err != nil || !supported && !errors.Is(err, http.ErrNotSupported) {
+				t.Errorf("flush support = %t, result = %v", supported, err)
+			}
+			w.Header().Set("X-Request-Id", "after flush")
+			if _, err := io.WriteString(w, "body"); err != nil {
+				t.Error(err)
+			}
+		})).ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/open-apis/example", nil))
+		want := "before flush"
+		if !supported {
+			want = "after flush"
+		}
+		if got := state.Traces()[0].ResponseHeaders.Get("X-Request-Id"); got != want || recorder.Flushed != supported {
+			t.Errorf("flush support = %t, snapshot = %q, recorder flushed = %t", supported, got, recorder.Flushed)
+		}
 	}
 }
 

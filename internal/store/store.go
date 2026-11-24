@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,10 @@ var (
 	ErrTokenRevoked = errors.New("token revoked")
 	// ErrTokenExpired indicates the credential reached its expiry time.
 	ErrTokenExpired = errors.New("token expired")
+	// ErrTokenOwner indicates a token has a missing or unknown owner.
+	ErrTokenOwner = errors.New("token owner does not exist")
+	// ErrTokenBinding indicates a token belongs to a different app or user.
+	ErrTokenBinding = errors.New("token owner does not match expected binding")
 )
 
 // Collection provides snapshot CRUD by primary key. Values returned to callers
@@ -89,15 +94,16 @@ type Store struct {
 	users    Collection[User]
 	chats    Collection[Chat]
 	messages Collection[Message]
-	tokens   Collection[Token]
+	tokens   map[string]Token
 	media    Collection[Media]
 	cards    Collection[Card]
 	traces   []Trace
 	tracePos int
 }
 
-// New creates an empty store. A nil clock uses time.Now. Nonpositive trace
-// capacities use the default ring capacity.
+// New creates an empty store. A nil clock uses time.Now. A supplied clock
+// must support concurrent calls and must not call back into the store.
+// Nonpositive trace capacities use the default ring capacity.
 func New(now func() time.Time, traceCapacity int) *Store {
 	if now == nil {
 		now = time.Now
@@ -105,12 +111,11 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	if traceCapacity <= 0 {
 		traceCapacity = defaultTraceCapacity
 	}
-	s := &Store{now: now, traces: make([]Trace, 0, traceCapacity)}
+	s := &Store{now: now, tokens: make(map[string]Token), traces: make([]Trace, 0, traceCapacity)}
 	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, nil)
 	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, nil)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
-	s.tokens = newCollection(&s.mu, func(t Token) string { return t.Value }, nil)
 	s.media = newCollection(&s.mu, func(m Media) string { return m.Key }, cloneMedia)
 	s.cards = newCollection(&s.mu, func(c Card) string { return c.ID }, cloneCard)
 	return s
@@ -128,22 +133,51 @@ func (s *Store) Chats() *Collection[Chat] { return &s.chats }
 // Messages returns the IM message collection.
 func (s *Store) Messages() *Collection[Message] { return &s.messages }
 
-// Tokens returns the credential collection.
-func (s *Store) Tokens() *Collection[Token] { return &s.tokens }
-
 // Media returns the image and file collection.
 func (s *Store) Media() *Collection[Media] { return &s.media }
 
 // Now returns the current time according to the store clock.
 func (s *Store) Now() time.Time { return s.now() }
 
-// CheckToken returns a credential if it exists and is valid at the store time.
-// For expired or revoked credentials, it also returns the stored metadata.
+// PutToken creates or replaces a credential whose referenced owners exist.
+func (s *Store) PutToken(token Token) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tokenOwnersExist(token) {
+		return ErrTokenOwner
+	}
+	s.tokens[token.Value] = token
+	return nil
+}
+
+// DeleteToken removes a credential and reports whether it existed.
+func (s *Store) DeleteToken(value string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.tokens[value]
+	delete(s.tokens, value)
+	return ok
+}
+
+// CheckToken returns a credential if its owners exist and it is currently valid.
+// For an expired or revoked credential, it also returns stored metadata.
 func (s *Store) CheckToken(value string) (Token, error) {
-	token, ok := s.tokens.Get(value)
+	return s.CheckTokenBinding(value, "", "")
+}
+
+// CheckTokenBinding atomically validates a credential, its owners, and its
+// expected app and user bindings. An empty expected field imposes no constraint.
+func (s *Store) CheckTokenBinding(value, appID, userOpenID string) (Token, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	token, ok := s.tokens[value]
 	switch {
 	case !ok:
 		return Token{}, ErrNotFound
+	case !s.tokenOwnersExist(token):
+		return Token{}, ErrTokenOwner
+	case appID != "" && token.AppID != appID, userOpenID != "" && token.UserOpenID != userOpenID:
+		return Token{}, ErrTokenBinding
 	case token.Revoked:
 		return token, ErrTokenRevoked
 	case !s.Now().Before(token.ExpiresAt):
@@ -153,14 +187,26 @@ func (s *Store) CheckToken(value string) (Token, error) {
 	}
 }
 
+// tokenOwnersExist requires the store lock.
+func (s *Store) tokenOwnersExist(token Token) bool {
+	if _, ok := s.apps.items[token.AppID]; !ok || token.AppID == "" {
+		return false
+	}
+	if token.Kind != UserToken && token.UserOpenID == "" {
+		return true
+	}
+	_, ok := s.users.items[token.UserOpenID]
+	return ok && token.UserOpenID != ""
+}
+
 // RevokeToken marks a credential as revoked without deleting its metadata.
 func (s *Store) RevokeToken(value string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	token, ok := s.tokens.items[value]
+	token, ok := s.tokens[value]
 	if ok {
 		token.Revoked = true
-		s.tokens.items[value] = token
+		s.tokens[value] = token
 	}
 	return ok
 }
@@ -249,7 +295,7 @@ func (s *Store) reset() {
 	clear(s.users.items)
 	clear(s.chats.items)
 	clear(s.messages.items)
-	clear(s.tokens.items)
+	clear(s.tokens)
 	clear(s.media.items)
 	clear(s.cards.items)
 	clear(s.traces)
@@ -279,14 +325,38 @@ func (s *Store) AppendTrace(trace Trace) {
 	s.tracePos = (s.tracePos + 1) % len(s.traces)
 }
 
-// Traces returns trace snapshots in oldest-to-newest order.
+// TraceFilter selects traces by exact app and method and by path prefix.
+// A positive Limit returns the most recent matching traces.
+type TraceFilter struct {
+	AppID      string
+	Method     string
+	PathPrefix string
+	Limit      int
+}
+
+// Traces returns all trace snapshots in oldest-to-newest order.
 func (s *Store) Traces() []Trace {
+	return s.QueryTraces(TraceFilter{})
+}
+
+// QueryTraces returns matching snapshots in oldest-to-newest order.
+func (s *Store) QueryTraces(filter TraceFilter) []Trace {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := make([]Trace, len(s.traces))
-	for i := range result {
-		result[i] = cloneTrace(s.traces[(s.tracePos+i)%len(s.traces)])
+	result := make([]Trace, 0)
+	for i := len(s.traces) - 1; i >= 0; i-- {
+		trace := s.traces[(s.tracePos+i)%len(s.traces)]
+		if (filter.AppID != "" && trace.AppID != filter.AppID) ||
+			(filter.Method != "" && trace.Method != filter.Method) ||
+			!strings.HasPrefix(trace.Path, filter.PathPrefix) {
+			continue
+		}
+		result = append(result, cloneTrace(trace))
+		if len(result) == filter.Limit {
+			break
+		}
 	}
+	slices.Reverse(result)
 	return result
 }
 

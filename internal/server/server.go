@@ -76,7 +76,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, feishu)))
+	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, openAPIHandler(feishu))))
 	mux.Handle("/_sandbox/", sandbox)
 
 	return &Server{
@@ -86,6 +86,40 @@ func New(cfg config.Config, opts ...Option) *Server {
 		},
 		store: state,
 	}
+}
+
+// An empty ServeMux pattern means either 404 or 405. Translate the former
+// while letting ServeMux generate Allow and path parameters as usual.
+func openAPIHandler(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		handler.ServeHTTP(&openAPIFallbackWriter{ResponseWriter: w}, r)
+	})
+}
+
+type openAPIFallbackWriter struct {
+	http.ResponseWriter
+	translated bool
+}
+
+func (w *openAPIFallbackWriter) WriteHeader(status int) {
+	if status != http.StatusNotFound {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.translated = true
+	_ = protocol.WriteError(w.ResponseWriter, protocol.NewError(protocol.ResourceNotFound, nil))
+}
+
+func (w *openAPIFallbackWriter) Write(body []byte) (int, error) {
+	if w.translated {
+		return len(body), nil
+	}
+	return w.ResponseWriter.Write(body)
 }
 
 // Store returns the server's virtual state.

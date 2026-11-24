@@ -2,13 +2,16 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -25,27 +28,34 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
 			RequestHeaders: auditHeaders(r.Header),
 		}
+		r = r.WithContext(context.WithValue(r.Context(), traceAppKey{}, &trace.AppID))
+		requestContentType := r.Header.Get("Content-Type")
+		requestLength := r.ContentLength
+		var request *auditReader
 		if r.Body != nil && r.Body != http.NoBody {
-			body, err := io.ReadAll(io.LimitReader(r.Body, auditBodyLimit+1))
-			trace.RequestBodyTruncated = len(body) > auditBodyLimit || err != nil
-			trace.RequestBody = auditBody(body, r.Header.Get("Content-Type"), trace.RequestBodyTruncated)
-			r.Body = replayBody(r.Body, body, err)
+			request = &auditReader{ReadCloser: r.Body}
+			r.Body = request
 		}
-		capture := &auditWriter{ResponseWriter: w}
-		next.ServeHTTP(capture, r)
-		trace.Status = capture.status
-		if trace.Status == 0 {
-			trace.Status = http.StatusOK
-		}
+
+		response := &auditWriter{ResponseWriter: w}
+		next.ServeHTTP(response, r)
+		response.commit(http.StatusOK) // A handler that writes nothing gets an implicit 200.
 		trace.Latency = time.Since(started)
-		trace.ResponseHeaders = auditHeaders(capture.Header())
-		trace.ResponseBodyTruncated = capture.truncated
-		trace.ResponseBody = auditBody(capture.body.Bytes(), capture.Header().Get("Content-Type"), capture.truncated)
-		if !capture.truncated {
+		if request != nil {
+			trace.RequestBodyTruncated = request.truncated || request.failed ||
+				(request.bytesRead > 0 && !request.eof && request.bytesRead != requestLength)
+			trace.RequestBody = auditBody(request.body.Bytes(), requestContentType, trace.RequestBodyTruncated)
+		}
+		trace.Status = response.status
+		trace.ResponseHeaders = response.headers
+		trace.ResponseBodyTruncated = response.truncated
+		trace.ResponseBody = auditBody(response.body.Bytes(), response.headers.Get("Content-Type"), response.truncated)
+		trace.Code = response.code
+		if trace.Code == nil && !response.truncated {
 			var envelope struct {
 				Code *int `json:"code"`
 			}
-			if json.Unmarshal(capture.body.Bytes(), &envelope) == nil {
+			if json.Unmarshal(response.body.Bytes(), &envelope) == nil {
 				trace.Code = envelope.Code
 			}
 		}
@@ -53,55 +63,89 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 	})
 }
 
-type readCloser struct {
-	io.Reader
-	io.Closer
+type bodyCapture struct {
+	body      bytes.Buffer
+	truncated bool
 }
 
-type errorReader struct{ err error }
+func (c *bodyCapture) record(data []byte) {
+	remaining := auditBodyLimit - c.body.Len()
+	_, _ = c.body.Write(data[:min(len(data), remaining)])
+	c.truncated = c.truncated || len(data) > remaining
+}
 
-func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+type auditReader struct {
+	io.ReadCloser
+	bodyCapture
+	bytesRead int64
+	eof       bool
+	failed    bool
+}
 
-func replayBody(original io.ReadCloser, prefix []byte, readErr error) io.ReadCloser {
-	var tail io.Reader = original
-	if readErr != nil {
-		tail = errorReader{err: readErr}
+func (r *auditReader) Read(data []byte) (int, error) {
+	n, err := r.ReadCloser.Read(data)
+	r.record(data[:n])
+	r.bytesRead += int64(n)
+	switch {
+	case errors.Is(err, io.EOF):
+		r.eof = true
+	case err != nil:
+		r.failed = true
 	}
-	return readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), tail), Closer: original}
+	return n, err
 }
 
 type auditWriter struct {
 	http.ResponseWriter
-	body      bytes.Buffer
-	status    int
-	truncated bool
+	bodyCapture
+	status  int
+	headers http.Header
+	code    *int
+}
+
+func (w *auditWriter) commit(status int) {
+	if w.status == 0 {
+		w.status = status
+		w.headers = auditHeaders(w.Header())
+	}
 }
 
 func (w *auditWriter) WriteHeader(status int) {
-	if w.status == 0 && (status == http.StatusSwitchingProtocols || status >= 200) {
-		w.status = status
+	if status == http.StatusSwitchingProtocols || status >= 200 {
+		w.commit(status)
 	}
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *auditWriter) Write(body []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
+	w.commit(http.StatusOK)
 	n, err := w.ResponseWriter.Write(body)
-	remaining := auditBodyLimit - w.body.Len()
-	_, _ = w.body.Write(body[:min(n, remaining)])
-	w.truncated = w.truncated || n > remaining
+	w.record(body[:n])
 	return n, err
+}
+
+func (w *auditWriter) SetFeishuCode(code protocol.Code) {
+	if w.status == 0 {
+		value := int(code)
+		w.code = &value
+	}
 }
 
 func (w *auditWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+func (w *auditWriter) Flush() { _ = w.FlushError() }
+
 func (w *auditWriter) FlushError() error {
-	if w.status == 0 {
-		w.status = http.StatusOK
+	controller := http.NewResponseController(w.ResponseWriter)
+	if w.status != 0 {
+		return controller.Flush()
 	}
-	return http.NewResponseController(w.ResponseWriter).Flush()
+	headers := auditHeaders(w.Header())
+	err := controller.Flush()
+	if !errors.Is(err, http.ErrNotSupported) {
+		w.status, w.headers = http.StatusOK, headers
+	}
+	return err
 }
 
 func auditHeaders(headers http.Header) http.Header {

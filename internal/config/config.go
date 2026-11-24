@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,7 +68,7 @@ type Config struct {
 
 // DefaultApp returns the public fixture credentials for the built-in bot.
 func DefaultApp() App {
-	return App{
+	return App{ //nolint:gosec // G101 flags the public credentials for the local demo bot.
 		AppID: "cli_larkbox", AppSecret: "larkbox-local-secret",
 		BotOpenID: "ou_larkbox_bot", BotName: "Larkbox Bot",
 		VerificationToken: "larkbox-local-verification", EncryptKey: "larkbox-local-encryption",
@@ -105,32 +106,36 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func readFile(path string, cfg *Config) (err error) {
+func readFile(path string, cfg *Config) error {
 	// #nosec G304 -- The operator selects this local file with --config.
-	file, err := os.Open(path)
+	body, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, file.Close()) }()
-
-	var decode func(any) error
-	if strings.EqualFold(filepath.Ext(path), ".json") {
-		decoder := json.NewDecoder(file)
-		decoder.DisallowUnknownFields()
-		decode = decoder.Decode
-	} else {
-		decoder := yaml.NewDecoder(file)
-		decoder.KnownFields(true)
-		decode = decoder.Decode
-	}
-	// Decode into fresh slices so JSON cannot reuse built-in seed entries.
-	defaults := *cfg
-	cfg.Apps, cfg.Users, cfg.Chats = nil, nil, nil
-	if err := decode(&cfg); err != nil {
+	isJSON := strings.EqualFold(filepath.Ext(path), ".json")
+	// Check presence separately because both typed decoders conflate null
+	// and omitted slices. Keep omitted lists and allow [] to clear them.
+	var fields map[string]any
+	if err := fileDecoder(body, isJSON)(&fields); err != nil {
 		return err
 	}
-	if cfg == nil {
+	if fields == nil {
 		return errors.New("expected a configuration object")
+	}
+	for name, value := range fields {
+		switch strings.ToLower(name) {
+		case "apps", "users", "chats":
+			if value == nil {
+				return fmt.Errorf("%s must be a seed list; use [] to clear it", name)
+			}
+		}
+	}
+
+	defaults := *cfg
+	cfg.Apps, cfg.Users, cfg.Chats = nil, nil, nil
+	decode := fileDecoder(body, isJSON)
+	if err := decode(cfg); err != nil {
+		return err
 	}
 	if cfg.Apps == nil {
 		cfg.Apps = defaults.Apps
@@ -146,6 +151,19 @@ func readFile(path string, cfg *Config) (err error) {
 		return errors.New("expected a single configuration document")
 	}
 	return nil
+}
+
+func fileDecoder(body []byte, isJSON bool) func(any) error {
+	reader := bytes.NewReader(body)
+	if isJSON {
+		decoder := json.NewDecoder(reader)
+		decoder.DisallowUnknownFields()
+		decoder.UseNumber()
+		return decoder.Decode
+	}
+	decoder := yaml.NewDecoder(reader)
+	decoder.KnownFields(true)
+	return decoder.Decode
 }
 
 func applyEnv(cfg *Config) error {

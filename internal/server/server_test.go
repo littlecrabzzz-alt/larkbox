@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -75,7 +77,9 @@ func TestRouteRegistration(t *testing.T) {
 		})
 	}
 	srv := New(config.Default(), WithFeishuRoutes(openAPI), WithSandboxRoutes(sandbox))
-	srv.Store().Tokens().Put(store.Token{Value: "t-test", Kind: store.TenantToken, AppID: appID, ExpiresAt: srv.Store().Now().Add(time.Hour)})
+	if err := srv.Store().PutToken(store.Token{Value: "t-test", Kind: store.TenantToken, AppID: appID, ExpiresAt: srv.Store().Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, method, path, auth string
 		status                   int
@@ -85,19 +89,160 @@ func TestRouteRegistration(t *testing.T) {
 		{"Open API", http.MethodGet, "/open-apis/demo/" + appID, "Bearer t-test", http.StatusOK, 1, `"code":0`},
 		{"missing token", http.MethodGet, "/open-apis/demo/" + appID, "", http.StatusBadRequest, 2, `"code":99991661`},
 		{"sandbox", http.MethodPost, "/_sandbox/reset", "", http.StatusNoContent, 0, ""},
-		{"token reset", http.MethodGet, "/open-apis/demo/" + appID, "Bearer t-test", http.StatusBadRequest, 1, `"code":99991663`},
+		{"token reset", http.MethodGet, "/open-apis/demo/" + appID, "Bearer t-test", http.StatusBadRequest, 1, `"code":99991665`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, tc.path, nil)
 			if tc.auth != "" {
 				r.Header.Set("Authorization", tc.auth)
 			}
+			r.Header.Set("X-App-ID", "untrusted")
 			w := httptest.NewRecorder()
 			srv.ServeHTTP(w, r)
-			if w.Code != tc.status || len(srv.Store().Traces()) != tc.traceCount || !strings.Contains(w.Body.String(), tc.code) {
-				t.Fatalf("HTTP %d: %s, trace count=%d", w.Code, w.Body, len(srv.Store().Traces()))
+			traces := srv.Store().Traces()
+			if w.Code != tc.status || len(traces) != tc.traceCount || !strings.Contains(w.Body.String(), tc.code) {
+				t.Fatalf("HTTP %d: %s, trace count=%d", w.Code, w.Body, len(traces))
+			}
+			if len(traces) > 0 {
+				wantAppID := ""
+				if tc.status == http.StatusOK {
+					wantAppID = appID
+				}
+				if got := traces[len(traces)-1].AppID; got != wantAppID {
+					t.Fatalf("trace AppID = %q, want %q", got, wantAppID)
+				}
 			}
 		})
+	}
+}
+
+func TestOpenAPI404And405(t *testing.T) {
+	srv := New(config.Default(), WithFeishuRoutes(func(mux *http.ServeMux, _ config.Config, _ *store.Store) {
+		mux.HandleFunc("GET /open-apis/known/{id}", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "handler-generated 404", http.StatusNotFound)
+		})
+	}))
+	for _, tc := range []struct {
+		name, method, path string
+		status             int
+		allow, body        string
+		traceCode          int
+	}{
+		{"unmatched GET", http.MethodGet, "/open-apis/unknown", 404, "", `{"code":99991201,"msg":"resource not find"}`, 99991201},
+		{"unmatched POST", http.MethodPost, "/open-apis/unknown", 404, "", `{"code":99991201,"msg":"resource not find"}`, 99991201},
+		{"wrong method", http.MethodPost, "/open-apis/known/example", 405, "GET, HEAD", "Method Not Allowed\n", 0},
+		{"matched 404", http.MethodGet, "/open-apis/known/example", 404, "", "handler-generated 404\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != tc.status || w.Header().Get("Allow") != tc.allow || w.Body.String() != tc.body {
+				t.Fatalf("HTTP %d, headers=%v: %s", w.Code, w.Header(), w.Body)
+			}
+			traces := srv.Store().Traces()
+			trace := traces[len(traces)-1]
+			if trace.Status != tc.status || (tc.traceCode == 0 && trace.Code != nil) ||
+				(tc.traceCode != 0 && (trace.Code == nil || *trace.Code != tc.traceCode)) {
+				t.Fatalf("unexpected trace: %+v", trace)
+			}
+			if tc.traceCode != 0 && w.Header().Get("Content-Type") != "application/json; charset=utf-8" {
+				t.Errorf("unexpected translated 404 media type: %v", w.Header())
+			}
+		})
+	}
+}
+
+func TestLargeEnvelopeAuditOverHTTP(t *testing.T) {
+	payload := strings.Repeat("x", 70*1024)
+	srv := New(config.Default(), WithFeishuRoutes(func(mux *http.ServeMux, _ config.Config, _ *store.Store) {
+		mux.HandleFunc("GET /open-apis/large", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Request-Id", "committed")
+			if err := protocol.WriteSuccess(w, payload); err != nil {
+				t.Error(err)
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			} else {
+				t.Error("audit writer does not support http.Flusher")
+			}
+			if _, ok := w.(interface{ Unwrap() http.ResponseWriter }); !ok {
+				t.Error("audit writer does not support Unwrap")
+			}
+			w.Header().Set("X-Request-Id", "too late")
+		})
+	}))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/open-apis/large", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var envelope struct {
+		Code int    `json:"code"`
+		Data string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || envelope.Code != 0 || envelope.Data != payload ||
+		resp.Header.Get("X-Request-Id") != "committed" {
+		t.Fatal("unexpected wire response")
+	}
+	trace := srv.Store().Traces()[0]
+	if trace.Status != http.StatusOK || trace.Code == nil || *trace.Code != 0 || !trace.ResponseBodyTruncated ||
+		trace.ResponseHeaders.Get("X-Request-Id") != "committed" {
+		t.Fatalf("lost response metadata: %+v", trace)
+	}
+}
+
+func TestRejectedExpectContinueDoesNotReadBody(t *testing.T) {
+	srv := New(config.Default(), WithFeishuRoutes(func(mux *http.ServeMux, cfg config.Config, state *store.Store) {
+		mux.Handle("POST /open-apis/protected", middleware.Bearer(state, middleware.Tenant, cfg.StrictMode)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Error("unauthenticated request reached the handler")
+		})))
+	}))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(t.Context(), "tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "POST /open-apis/protected HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 50\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("first wire response = %s, want final 400", resp.Status)
 	}
 }
 

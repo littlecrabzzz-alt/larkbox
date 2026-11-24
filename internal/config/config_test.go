@@ -64,6 +64,13 @@ func TestLoad(t *testing.T) {
 		{"trailing.yaml", "{}\n---\n{}", "single configuration"},
 		{"trailing.json", "{} {}", "single configuration"},
 		{"null.json", "null", "configuration object"},
+		{"null.yaml", "null", "configuration object"},
+		{"null-apps.json", `{"apps":null}`, "apps must be a seed list"},
+		{"null-users.json", `{"users":null}`, "users must be a seed list"},
+		{"null-chats.json", `{"chats":null}`, "chats must be a seed list"},
+		{"null-apps.yaml", "apps: ~", "apps must be a seed list"},
+		{"null-users.yaml", "users: null", "users must be a seed list"},
+		{"null-chats.yaml", "chats:", "chats must be a seed list"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), tc.name)
@@ -110,6 +117,8 @@ func TestLoadInvalidEnvironment(t *testing.T) {
 		{"LARKBOX_STRICT_MODE", "maybe"},
 		{"LARKBOX_OAUTH_CODE_TTL", "five"},
 		{"LARKBOX_APPS", "null"},
+		{"LARKBOX_USERS", "null"},
+		{"LARKBOX_CHATS", "null"},
 		{"LARKBOX_USERS", `[{"extra":true}]`},
 		{"LARKBOX_CHATS", "[] []"},
 	} {
