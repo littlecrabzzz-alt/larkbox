@@ -46,12 +46,8 @@ func AuthFromContext(ctx context.Context) (Auth, bool) {
 // Wrappers supplied here let fault selection use the policy before route entry.
 func Bearer(state *store.Store, required RequiredToken, strict bool, wrappers ...func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		route := bearerRoute{state: state, required: required}
-		route.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
-			if applyDeferredFault(w, r, auth) {
-				return
-			}
 			switch {
 			case failure.Code == protocol.Success:
 				ctx := context.WithValue(r.Context(), authKey{}, auth)
@@ -64,24 +60,24 @@ func Bearer(state *store.Store, required RequiredToken, strict bool, wrappers ..
 			next.ServeHTTP(w, r)
 		})
 		for _, wrap := range wrappers {
-			route.Handler = wrap(route.Handler)
+			handler = wrap(handler)
 		}
-		return route
+		return WithBearerPolicy(handler, required)
 	}
 }
 
-// bearerRoute keeps the authentication policy on the registered handler, even
-// when another middleware sits outside the actual Bearer check.
+// WithBearerPolicy declares the accepted Bearer credentials for fault selection.
+// Use it on the final wrapped handler and keep Bearer authentication inside it.
+func WithBearerPolicy(handler http.Handler, required RequiredToken) http.Handler {
+	return bearerRoute{Handler: handler, required: required}
+}
+
 type bearerRoute struct {
 	http.Handler
-	state    *store.Store
 	required RequiredToken
 }
 
-func (route bearerRoute) faultAuth(headers []string) Auth {
-	auth, _ := authenticate(route.state, route.required, headers)
-	return auth
-}
+func (route bearerRoute) bearerPolicy() RequiredToken { return route.required }
 
 func authenticate(state *store.Store, required RequiredToken, headers []string) (Auth, protocol.APIError) {
 	value, bearer := bearerToken(headers)

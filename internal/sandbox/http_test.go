@@ -546,3 +546,51 @@ func TestControlCardDetailPreservesStandardIcon(t *testing.T) {
 		t.Fatal("card detail exposed a credential")
 	}
 }
+
+func TestControlCardElementsRedactCredentialsInListAndDetail(t *testing.T) {
+	cfg := config.Default()
+	app := &cfg.Apps[0]
+	app.VerificationToken = "fixtureAlpha"
+	app.EncryptKey = "fixtureBeta"
+	srv := sandboxServer(t, cfg)
+	const bearer = "t-card-elements"
+	if err := srv.Store().PutToken(store.Token{
+		Value: bearer, AppID: app.AppID, Kind: store.TenantToken, ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	create := func(doc string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"type":"card_json","data":%q}`, doc)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/open-apis/cardkit/v1/cards", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+bearer)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		var result struct {
+			Code int
+			Data struct {
+				ID string `json:"card_id"`
+			}
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || result.Code != 0 || result.Data.ID == "" {
+			t.Fatalf("CardKit create returned HTTP %d %s", w.Code, w.Body)
+		}
+		return result.Data.ID
+	}
+	cardID := create(fmt.Sprintf(`{"schema":"2.0","body":{"elements":[
+		{"tag":"markdown","element_id":%q,"content":%q},
+		{"tag":"markdown","element_id":%q,"content":%q}
+	]}}`, "field_"+app.VerificationToken, "First "+app.VerificationToken,
+		"field_"+app.EncryptKey, "Second "+app.EncryptKey))
+	emptyID := create(`{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"No element ID"}]}}`)
+	assertContains(t, call(t, srv, "GET", "/_sandbox/cards/"+emptyID, "", 200), `"elements":{}`)
+	for _, path := range []string{"/_sandbox/cards", "/_sandbox/cards/" + cardID} {
+		got := call(t, srv, "GET", path, "", 200)
+		assertContains(t, got,
+			`"element_id":"field_[REDACTED]"`, `"content":"First [REDACTED]"`, `"content":"Second [REDACTED]"`,
+			`"elements":{"field_[REDACTED]":"First [REDACTED]","field_[REDACTED]#2":"Second [REDACTED]"}`)
+		if bytes.Contains(got, []byte(app.VerificationToken)) || bytes.Contains(got, []byte(app.EncryptKey)) {
+			t.Fatalf("%s exposed an app credential", path)
+		}
+	}
+}

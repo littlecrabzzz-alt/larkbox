@@ -160,9 +160,9 @@ func (c *control) viewCard(card store.Card, detail bool) cardView {
 	if detail {
 		redactor := c.state.DiagnosticRedactor(card.AppID, card.DiagnosticRedactor)
 		view.JSON = redactor.JSON(card.JSON)
-		elements := make(map[string]string, len(card.Elements))
-		for id, content := range card.Elements {
-			elements[id] = redactor.Text(content)
+		elements := redactor.TextMap(card.Elements)
+		if elements == nil {
+			elements = map[string]string{}
 		}
 		view.Elements = &elements
 	}

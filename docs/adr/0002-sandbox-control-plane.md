@@ -76,13 +76,13 @@ rule in creation order whose probability trial succeeds wins. The
 `remaining_hits` means unlimited. A positive hit count is decremented
 atomically and the rule disappears when the last hit is spent. Incoming
 requests derive their app from a stored Bearer token or the app selector
-of a credential or OAuth endpoint. Inbound selection happens once per
-request. Expiry is eligible only for a valid Bearer token of a kind
-accepted by the matched route. When an outer wrapper hides the route's
-Bearer policy and expiry could win, the Bearer check makes the single fault
-selection before the application handler runs. Deferred rules are spent
-only when a Bearer check runs. Public credential endpoints make their
-selection directly.
+of a credential or OAuth endpoint. Inbound selection runs once before
+route execution. Expiry requires a valid token accepted by the registered
+Bearer policy. Direct `middleware.Bearer` handlers carry that policy.
+Use `middleware.WithBearerPolicy(handler, required)` on outer-wrapped
+handlers such as `http.TimeoutHandler`, with the same requirement as the
+inner Bearer check. Routes without a policy are eligible for non-expiry
+faults, including when a request carries a valid Bearer token.
 
 | Kind | Scope | Parameters and behavior |
 |---|---|---|

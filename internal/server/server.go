@@ -47,7 +47,8 @@ type options struct {
 	eventOptions event.Options
 }
 
-// WithFeishuRoutes registers routes under /open-apis/.
+// WithFeishuRoutes registers routes under /open-apis/. Annotate outer-wrapped
+// Bearer handlers with middleware.WithBearerPolicy to enable expiry faults.
 func WithFeishuRoutes(register RegisterRoutes) Option {
 	return func(opts *options) { opts.feishu = append(opts.feishu, register) }
 }

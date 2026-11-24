@@ -184,30 +184,6 @@ func (e *Engine) NeedsApp(input Match) bool {
 func (e *Engine) Match(input Match, expiryEligible bool) Effect {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.match(input, expiryEligible)
-}
-
-// MatchBeforeBearer defers selection when expiry could win and the route's
-// Bearer requirement is hidden by a wrapper. The preflight spends no hits or
-// random samples. The caller completes a deferred match at authentication.
-func (e *Engine) MatchBeforeBearer(input Match) (effect Effect, deferred bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, rule := range e.rules {
-		if !rule.matches(input) {
-			continue
-		}
-		if rule.Kind == TokenExpiry {
-			return Effect{}, true
-		}
-		if rule.Probability == nil || *rule.Probability == 1 {
-			break
-		}
-	}
-	return e.match(input, false), false
-}
-
-func (e *Engine) match(input Match, expiryEligible bool) Effect {
 	for i, rule := range e.rules {
 		if (rule.Kind == TokenExpiry && !expiryEligible) || !rule.matches(input) ||
 			(rule.Probability != nil && *rule.Probability < 1 && e.random() >= *rule.Probability) {

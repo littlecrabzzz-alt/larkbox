@@ -118,7 +118,7 @@ func (r Redactor) Text(text string) string {
 	return r.scrub(text, "", 0).(string)
 }
 
-// TextMap scrubs localized diagnostic keys and text without modifying the source.
+// TextMap scrubs diagnostic keys and text without modifying the source.
 func (r Redactor) TextMap(entries map[string]string) map[string]string {
 	if entries == nil {
 		return nil

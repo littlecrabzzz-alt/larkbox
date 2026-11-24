@@ -2,14 +2,12 @@ package middleware
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
-	"sync/atomic"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
@@ -39,19 +37,15 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, routes *http.ServeM
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		input := fault.Match{Channel: "inbound", Method: r.Method, PathPrefix: r.URL.EscapedPath()}
 		headers := r.Header.Values("Authorization")
-		handler, pattern := routes.Handler(r)
-		route, classified := handler.(interface{ faultAuth([]string) Auth })
+		handler, _ := routes.Handler(r)
 		var auth Auth
-		if classified {
-			auth = route.faultAuth(headers)
+		if route, ok := handler.(interface{ bearerPolicy() RequiredToken }); ok {
+			auth, _ = authenticate(state, route.bearerPolicy(), headers)
 		}
 		input.AppID = auth.AppID
-		var validStoredBearer bool
 		if value, ok := bearerToken(headers); input.AppID == "" && ok {
-			token, err := state.CheckToken(value)
+			token, _ := state.CheckToken(value)
 			input.AppID = token.AppID
-			validStoredBearer = err == nil && bearerPrefixKind(value) != "" &&
-				(token.Kind == store.TenantToken || token.Kind == store.UserToken || token.Kind == store.AppToken)
 			SetTraceApp(r, input.AppID)
 		}
 		credentialField := appSelector(r.Method, r.URL.Path)
@@ -61,55 +55,14 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, routes *http.ServeM
 				input.AppID = ""
 			}
 		}
-		canDefer := pattern != "" && !classified && validStoredBearer && credentialField == ""
-		selection, err := store.Commit(r.Context(), state, func() (faultSelection, error) {
-			if canDefer {
-				effect, deferred := engine.MatchBeforeBearer(input)
-				return faultSelection{effect, deferred}, nil
-			}
-			return faultSelection{effect: engine.Match(input, auth.Kind != "")}, nil
+		effect, err := store.Commit(r.Context(), state, func() (fault.Effect, error) {
+			return engine.Match(input, auth.Kind != ""), nil
 		})
-		if WriteResetConflict(w, err) || applyFault(w, r, input, auth.Kind, selection.effect) {
+		if WriteResetConflict(w, err) || applyFault(w, r, input, auth.Kind, effect) {
 			return
-		}
-		if selection.deferred {
-			pending := &deferredFault{state: state, engine: engine, input: input}
-			r = r.WithContext(context.WithValue(r.Context(), deferredFaultKey{}, pending))
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-type faultSelection struct {
-	effect   fault.Effect
-	deferred bool
-}
-
-type deferredFaultKey struct{}
-
-type deferredFault struct {
-	state  *store.Store
-	engine *fault.Engine
-	input  fault.Match
-	used   atomic.Bool
-}
-
-func applyDeferredFault(w http.ResponseWriter, r *http.Request, auth Auth) bool {
-	pending, ok := r.Context().Value(deferredFaultKey{}).(*deferredFault)
-	if !ok || !pending.used.CompareAndSwap(false, true) {
-		return false
-	}
-	if r.Context().Err() != nil {
-		return true
-	}
-	input := pending.input
-	if auth.AppID != "" {
-		input.AppID = auth.AppID
-	}
-	effect, err := store.Commit(r.Context(), pending.state, func() (fault.Effect, error) {
-		return pending.engine.Match(input, auth.Kind != ""), nil
-	})
-	return WriteResetConflict(w, err) || applyFault(w, r, input, auth.Kind, effect)
 }
 
 func applyFault(w http.ResponseWriter, r *http.Request, input fault.Match, kind store.TokenKind, effect fault.Effect) bool {
@@ -140,7 +93,7 @@ type bufferedRequestBody struct {
 	io.Closer
 }
 
-// A nonempty selector identifies a public credential endpoint.
+// appSelector identifies the app selector on public credential endpoints.
 func appSelector(method, path string) string {
 	switch {
 	case (method == http.MethodGet || method == http.MethodHead) && (path == "/open-apis/authen/v1/authorize" || path == "/open-apis/authen/v1/index"):
