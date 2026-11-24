@@ -23,7 +23,7 @@ const (
 )
 
 func TestOfficialSDKAuth(t *testing.T) {
-	cfg := config.Default()
+	cfg := sdkTestConfig()
 	cfg.Apps[0].RedirectURIs = []string{callbackURL}
 	cfg.Users[0].EmployeeNo = "EMP-001"
 	app := cfg.Apps[0]

@@ -103,22 +103,23 @@ func (c *Collection[T]) Delete(key string) bool {
 
 // Store owns the sandbox's in-memory state.
 type Store struct {
-	mu             sync.RWMutex
-	now            func() time.Time
-	seed           config.Config
-	apps           Collection[App]
-	users          Collection[User]
-	chats          Collection[Chat]
-	messages       Collection[Message]
-	messageUUIDs   map[messageRequest]string
-	chatMessages   map[string]map[string]struct{}
-	threadMessages map[string]map[string]struct{}
-	messageOrder   uint64
-	tokens         map[string]Token
-	media          Collection[Media]
-	cards          Collection[Card]
-	traces         []Trace
-	tracePos       int
+	mu               sync.RWMutex
+	now              func() time.Time
+	seed             config.Config
+	apps             Collection[App]
+	users            Collection[User]
+	chats            Collection[Chat]
+	messages         Collection[Message]
+	messageUUIDs     map[messageRequest]messageDedup
+	chatMessages     map[string]map[string]struct{}
+	threadMessages   map[string]map[string]struct{}
+	messageOrder     uint64
+	nextDedupCleanup time.Time
+	tokens           map[string]Token
+	media            Collection[Media]
+	cards            Collection[Card]
+	traces           []Trace
+	tracePos         int
 }
 
 // New creates an empty store. A nil clock uses time.Now. A supplied clock
@@ -132,7 +133,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 		traceCapacity = defaultTraceCapacity
 	}
 	s := &Store{now: now, tokens: make(map[string]Token), traces: make([]Trace, 0, traceCapacity)}
-	s.messageUUIDs = make(map[messageRequest]string)
+	s.messageUUIDs = make(map[messageRequest]messageDedup)
 	s.chatMessages = make(map[string]map[string]struct{})
 	s.threadMessages = make(map[string]map[string]struct{})
 	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, cloneApp)
@@ -260,7 +261,7 @@ func (s *Store) AddChatMember(chatID, openID string) bool {
 	chat, ok := s.chats.items[chatID]
 	if ok && !slices.Contains(chat.MemberIDs, openID) {
 		chat.MemberIDs = append(chat.MemberIDs, openID)
-		s.chats.items[chatID] = chat
+		s.chats.put(chat)
 	}
 	return ok
 }
@@ -272,7 +273,7 @@ func (s *Store) RemoveChatMember(chatID, openID string) bool {
 	chat, ok := s.chats.items[chatID]
 	if ok {
 		chat.MemberIDs = slices.DeleteFunc(chat.MemberIDs, func(member string) bool { return member == openID })
-		s.chats.items[chatID] = chat
+		s.chats.put(chat)
 	}
 	return ok
 }
@@ -344,6 +345,7 @@ func (s *Store) reset() {
 	clear(s.chatMessages)
 	clear(s.threadMessages)
 	s.messageOrder = 0
+	s.nextDedupCleanup = time.Time{}
 	clear(s.tokens)
 	clear(s.media.items)
 	clear(s.cards.items)
@@ -416,6 +418,16 @@ func cloneApp(app App) App {
 
 func cloneChat(chat Chat) Chat {
 	chat.MemberIDs = slices.Clone(chat.MemberIDs)
+	order := make(map[string]uint64, len(chat.MemberIDs))
+	for _, id := range chat.MemberIDs {
+		position := chat.MemberOrder[id]
+		if position == 0 {
+			chat.NextMemberOrder++
+			position = chat.NextMemberOrder
+		}
+		order[id] = position
+	}
+	chat.MemberOrder = order
 	chat.BotManagers = slices.Clone(chat.BotManagers)
 	chat.I18nNames = maps.Clone(chat.I18nNames)
 	chat.Labels = slices.Clone(chat.Labels)

@@ -12,14 +12,16 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
 const (
-	maxImageSize = 10 << 20
-	maxFileSize  = 30 << 20
+	maxImageSize    = 10 << 20
+	maxFileSize     = 30 << 20
+	maxFilenameSize = 255
 )
 
 func (h handler) uploadImage(w http.ResponseWriter, r *http.Request) {
@@ -60,10 +62,14 @@ func (h handler) upload(w http.ResponseWriter, r *http.Request, kind string, pre
 		Key: protocol.NewID(prefix), Kind: kind, UploadType: types[0], AppID: caller(r).AppID,
 		Filename: safeFilename(part.Filename),
 	}
+	if len(media.Filename) > maxFilenameSize || !utf8.ValidString(media.Filename) {
+		badField(w, kind, "The attachment filename must be valid UTF-8 and at most 255 bytes.")
+		return
+	}
 	if kind == "file" {
 		names := form.Value["file_name"]
-		if len(names) != 1 || safeFilename(names[0]) == "" {
-			badField(w, "file_name", "A file name is required.")
+		if len(names) != 1 || len(names[0]) > maxFilenameSize || !utf8.ValidString(names[0]) || safeFilename(names[0]) == "" {
+			badField(w, "file_name", "Expected a valid UTF-8 filename of at most 255 bytes.")
 			return
 		}
 		media.Filename = safeFilename(names[0])
@@ -149,7 +155,7 @@ func (h handler) downloadResource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.state.IMMessage(caller(r), r.PathValue("message_id"))
+	m, err := h.state.IMResourceMessage(caller(r), r.PathValue("message_id"))
 	switch {
 	case errors.Is(err, store.ErrOutsideChat):
 		fail(w, 234004, "App not in chat.")
@@ -186,24 +192,11 @@ func referencesResource(m store.Message, kind, key string) bool {
 	case kind == "file" && (m.MsgType == "file" || m.MsgType == "audio" || m.MsgType == "media"):
 		return content["file_key"] == key
 	case m.MsgType == "post":
-		if postReferencesResource(content, kind, key) {
-			return true
+		elements, ok := parsePost(content)
+		if !ok {
+			return false
 		}
-		for _, child := range content {
-			if locale, ok := child.(map[string]any); ok && postReferencesResource(locale, kind, key) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func postReferencesResource(post map[string]any, kind, key string) bool {
-	rows, _ := post["content"].([]any)
-	for _, row := range rows {
-		elements, _ := row.([]any)
-		for _, value := range elements {
-			element, _ := value.(map[string]any)
+		for _, element := range elements {
 			if (element["tag"] == "media" || (kind == "image" && element["tag"] == "img")) &&
 				element[kind+"_key"] == key {
 				return true

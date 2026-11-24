@@ -33,6 +33,7 @@ type App struct {
 // User describes a virtual Feishu user.
 type User struct {
 	OpenID          string `json:"open_id" yaml:"open_id"`
+	Inactive        bool   `json:"inactive,omitempty" yaml:"inactive,omitempty"`
 	UserID          string `json:"user_id" yaml:"user_id"`
 	UnionID         string `json:"union_id" yaml:"union_id"`
 	Name            string `json:"name" yaml:"name"`
@@ -50,15 +51,17 @@ type User struct {
 
 // Chat describes a virtual p2p or group chat.
 type Chat struct {
-	ChatID       string   `json:"chat_id" yaml:"chat_id"`
-	ChatMode     string   `json:"chat_mode" yaml:"chat_mode"`
-	Name         string   `json:"name" yaml:"name"`
-	OwnerID      string   `json:"owner_id" yaml:"owner_id"`
-	MemberIDs    []string `json:"member_ids" yaml:"member_ids"`
-	ChatSettings `yaml:",inline"`
-	AppID        string    `json:"-" yaml:"-"`
-	BotManagers  []string  `json:"-" yaml:"-"`
-	CreatedAt    time.Time `json:"-" yaml:"-"`
+	ChatID          string   `json:"chat_id" yaml:"chat_id"`
+	ChatMode        string   `json:"chat_mode" yaml:"chat_mode"`
+	Name            string   `json:"name" yaml:"name"`
+	OwnerID         string   `json:"owner_id" yaml:"owner_id"`
+	MemberIDs       []string `json:"member_ids" yaml:"member_ids"`
+	ChatSettings    `yaml:",inline"`
+	AppID           string            `json:"-" yaml:"-"`
+	BotManagers     []string          `json:"-" yaml:"-"`
+	CreatedAt       time.Time         `json:"-" yaml:"-"`
+	MemberOrder     map[string]uint64 `json:"-" yaml:"-"`
+	NextMemberOrder uint64            `json:"-" yaml:"-"`
 }
 
 // ChatSettings are settings shared by seeded and API-created chats.

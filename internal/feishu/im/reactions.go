@@ -3,8 +3,8 @@ package im
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -12,6 +12,8 @@ import (
 
 var reactionMessageMissing = protocol.APIError{Code: 231003, Message: "The message is not found, maybe not exist or deleted.", Status: http.StatusBadRequest}
 var reactionMissing = protocol.APIError{Code: 231001, Message: "The reaction does not exist.", Status: http.StatusBadRequest}
+
+var emojiType = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
 
 func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -23,8 +25,8 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emoji := req.ReactionType.EmojiType
-	if strings.TrimSpace(emoji) == "" {
-		badField(w, "reaction_type.emoji_type", "An emoji type is required.")
+	if !emojiType.MatchString(emoji) {
+		badField(w, "reaction_type.emoji_type", "Expected an emoji name such as THUMBSUP.")
 		return
 	}
 	actor := caller(r)
@@ -42,7 +44,8 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 		}
-		reaction.CreatedAt = h.state.Now()
+		m.ReactionOrder++
+		reaction.Order, reaction.CreatedAt = m.ReactionOrder, h.state.Now()
 		m.Reactions = append(m.Reactions, reaction)
 		return nil
 	})
@@ -82,7 +85,7 @@ func (h handler) listReactions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	size, ok := pageSize(w, r, 100)
+	size, ok := pageSize(w, r, 50)
 	if !ok {
 		return
 	}
@@ -95,15 +98,21 @@ func (h handler) listReactions(w http.ResponseWriter, r *http.Request) {
 		reactionError(w, store.ErrMessageDeleted)
 		return
 	}
-	emoji := r.URL.Query().Get("reaction_type")
 	reactions := emptySlice(m.Reactions)
-	if emoji != "" {
-		reactions = slices.DeleteFunc(reactions, func(reaction store.Reaction) bool { return reaction.EmojiType != emoji })
+	if values, present := r.URL.Query()["reaction_type"]; present {
+		if len(values) != 1 || !emojiType.MatchString(values[0]) {
+			badField(w, "reaction_type", "Expected one emoji name such as THUMBSUP.")
+			return
+		}
+		reactions = slices.DeleteFunc(reactions, func(reaction store.Reaction) bool { return reaction.EmojiType != values[0] })
 	}
-	result, ok := paginate(w, r, reactions, size, func(reaction store.Reaction) string { return reaction.ID })
+	cursor, ok := readCursor(w, r)
 	if !ok {
 		return
 	}
+	result := paginate(reactions, size, cursor, false, func(reaction store.Reaction) sortKey {
+		return sortKey{Order: reaction.Order, ID: reaction.ID}
+	})
 	items := make([]fields, 0, len(result.Items))
 	for _, reaction := range result.Items {
 		items = append(items, h.reactionData(reaction, kind))

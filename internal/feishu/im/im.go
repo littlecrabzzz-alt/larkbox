@@ -2,6 +2,7 @@
 package im
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -227,31 +228,61 @@ func pageSize(w http.ResponseWriter, r *http.Request, maxSize int) (int, bool) {
 	return 0, false
 }
 
-func paginate[T any](w http.ResponseWriter, r *http.Request, items []T, size int, idOf func(T) string) (page[T], bool) {
+type sortKey struct {
+	At    time.Time `json:"at,omitempty"`
+	Order uint64    `json:"order,omitempty"`
+	ID    string    `json:"id"`
+}
+
+type pageCursor struct {
+	Scope    string  `json:"scope"`
+	Last     sortKey `json:"last"`
+	Activity *uint64 `json:"activity,omitempty"`
+}
+
+func readCursor(w http.ResponseWriter, r *http.Request) (pageCursor, bool) {
 	actor := caller(r)
 	query := r.URL.Query()
 	query.Del("page_size")
 	query.Del("page_token")
 	hash := sha256.Sum256([]byte(actor.AppID + "\x00" + actor.OpenID + "\x00" + r.URL.Path + "?" + query.Encode()))
-	prefix := fmt.Sprintf("%x:", hash[:8])
+	scope := fmt.Sprintf("%x", hash[:8])
 	if values, present := r.URL.Query()["page_token"]; present {
-		if len(values) != 1 {
-			badField(w, "page_token", "Invalid page token.")
-			return page[T]{}, false
+		if len(values) == 1 && len(values[0]) <= 1024 {
+			var cursor pageCursor
+			raw, err := base64.RawURLEncoding.DecodeString(values[0])
+			if err == nil && json.Unmarshal(raw, &cursor) == nil && cursor.Scope == scope && cursor.Last.ID != "" {
+				return cursor, true
+			}
 		}
-		cursor, err := base64.RawURLEncoding.DecodeString(values[0])
-		id, valid := strings.CutPrefix(string(cursor), prefix)
-		index := slices.IndexFunc(items, func(item T) bool { return idOf(item) == id })
-		if err != nil || !valid || index < 0 {
-			badField(w, "page_token", "Invalid or stale page token.")
-			return page[T]{}, false
+		badField(w, "page_token", "Invalid page token.")
+		return pageCursor{}, false
+	}
+	return pageCursor{Scope: scope}, true
+}
+
+func paginate[T any](items []T, size int, cursor pageCursor, descending bool, keyOf func(T) sortKey) page[T] {
+	compare := func(a, b sortKey) int {
+		order := cmp.Or(a.At.Compare(b.At), cmp.Compare(a.Order, b.Order), strings.Compare(a.ID, b.ID))
+		if descending {
+			return -order
 		}
-		items = items[index+1:]
+		return order
+	}
+	slices.SortFunc(items, func(a, b T) int { return compare(keyOf(a), keyOf(b)) })
+	if cursor.Last.ID != "" {
+		start := 0
+		for start < len(items) && compare(keyOf(items[start]), cursor.Last) <= 0 {
+			start++
+		}
+		items = items[start:]
 	}
 	result := page[T]{Items: items, HasMore: len(items) > size}
 	if result.HasMore {
-		result.PageToken = base64.RawURLEncoding.EncodeToString([]byte(prefix + idOf(items[size-1])))
+		cursor.Last = keyOf(items[size-1])
+		raw, _ := json.Marshal(cursor)
+		result.PageToken = base64.RawURLEncoding.EncodeToString(raw)
 		result.Items = items[:size]
 	}
-	return result, true
+	return result
 }

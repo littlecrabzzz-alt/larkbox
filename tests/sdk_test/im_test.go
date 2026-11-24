@@ -3,6 +3,7 @@ package sdk_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,11 +17,19 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/server"
 )
 
-func TestOfficialSDKIM(t *testing.T) {
+func sdkTestConfig() config.Config {
 	cfg := config.Default()
+	// The SDK caches tenant tokens globally by app ID.
+	cfg.Apps[0].AppID = protocol.NewID("cli_")
+	return cfg
+}
+
+func TestOfficialSDKIM(t *testing.T) {
+	cfg := sdkTestConfig()
 	srv := server.New(cfg)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -110,6 +119,9 @@ func sdkChats(t *testing.T, client *lark.Client, cfg config.Config) string {
 	if len(list.Data.Items) != 1 || value(list.Data.Items[0].ChatId) != id || !value(list.Data.HasMore) || value(list.Data.PageToken) == "" {
 		t.Fatalf("unexpected first chat page: %s", list.RawBody)
 	}
+	// New activity would move the second chat before the cursor if sorting
+	// were recalculated from current activity on every request.
+	sdkSend(t, client, "chat_id", cfg.Chats[0].ChatID, "text", `{"text":"recent activity"}`)
 	next, err := api.Chat.List(t.Context(), larkim.NewListChatReqBuilder().SortType("ByActiveTimeDesc").
 		PageSize(1).PageToken(*list.Data.PageToken).Build())
 	requireSDKNetwork(t, err)
@@ -202,7 +214,7 @@ func sdkMessages(t *testing.T, client *lark.Client, cfg config.Config, chatID st
 	second := reply(value(first.MessageId), `{"text":"nested reply"}`, false)
 	threadID := value(first.ThreadId)
 	if value(first.RootId) != rootID || value(first.ParentId) != rootID || !strings.HasPrefix(threadID, "omt_") ||
-		value(second.ParentId) != value(first.MessageId) || value(second.RootId) != rootID || value(second.ThreadId) != threadID {
+		value(second.ParentId) != rootID || value(second.RootId) != rootID || value(second.ThreadId) != threadID {
 		t.Fatal("reply IDs did not preserve the thread hierarchy")
 	}
 	card := sdkSend(t, client, "chat_id", chatID, "interactive", `{"config":{"update_multi":true},"elements":[]}`)
@@ -298,6 +310,14 @@ func sdkReactions(t *testing.T, client *lark.Client, chatID string) {
 		!value(first.Data.HasMore) || value(first.Data.PageToken) == "" {
 		t.Fatalf("unexpected first reaction page: %s", first.RawBody)
 	}
+	deleted, err := api.Delete(t.Context(), larkim.NewDeleteMessageReactionReqBuilder().MessageId(id).
+		ReactionId(value(like.ReactionId)).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, deleted.CodeError, 0)
+	if value(deleted.Data.ReactionId) != value(like.ReactionId) ||
+		value(deleted.Data.ActionTime) != value(like.ActionTime) || value(deleted.Data.ReactionType.EmojiType) != "THUMBSUP" {
+		t.Fatalf("unexpected deleted reaction: %s", deleted.RawBody)
+	}
 	next, err := api.List(t.Context(), larkim.NewListMessageReactionReqBuilder().MessageId(id).PageSize(1).
 		PageToken(*first.Data.PageToken).Build())
 	requireSDKNetwork(t, err)
@@ -311,14 +331,17 @@ func sdkReactions(t *testing.T, client *lark.Client, chatID string) {
 	if len(filtered.Data.Items) != 1 || value(filtered.Data.Items[0].ReactionId) != value(clap.ReactionId) {
 		t.Fatalf("unexpected filtered reaction page: %s", filtered.RawBody)
 	}
-	deleted, err := api.Delete(t.Context(), larkim.NewDeleteMessageReactionReqBuilder().MessageId(id).
-		ReactionId(value(like.ReactionId)).Build())
-	requireSDKNetwork(t, err)
-	requireSDKCode(t, deleted.CodeError, 0)
-	if value(deleted.Data.ReactionId) != value(like.ReactionId) ||
-		value(deleted.Data.ActionTime) != value(like.ActionTime) || value(deleted.Data.ReactionType.EmojiType) != "THUMBSUP" {
-		t.Fatalf("unexpected deleted reaction: %s", deleted.RawBody)
+
+	for _, size := range []int{50, 51} {
+		limit, err := api.List(t.Context(), larkim.NewListMessageReactionReqBuilder().MessageId(id).PageSize(size).Build())
+		requireSDKNetwork(t, err)
+		want := 0
+		if size == 51 {
+			want = 99992402
+		}
+		requireSDKCode(t, limit.CodeError, want)
 	}
+
 }
 
 func sdkMedia(t *testing.T, client *lark.Client, chatID string) {
@@ -368,6 +391,31 @@ func sdkMedia(t *testing.T, client *lark.Client, chatID string) {
 		requireSDKCode(t, got.CodeError, 0)
 		assertSDKMedia(t, got.ApiResp, got.File, got.FileName, resource.mime, resource.name, resource.data)
 	}
+	for _, fixture := range []struct {
+		post, kind, key, mime, name string
+		data                        []byte
+		code                        int
+	}{
+		{fmt.Sprintf(`{"en_us":{"content":[[{"tag":"img","image_key":%q}]]}}`, imageKey),
+			"image", imageKey, "image/png", gotImage.FileName, image, 0},
+		{fmt.Sprintf(`{"content":[[{"tag":"media","file_key":%q,"image_key":%q}]]}`, fileKey, imageKey),
+			"file", fileKey, "application/pdf", gotFile.FileName, file, 0},
+		{fmt.Sprintf(`{"content":[[{"tag":"text","text":"safe"}]],"en_us":{"content":[[{"tag":"img","image_key":%q}]]}}`, imageKey),
+			"image", imageKey, "", "", nil, 234003},
+		{fmt.Sprintf(`{"en_us":{"content":[[{"tag":"text","text":"safe"}]]},"metadata":{"content":[[{"tag":"img","image_key":%q}]]}}`, imageKey),
+			"image", imageKey, "", "", nil, 234003},
+	} {
+		m := sdkSend(t, client, "chat_id", chatID, "post", fixture.post)
+		res, err := api.MessageResource.Get(t.Context(), larkim.NewGetMessageResourceReqBuilder().
+			MessageId(value(m.MessageId)).FileKey(fixture.key).Type(fixture.kind).Build())
+		requireSDKNetwork(t, err)
+		requireSDKCode(t, res.CodeError, fixture.code)
+		if fixture.code == 0 {
+			assertSDKMedia(t, res.ApiResp, res.File, res.FileName, fixture.mime, fixture.name, fixture.data)
+		} else if res.File != nil {
+			t.Fatal("ignored rich-text metadata exposed an attachment")
+		}
+	}
 	unrelated := sdkSend(t, client, "chat_id", chatID, "text", `{"text":"This message contains no attachment."}`)
 	blocked, err := api.MessageResource.Get(t.Context(), larkim.NewGetMessageResourceReqBuilder().
 		MessageId(value(unrelated.MessageId)).FileKey(fileKey).Type("file").Build())
@@ -408,7 +456,7 @@ func sdkInvalidIM(t *testing.T, client *lark.Client, chatID string) {
 	requireSDKCode(t, badType.CodeError, 99992402)
 	missingChat, err := client.Im.Chat.Get(t.Context(), larkim.NewGetChatReqBuilder().ChatId("oc_missing").Build())
 	requireSDKNetwork(t, err)
-	requireSDKCode(t, missingChat.CodeError, 232002)
+	requireSDKCode(t, missingChat.CodeError, 232006)
 
 	textMessage := sdkSend(t, client, "chat_id", chatID, "text", `{"text":"not a card"}`)
 	notCard, err := client.Im.Message.Patch(t.Context(),

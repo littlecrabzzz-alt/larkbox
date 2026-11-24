@@ -1,7 +1,6 @@
 package im
 
 import (
-	"cmp"
 	"encoding/json"
 	"net/http"
 	"regexp"
@@ -44,7 +43,7 @@ func (h handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		input.ChatID = req.ReceiveID
 	} else {
 		user, found := h.findUser(kind, req.ReceiveID)
-		if !found {
+		if !found || user.Inactive {
 			fail(w, 230013, "Bot has NO availability to this user.")
 			return
 		}
@@ -93,9 +92,9 @@ func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.Ne
 	if !ok {
 		return store.NewMessage{}, false
 	}
+	encoded, mentions := h.normalizeMentions(req.MsgType, *req.Content, content)
 	return store.NewMessage{
-		MsgType: req.MsgType, Content: *req.Content, UUID: req.UUID,
-		Mentions: h.mentions(req.MsgType, content),
+		MsgType: req.MsgType, Content: encoded, UUID: req.UUID, Mentions: mentions,
 	}, true
 }
 
@@ -113,11 +112,13 @@ func checkContent(w http.ResponseWriter, kind string, encoded *string) (map[stri
 			return content, true
 		}
 	case "post":
-		if validPost(content) {
+		if _, ok := parsePost(content); ok {
 			return content, true
 		}
 	case "interactive":
-		return content, true
+		if validCard(content) {
+			return content, true
+		}
 	case "image":
 		if nonemptyString(content, "image_key") {
 			return content, true
@@ -161,45 +162,53 @@ func optionalString(obj map[string]any, key string) bool {
 	return !exists || isString
 }
 
-func validPost(post map[string]any) bool {
-	if _, hasContent := post["content"]; hasContent {
-		return validPostBody(post)
+// parsePost returns validated elements from either the direct body or the
+// supported locale bodies. Other fields are metadata and never contain elements.
+func parsePost(post map[string]any) ([]map[string]any, bool) {
+	if _, direct := post["content"]; direct {
+		return parsePostBody(post)
 	}
-	if len(post) == 0 {
-		return false
-	}
-	for lang, value := range post {
-		localized, ok := value.(map[string]any)
-		if !slices.Contains([]string{"zh_cn", "en_us", "ja_jp"}, lang) || !ok || !validPostBody(localized) {
-			return false
+	var elements []map[string]any
+	found := false
+	for _, lang := range []string{"zh_cn", "en_us", "ja_jp"} {
+		value, exists := post[lang]
+		if !exists {
+			continue
 		}
+		localized, ok := value.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		nodes, ok := parsePostBody(localized)
+		if !ok {
+			return nil, false
+		}
+		elements = append(elements, nodes...)
+		found = true
 	}
-	return true
+	return elements, found
 }
 
-func validPostBody(post map[string]any) bool {
+func parsePostBody(post map[string]any) ([]map[string]any, bool) {
 	paragraphs, ok := post["content"].([]any)
-	if !ok || len(paragraphs) == 0 {
-		return false
+	if !ok || len(paragraphs) == 0 || !optionalString(post, "title") {
+		return nil, false
 	}
-	if title, present := post["title"]; present {
-		if _, ok := title.(string); !ok {
-			return false
-		}
-	}
+	var nodes []map[string]any
 	for _, row := range paragraphs {
 		elements, ok := row.([]any)
 		if !ok {
-			return false
+			return nil, false
 		}
 		for _, value := range elements {
 			element, ok := value.(map[string]any)
 			if !ok || !validPostElement(element, len(elements)) {
-				return false
+				return nil, false
 			}
+			nodes = append(nodes, element)
 		}
 	}
-	return true
+	return nodes, true
 }
 
 func validPostElement(element map[string]any, paragraphSize int) bool {
@@ -227,59 +236,64 @@ func validPostElement(element map[string]any, paragraphSize int) bool {
 
 var textMention = regexp.MustCompile(`<at user_id="([^"]+)">([^<]*)</at>`)
 
-func (h handler) mentions(kind string, content map[string]any) []store.Mention {
+func (h handler) normalizeMentions(kind, encoded string, content map[string]any) (string, []store.Mention) {
 	if kind != "text" && kind != "post" {
-		return nil
+		return encoded, nil
 	}
-	type reference struct{ id, name string }
-	var refs []reference
+	var mentions []store.Mention
+	keys := make(map[string]string)
+	add := func(id, name string) string {
+		mention := h.resolveMention(id, name)
+		if key := keys[mention.OpenID]; key != "" {
+			return key
+		}
+		mention.Key = "@_user_" + strconv.Itoa(len(mentions)+1)
+		keys[mention.OpenID] = mention.Key
+		mentions = append(mentions, mention)
+		return mention.Key
+	}
+	replaceText := func(value any) string {
+		text, _ := value.(string)
+		return textMention.ReplaceAllStringFunc(text, func(token string) string {
+			parts := textMention.FindStringSubmatch(token)
+			return add(parts[1], parts[2])
+		})
+	}
 	if kind == "text" {
-		value, _ := content["text"].(string)
-		for _, match := range textMention.FindAllStringSubmatch(value, -1) {
-			refs = append(refs, reference{match[1], match[2]})
-		}
+		content["text"] = replaceText(content["text"])
 	} else {
-		posts := []map[string]any{content}
-		if _, ok := content["content"]; !ok {
-			posts = nil
-			for _, lang := range []string{"zh_cn", "en_us", "ja_jp"} {
-				if post, ok := content[lang].(map[string]any); ok {
-					posts = append(posts, post)
-				}
-			}
-		}
-		for _, post := range posts {
-			rows, _ := post["content"].([]any)
-			for _, row := range rows {
-				elements, _ := row.([]any)
-				for _, v := range elements {
-					element, _ := v.(map[string]any)
-					if element["tag"] == "at" {
-						id, _ := element["user_id"].(string)
-						name, _ := element["user_name"].(string)
-						refs = append(refs, reference{id, name})
-					}
-				}
+		elements, _ := parsePost(content)
+		for _, element := range elements {
+			switch element["tag"] {
+			case "at":
+				id, _ := element["user_id"].(string)
+				name, _ := element["user_name"].(string)
+				element["user_id"] = add(id, name)
+			case "md":
+				element["text"] = replaceText(element["text"])
 			}
 		}
 	}
-	result := make([]store.Mention, 0, len(refs))
-	seen := make(map[string]bool)
-	for _, ref := range refs {
-		if ref.id == "" || seen[ref.id] {
-			continue
-		}
-		seen[ref.id] = true
-		mention := store.Mention{Key: "@_user_" + strconv.Itoa(len(result)+1), OpenID: ref.id, Name: ref.name}
-		for _, idType := range []string{"open_id", "user_id", "union_id"} {
-			if user, ok := h.findUser(idType, ref.id); ok {
-				mention.OpenID, mention.UserID, mention.Name = user.OpenID, user.UserID, user.Name
-				break
-			}
-		}
-		result = append(result, mention)
+	if len(mentions) == 0 {
+		return encoded, nil
 	}
-	return result
+	raw, _ := json.Marshal(content)
+	return string(raw), mentions
+}
+
+func (h handler) resolveMention(id, name string) store.Mention {
+	for _, idType := range []string{"open_id", "user_id", "union_id"} {
+		if user, ok := h.findUser(idType, id); ok {
+			return store.Mention{OpenID: user.OpenID, UserID: user.UserID, Name: user.Name}
+		}
+	}
+	if bot, ok := h.botsByOpenID()[id]; ok {
+		return store.Mention{OpenID: bot.BotOpenID, Name: bot.BotName}
+	}
+	if bot, ok := h.state.Apps().Get(id); ok && bot.BotOpenID != "" {
+		return store.Mention{OpenID: bot.BotOpenID, Name: bot.BotName}
+	}
+	return store.Mention{OpenID: id, Name: name}
 }
 
 func (h handler) messageData(m store.Message, kind string) fields {
@@ -358,7 +372,7 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := caller(r)
-	mentions := h.mentions(req.MsgType, content)
+	encoded, mentions := h.normalizeMentions(req.MsgType, *req.Content, content)
 	m, err := h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
 		if !sentBy(actor, m) {
 			return noPermission
@@ -366,7 +380,13 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 		if (patch && m.MsgType != "interactive") || (!patch && m.MsgType != "text" && m.MsgType != "post") {
 			return protocol.NewError(protocol.IMInvalidParameter, nil)
 		}
-		m.MsgType, m.Content, m.Mentions = req.MsgType, *req.Content, mentions
+		if patch {
+			var current map[string]any
+			if json.Unmarshal([]byte(m.Content), &current) != nil || !sharedCard(current) || !sharedCard(content) {
+				return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
+			}
+		}
+		m.MsgType, m.Content, m.Mentions = req.MsgType, encoded, mentions
 		m.Updated, m.UpdatedAt = true, h.state.Now()
 		return nil
 	})
@@ -431,6 +451,14 @@ func (h handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if kind == "thread" && (start != nil || end != nil) {
+		field := "start_time"
+		if start == nil {
+			field = "end_time"
+		}
+		badField(w, field, "Time filters are available for chat history only.")
+		return
+	}
 	if end != nil && start != nil && *end < *start {
 		badField(w, "end_time", "Expected end_time at or after start_time.")
 		return
@@ -448,17 +476,13 @@ func (h handler) listMessages(w http.ResponseWriter, r *http.Request) {
 		unix := m.CreatedAt.Unix()
 		return (start != nil && unix < *start) || (end != nil && unix > *end)
 	})
-	slices.SortFunc(messages, func(a, b store.Message) int {
-		ordering := cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.Order, b.Order), strings.Compare(a.ID, b.ID))
-		if order == "ByCreateTimeDesc" {
-			return -ordering
-		}
-		return ordering
-	})
-	result, ok := paginate(w, r, messages, size, func(m store.Message) string { return m.ID })
+	cursor, ok := readCursor(w, r)
 	if !ok {
 		return
 	}
+	result := paginate(messages, size, cursor, order == "ByCreateTimeDesc", func(m store.Message) sortKey {
+		return sortKey{At: m.CreatedAt, Order: m.Order, ID: m.ID}
+	})
 	items := make([]fields, 0, len(result.Items))
 	for _, m := range result.Items {
 		items = append(items, h.messageData(m, idType))

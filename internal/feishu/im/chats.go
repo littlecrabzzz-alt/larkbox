@@ -2,10 +2,12 @@ package im
 
 import (
 	"cmp"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
@@ -13,7 +15,18 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
-var missingChat = protocol.APIError{Code: 232002, Message: "Chat does not exist.", Status: http.StatusBadRequest}
+var (
+	missingChat          = protocol.APIError{Code: 232006, Message: "Your request specifies a chat_id which is invalid.", Status: http.StatusBadRequest}
+	invalidChatParameter = protocol.APIError{Code: 232001, Message: "Your request contains an invalid request parameter.", Status: http.StatusBadRequest}
+)
+
+func writeChatFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrOutsideChat) {
+		fail(w, 232011, "Operator can NOT be out of the chat.")
+		return
+	}
+	writeFailure(w, err, missingChat)
+}
 
 type chatRequest struct {
 	config.ChatSettings
@@ -43,7 +56,7 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 	members := []string{actor.OpenID}
 	for _, id := range req.UserIDs {
 		user, found := h.findUser(kind, id)
-		if !found {
+		if !found || user.Inactive {
 			badField(w, "user_id_list", "Contains an unknown user.")
 			return
 		}
@@ -52,7 +65,7 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 	owner := actor.OpenID
 	if req.OwnerID != "" {
 		user, found := h.findUser(kind, req.OwnerID)
-		if !found {
+		if !found || user.Inactive {
 			badField(w, "owner_id", "Expected a known user.")
 			return
 		}
@@ -82,7 +95,7 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 		}
 		direct, err := h.state.EnsureP2PChat(actor, chat)
 		if err != nil {
-			writeFailure(w, err, missingChat)
+			writeChatFailure(w, err)
 			return
 		}
 		chat = direct
@@ -147,7 +160,7 @@ func (req *chatRequest) validate(w http.ResponseWriter) bool {
 		}
 	}
 	if req.Mode == "group" {
-		req.Name = cmp.Or(strings.TrimSpace(req.Name), "(无主题)")
+		req.Name = cmp.Or(strings.TrimSpace(req.Name), "Group Chat")
 	}
 	for lang := range req.I18nNames {
 		if !slices.Contains([]string{"zh_cn", "en_us", "ja_jp"}, lang) {
@@ -182,22 +195,28 @@ func (h handler) listChats(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	actor := caller(r)
-	chats := h.state.Chats().List()
-	chats = slices.DeleteFunc(chats, func(c store.Chat) bool {
-		return !actor.CanReadChat(c) || !slices.Contains(strings.Split(types, ","), c.ChatMode) || (c.ChatMode == "p2p" && !actor.IsUser)
-	})
-	if sortType == "ByActiveTimeDesc" {
-		sortChatsByActivity(chats, h.state.Messages().List())
-	} else {
-		slices.SortFunc(chats, func(a, b store.Chat) int {
-			return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ChatID, b.ChatID))
-		})
-	}
-	result, ok := paginate(w, r, chats, size, func(c store.Chat) string { return c.ChatID })
+	cursor, ok := readCursor(w, r)
 	if !ok {
 		return
 	}
+	actor := caller(r)
+	chats := h.state.IMChats(actor)
+	modes := strings.Split(types, ",")
+	chats = slices.DeleteFunc(chats, func(c store.Chat) bool {
+		return !slices.Contains(modes, c.ChatMode) || (c.ChatMode == "p2p" && !actor.IsUser)
+	})
+	var activity map[string]time.Time
+	if sortType == "ByActiveTimeDesc" {
+		watermark, latest := h.state.IMActivity(chats, cursor.Activity)
+		cursor.Activity, activity = &watermark, latest
+	}
+	result := paginate(chats, size, cursor, sortType == "ByActiveTimeDesc", func(c store.Chat) sortKey {
+		at := c.CreatedAt
+		if activity != nil {
+			at = activity[c.ChatID]
+		}
+		return sortKey{At: at, ID: c.ChatID}
+	})
 	items := make([]fields, 0, len(result.Items))
 	for _, chat := range result.Items {
 		item := fields{
@@ -222,26 +241,6 @@ func (h handler) listChats(w http.ResponseWriter, r *http.Request) {
 	success(w, page[fields]{Items: items, HasMore: result.HasMore, PageToken: result.PageToken})
 }
 
-func sortChatsByActivity(chats []store.Chat, messages []store.Message) {
-	latest := make(map[string]store.Message)
-	for _, m := range messages {
-		if m.CreatedAt.After(latest[m.ChatID].CreatedAt) {
-			latest[m.ChatID] = m
-		}
-	}
-	slices.SortFunc(chats, func(a, b store.Chat) int {
-		aTime := latest[a.ChatID].CreatedAt
-		if aTime.IsZero() {
-			aTime = a.CreatedAt
-		}
-		bTime := latest[b.ChatID].CreatedAt
-		if bTime.IsZero() {
-			bTime = b.CreatedAt
-		}
-		return cmp.Or(bTime.Compare(aTime), strings.Compare(a.ChatID, b.ChatID))
-	})
-}
-
 type fields = map[string]any
 
 func emptySlice[T any](items []T) []T {
@@ -258,7 +257,7 @@ func (h handler) getChat(w http.ResponseWriter, r *http.Request) {
 	}
 	chat, err := h.state.IMChat(caller(r), r.PathValue("chat_id"))
 	if err != nil {
-		writeFailure(w, err, missingChat)
+		writeChatFailure(w, err)
 		return
 	}
 	data := h.chatDetails(chat, kind)
@@ -346,7 +345,7 @@ func (h handler) listMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	chat, err := h.state.IMChat(caller(r), r.PathValue("chat_id"))
 	if err != nil {
-		writeFailure(w, err, missingChat)
+		writeChatFailure(w, err)
 		return
 	}
 	users := make([]store.User, 0, len(chat.MemberIDs))
@@ -355,10 +354,13 @@ func (h handler) listMembers(w http.ResponseWriter, r *http.Request) {
 			users = append(users, user)
 		}
 	}
-	result, ok := paginate(w, r, users, size, func(u store.User) string { return u.OpenID })
+	cursor, ok := readCursor(w, r)
 	if !ok {
 		return
 	}
+	result := paginate(users, size, cursor, false, func(u store.User) sortKey {
+		return sortKey{Order: chat.MemberOrder[u.OpenID], ID: u.OpenID}
+	})
 	items := make([]fields, 0, len(result.Items))
 	for _, user := range result.Items {
 		items = append(items, fields{
@@ -372,9 +374,29 @@ func (h handler) listMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 type memberChange struct {
-	invalid []string
-	missing []string
-	pending []string
+	invalid, missing, pending []string
+	available, unavailable    int
+}
+
+func (m memberChange) rejected(mode string) bool {
+	if m.available == 0 {
+		return true
+	}
+	switch mode {
+	case "0":
+		// The default skips inactive users but fails on other unavailable IDs.
+		return m.unavailable > 0
+	case "2":
+		return len(m.invalid)+len(m.missing) > 0
+	default:
+		return false
+	}
+}
+
+type memberTarget struct {
+	openID   string
+	invalid  bool
+	inactive bool
 }
 
 func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
@@ -406,7 +428,7 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bots := h.botsByOpenID()
-	ids := make(map[string]string, len(req.IDs))
+	ids := make(map[string]memberTarget, len(req.IDs))
 	for _, id := range req.IDs {
 		ids[id] = h.resolveMember(kind, id, bots)
 	}
@@ -415,18 +437,18 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	actor, id := caller(r), r.PathValue("chat_id")
 	err := h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
 		if chat.ChatMode == "p2p" {
-			return protocol.NewError(protocol.IMInvalidParameter, nil)
+			return invalidChatParameter
 		}
 		if !add && !managesChat(actor, *chat) {
 			for _, member := range req.IDs {
-				if target := ids[member]; target != "" && target != actor.OpenID && slices.Contains(chat.MemberIDs, target) {
+				if target := ids[member].openID; target != "" && target != actor.OpenID && slices.Contains(chat.MemberIDs, target) {
 					return protocol.APIError{Code: 232014, Status: http.StatusBadRequest, Message: "The token used in the request does NOT have the permissions necessary to complete the request."}
 				}
 			}
 		}
-		result, changedBots = applyMembers(chat, req.IDs, ids, bots, actor, kind, add)
-		if add && mode != "1" && len(result.invalid)+len(result.missing) > 0 {
-			return protocol.NewError(protocol.IMInvalidParameter, nil)
+		result, changedBots = applyMembers(chat, req.IDs, ids, bots, actor, add)
+		if add && result.rejected(mode) {
+			return invalidChatParameter
 		}
 		return nil
 	})
@@ -437,12 +459,12 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 		data["pending_approval_id_list"] = emptySlice(result.pending)
 	}
 	if err != nil {
-		if add && len(result.invalid)+len(result.missing) > 0 {
-			failure := protocol.NewError(protocol.IMInvalidParameter, nil)
+		if add && errors.Is(err, invalidChatParameter) && result.rejected(mode) && len(result.invalid)+len(result.missing) > 0 {
+			failure := invalidChatParameter
 			_ = protocol.WriteJSON(w, failure.Status, protocol.Envelope{Code: failure.Code, Msg: failure.Message, Data: data})
 			return
 		}
-		writeFailure(w, err, missingChat)
+		writeChatFailure(w, err)
 		return
 	}
 	for _, bot := range changedBots {
@@ -451,21 +473,20 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	success(w, data)
 }
 
-func (h handler) resolveMember(kind, id string, bots map[string]store.App) string {
-	if user, found := h.findUser(kind, id); kind != "app_id" && found {
-		return user.OpenID
-	}
+func (h handler) resolveMember(kind, id string, bots map[string]store.App) memberTarget {
 	if kind == "app_id" {
-		bot, _ := h.state.Apps().Get(id)
-		return bot.BotOpenID
+		if bot, found := h.state.Apps().Get(id); found {
+			return memberTarget{openID: bot.BotOpenID, invalid: bot.BotOpenID == ""}
+		}
+	} else if user, found := h.findUser(kind, id); found {
+		return memberTarget{openID: user.OpenID, inactive: user.Inactive}
+	} else if kind == "open_id" && bots[id].AppID != "" {
+		return memberTarget{openID: id}
 	}
-	if kind == "open_id" && bots[id].AppID != "" {
-		return id
-	}
-	return ""
+	return memberTarget{invalid: !validMemberID(kind, id)}
 }
 
-func applyMembers(chat *store.Chat, requested []string, ids map[string]string, bots map[string]store.App, actor store.IMActor, kind string, add bool) (memberChange, []store.App) {
+func applyMembers(chat *store.Chat, requested []string, ids map[string]memberTarget, bots map[string]store.App, actor store.IMActor, add bool) (memberChange, []store.App) {
 	var result memberChange
 	var changed []store.App
 	seen := make(map[string]bool)
@@ -480,24 +501,31 @@ func applyMembers(chat *store.Chat, requested []string, ids map[string]string, b
 			continue
 		}
 		seen[id] = true
-		openID := ids[id]
+		target := ids[id]
+		openID := target.openID
 		bot, isBot := bots[openID]
 		present := slices.Contains(chat.MemberIDs, openID)
 		switch {
-		case openID == "":
-			if add && validMemberID(kind, id) {
+		case add && target.inactive:
+			result.invalid = append(result.invalid, id)
+		case target.invalid || openID == "":
+			result.unavailable++
+			if add && !target.invalid {
 				result.missing = append(result.missing, id)
 			} else {
 				result.invalid = append(result.invalid, id)
 			}
 		case add && present:
-			continue
+			result.available++
 		case add && isBot && (botCount >= 15 || len(changed) >= 5):
 			result.invalid = append(result.invalid, id)
+			result.unavailable++
 		case add && !isBot && chat.MembershipApproval == "approval_required" &&
 			!managesChat(actor, *chat):
 			result.pending = append(result.pending, id)
+			result.available++
 		case add:
+			result.available++
 			chat.MemberIDs = append(chat.MemberIDs, openID)
 			if isBot {
 				botCount++

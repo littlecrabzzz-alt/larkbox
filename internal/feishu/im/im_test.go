@@ -55,7 +55,7 @@ func newIM(t *testing.T, emitter EventEmitter) setup {
 
 func (s setup) tokens(t *testing.T) {
 	t.Helper()
-	expiry := s.state.Now().Add(time.Hour)
+	expiry := s.state.Now().Add(2 * time.Hour)
 	if err := s.state.PutTokens(
 		store.Token{Value: demoBot, AppID: s.cfg.Apps[0].AppID, Kind: store.TenantToken, ExpiresAt: expiry},
 		store.Token{Value: demoUser, AppID: s.cfg.Apps[0].AppID, UserOpenID: s.cfg.Users[0].OpenID, Kind: store.UserToken, ExpiresAt: expiry},
@@ -154,8 +154,8 @@ func TestIMStrictMessagesAndQueries(t *testing.T) {
 		{"text not a string", "POST", "/messages?receive_id_type=chat_id", demoBot, post(`"{\"text\":true}"`), 99992402},
 		{"trailing data", "POST", "/messages?receive_id_type=chat_id", demoBot, base + "{}", 99992402},
 		{"missing user", "POST", "/messages?receive_id_type=open_id", demoBot, strings.Replace(base, demoGroup, "ou_missing", 1), 230013},
-		{"missing chat", "GET", "/chats/oc_missing", demoBot, "", 232002},
-		{"foreign chat", "GET", "/chats/" + demoGroup, foreignBot, "", 230002},
+		{"missing chat", "GET", "/chats/oc_missing", demoBot, "", 232006},
+		{"foreign chat", "GET", "/chats/" + demoGroup, foreignBot, "", 232011},
 		{"chat page above maximum", "GET", "/chats?page_size=101", demoBot, "", 99992402},
 		{"chat page below minimum", "GET", "/chats?page_size=0", demoBot, "", 99992402},
 		{"missing container", "GET", "/messages?container_id_type=chat", demoBot, "", 99992402},
@@ -163,6 +163,7 @@ func TestIMStrictMessagesAndQueries(t *testing.T) {
 		{"bad sort", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&sort_type=desc", demoBot, "", 99992402},
 		{"oversize history page", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&page_size=51", demoBot, "", 99992402},
 		{"invalid history cursor", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&page_token=bad", demoBot, "", 99992402},
+		{"thread time filter", "GET", "/messages?container_id_type=thread&container_id=omt_missing&end_time=1700000000", demoBot, "", 99992402},
 		{"milliseconds in filter", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&start_time=1700000000123", demoBot, "", 99992402},
 		{"reversed time range", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&start_time=2&end_time=1", demoBot, "", 99992402},
 		{"bad member mode", "POST", "/chats/" + demoGroup + "/members?succeed_type=3", demoBot, `{"id_list":["alice"]}`, 99992402},
@@ -273,11 +274,11 @@ func TestMemberFailureIsAtomic(t *testing.T) {
 			Invalid []string `json:"invalid_id_list"`
 			Missing []string `json:"not_existed_id_list"`
 		}
-		expect(t, s.request("POST", r+mode, demoBot, body), 230001, &result)
+		expect(t, s.request("POST", r+mode, demoBot, body), 232001, &result)
 		if !slices.Equal(result.Invalid, []string{"bad"}) || !slices.Equal(result.Missing, []string{"cli_missing"}) {
 			t.Fatalf("unexpected invalid or missing member lists: %+v", result)
 		}
-		expect(t, s.request("GET", "/chats/"+demoGroup, foreignBot, ""), 230002, nil)
+		expect(t, s.request("GET", "/chats/"+demoGroup, foreignBot, ""), 232011, nil)
 	}
 	expect(t, s.request("POST", r+"&succeed_type=1", demoBot, body), 0, nil)
 	expect(t, s.request("GET", "/chats/"+demoGroup, foreignBot, ""), 0, nil)
@@ -371,6 +372,7 @@ func TestIMMultipartBoundsAndAudit(t *testing.T) {
 	expect(t, upload("/images", "image", imageFields, make([]byte, maxImageSize+1)), 99992402, nil)
 	expect(t, upload("/files", "file", map[string]string{"file_type": "stream", "file_name": "file", "duration": "-1"}, []byte{1}), 99992402, nil)
 	expect(t, upload("/files", "file", map[string]string{"file_type": "stream", "file_name": ".."}, []byte{1}), 99992402, nil)
+	expect(t, upload("/files", "file", map[string]string{"file_type": "stream", "file_name": strings.Repeat("é", 128)}, []byte{1}), 99992402, nil)
 
 	// A binary attachment can contain JSON without becoming a business envelope.
 	body := []byte(`{"code":1234,"msg":"attachment"}`)
@@ -396,4 +398,73 @@ func TestIMMultipartBoundsAndAudit(t *testing.T) {
 	s.state.Reset()
 	s.tokens(t)
 	expect(t, s.request("GET", "/files/"+data.Key, demoBot, ""), 234001, nil)
+}
+
+func TestIMUUIDExpiresAndValidatesTargets(t *testing.T) {
+	s := newIM(t, nil)
+	s.state.AddChatMember(demoGroup, s.cfg.Apps[1].BotOpenID)
+	send := func(token string) wireMessage {
+		t.Helper()
+		return s.send(t, token, "chat_id", demoGroup, "text", `{"text":"one UUID"}`, "shared")
+	}
+	initial := send(demoBot)
+	if other := send(foreignBot); other.ID == initial.ID {
+		t.Fatal("different apps shared a deduplication record")
+	}
+	s.clock.Add((time.Hour - time.Millisecond).Milliseconds())
+	if retry := send(demoBot); retry.ID != initial.ID {
+		t.Fatal("deduplication expired before one hour")
+	}
+	s.clock.Add(1)
+	if fresh := send(demoBot); fresh.ID == initial.ID {
+		t.Fatal("deduplication persisted at the one-hour boundary")
+	}
+
+	reply := `{"msg_type":"text","content":"{\"text\":\"reply\"}","uuid":"reply-uuid"}`
+	var replyOriginal, replyRepeat wireMessage
+	expect(t, s.request("POST", "/messages/"+initial.ID+"/reply", demoBot, reply), 0, &replyOriginal)
+	expect(t, s.request("POST", "/messages/"+initial.ID+"/reply", demoBot, reply), 0, &replyRepeat)
+	if replyRepeat.ID != replyOriginal.ID {
+		t.Fatal("repeated reply was not deduplicated")
+	}
+	expect(t, s.request("POST", "/messages/om_missing/reply", demoBot, reply), 230001, nil)
+	expect(t, s.request("DELETE", "/messages/"+initial.ID, demoBot, ""), 0, nil)
+	expect(t, s.request("POST", "/messages/"+initial.ID+"/reply", demoBot, reply), 230011, nil)
+	expect(t, s.request("POST", "/messages?receive_id_type=chat_id", demoBot,
+		`{"receive_id":"oc_missing","msg_type":"text","content":"{\"text\":\"test\"}","uuid":"shared"}`), 232006, nil)
+}
+
+func TestIMMemberCursorResumesAfterRemoval(t *testing.T) {
+	s := newIM(t, nil)
+	var chat struct {
+		ID string `json:"chat_id"`
+	}
+	expect(t, s.request("POST", "/chats?user_id_type=user_id", demoBot,
+		`{"user_id_list":["alice","bob"]}`), 0, &chat)
+	path := "/chats/" + chat.ID + "/members?member_id_type=user_id"
+	type membersPage struct {
+		PageToken string              `json:"page_token"`
+		HasMore   bool                `json:"has_more"`
+		Items     []map[string]string `json:"items"`
+	}
+	var first, next membersPage
+	expect(t, s.request("GET", path+"&page_size=1", demoBot, ""), 0, &first)
+	if len(first.Items) != 1 || first.Items[0]["member_id"] != "alice" || first.PageToken == "" {
+		t.Fatalf("unexpected first member page: %+v", first)
+	}
+	expect(t, s.request("DELETE", path, demoBot, `{"id_list":["alice"]}`), 0, nil)
+	expect(t, s.request("GET", path+"&page_size=1&page_token="+first.PageToken, demoBot, ""), 0, &next)
+	if len(next.Items) != 1 || next.Items[0]["member_id"] != "bob" || next.HasMore {
+		t.Fatalf("unexpected second member page after deletion: %+v", next)
+	}
+}
+
+func TestIMReactionFilterValidation(t *testing.T) {
+	s := newIM(t, nil)
+	m := s.send(t, demoBot, "chat_id", demoGroup, "text", `{"text":"reaction fixture"}`, "")
+	path := "/messages/" + m.ID + "/reactions"
+	for _, query := range []string{"", "invalid-type", "SMILE&reaction_type=SMILE"} {
+		expect(t, s.request("GET", path+"?reaction_type="+query, demoBot, ""), 99992402, nil)
+	}
+	expect(t, s.request("POST", path, demoBot, `{"reaction_type":{"emoji_type":"SMILE NOW"}}`), 99992402, nil)
 }
