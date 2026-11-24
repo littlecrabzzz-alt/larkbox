@@ -12,7 +12,9 @@
 ## Table of Contents
 
 - [Goals & Motivation](#goals--motivation)
+- [Quick Start](#quick-start)
 - [Non-Goals](#non-goals)
+- [Deferred / Later Phases](#deferred--later-phases)
 - [Core Capabilities](#core-capabilities)
 - [Architecture Overview](#architecture-overview)
 - [API & Event Compatibility Matrix](#api--event-compatibility-matrix)
@@ -37,14 +39,31 @@ Teams building Feishu / Lark bots, integrations, and AI agents frequently run in
 3. **Verifiable fidelity**: Back every implemented API and event with official SDK integration tests, sanitized golden fixtures, and an opt-in differential live test harness against a real Feishu test tenant.
 4. **Zero-friction single binary**: Pure Go (no CGO) with an embedded web chat playground and protocol inspector.
 
+## Quick Start
+
+With Go 1.24 or later, start the local server and check its health.
+
+```sh
+go run ./cmd/larkbox
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+The server starts in strict mode with a virtual app, bot, users, and chats. The startup log shows the built-in local app credentials. `/healthz` is available in the foundation slice. The compatibility matrix tracks Feishu endpoint implementation.
+
+Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, and `chats` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
+
+- `LARKBOX_ADDR`, `LARKBOX_STRICT_MODE`
+- `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
+- `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS` (JSON arrays)
+
 ## Non-Goals
 
-To keep fidelity high and maintenance sustainable, `larkbox` explicitly does **not** aim to:
+- **Pixel-perfect native Feishu rendering**. The planned Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.
+- **Production messaging**. The sandbox is designed for local development, debugging, and CI testing.
 
-- **Clone the entire Feishu suite**: Docs, Bitable, Approval, Calendar, Contacts/HR, and Mail are out of scope for the core roadmap. `larkbox` focuses deeply on **Auth + IM / Bot / CardKit / Events**.
-- **Act as an E2E test runner or assertion framework**: `larkbox` stays completely business-agnostic. Your test suite drives `larkbox` via its `/_sandbox/*` control API or standard Feishu SDKs.
-- **Replicate pixel-perfect Feishu card rendering**: The embedded Web UI provides structured card previews, interactive button triggers, streaming updates, and raw JSON/schema inspection—not a 1:1 client layout engine.
-- **Serve as a production messaging backend**: `larkbox` is built exclusively for local development, debugging, and CI testing.
+## Deferred / Later Phases
+
+The core roadmap prioritizes **Auth, IM, Bot, Media, CardKit, and event delivery**. Docs, Bitable, Approval, Calendar, Contacts/HR, and Mail will be evaluated in later phases. The Feishu Open APIs and the `/_sandbox/*` control plane provide modular interfaces for test suites and leave room for future end-to-end testing features.
 
 ## Core Capabilities
 
