@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,11 +24,10 @@ import (
 )
 
 const (
-	socketPath  = "/ws/v2"
-	serviceID   = 1
-	maxTickets  = 1024
-	maxSessions = 128
-	maxFrame    = 1 << 20
+	socketPath = "/ws/v2"
+	serviceID  = 1
+	maxTickets = 1024
+	maxFrame   = 1 << 20
 
 	bootstrapBadRequest   = 9499
 	bootstrapEmptyCreds   = 1000040344
@@ -45,11 +45,18 @@ type ticket struct {
 }
 
 type gateway struct {
-	tickets  map[string]ticket
-	sessions map[string]map[*session]struct{}
-	running  int
-	readers  sync.WaitGroup
-	upgrader websocket.Upgrader
+	tickets     map[string]ticket
+	apps        map[string]*appConnections
+	connections sync.WaitGroup
+	upgrader    websocket.Upgrader
+}
+
+// appConnections is guarded by the dispatcher mutex.
+type appConnections struct {
+	sessions  []*session
+	next      int
+	upgrading int
+	changed   chan struct{}
 }
 
 // RegisterRoutes installs the SDK endpoint discovery and socket routes.
@@ -147,70 +154,137 @@ func rejectHandshake(w http.ResponseWriter, status, code int, message string) {
 }
 
 func (d *Dispatcher) upgrade(w http.ResponseWriter, r *http.Request) {
-	session, appID := d.openSession(w, r)
-	if session == nil {
+	appID, rejection := d.reserveSession(r.URL.Query())
+	if rejection != nil {
+		if rejection.code == larkws.AuthFailed && rejection.status == http.StatusForbidden {
+			w.Header().Set(larkws.HeaderHandshakeAuthErrCode, strconv.Itoa(larkws.ExceedConnLimit))
+		}
+		rejectHandshake(w, rejection.status, rejection.code, rejection.message)
 		return
 	}
-	defer d.ws.readers.Done()
-	defer d.removeSession(appID, session)
-	session.read(d.ctx)
+	defer d.ws.connections.Done()
+	conn, err := d.ws.upgrader.Upgrade(w, r, nil)
+	var s *session
+	if err == nil {
+		conn.SetReadLimit(maxFrame)
+		s = &session{conn: conn, done: make(chan struct{}), pending: make(map[string]chan ack)}
+	}
+	if !d.registerSession(appID, s) {
+		if s != nil {
+			closeSession(s, time.Now().Add(100*time.Millisecond))
+		}
+		return
+	}
+	defer d.removeSession(appID, s)
+	s.read(d.ctx)
 }
 
-func (d *Dispatcher) openSession(w http.ResponseWriter, r *http.Request) (*session, string) {
-	q := r.URL.Query()
+type handshakeRejection struct {
+	status, code int
+	message      string
+}
+
+func (d *Dispatcher) reserveSession(q url.Values) (string, *handshakeRejection) {
 	token := q.Get("ticket")
+	now := d.state.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	saved, found := d.ws.tickets[token]
 	switch {
 	case d.closed:
-		rejectHandshake(w, http.StatusServiceUnavailable, larkws.SystemBusy, "system busy")
-	case !found || !d.state.Now().Before(saved.expires):
+		return "", &handshakeRejection{http.StatusServiceUnavailable, larkws.SystemBusy, "system busy"}
+	case !found || !now.Before(saved.expires):
 		delete(d.ws.tickets, token)
-		rejectHandshake(w, http.StatusUnauthorized, larkws.AuthFailed, "invalid ticket")
+		return "", &handshakeRejection{http.StatusUnauthorized, larkws.AuthFailed, "invalid ticket"}
 	case q.Get(larkws.ServiceID) != strconv.Itoa(serviceID) || q.Get(larkws.DeviceID) != saved.deviceID:
-		rejectHandshake(w, http.StatusForbidden, larkws.Forbidden, "ticket binding mismatch")
-	case d.ws.running >= maxSessions:
-		w.Header().Set(larkws.HeaderHandshakeAuthErrCode, strconv.Itoa(larkws.ExceedConnLimit))
-		rejectHandshake(w, http.StatusForbidden, larkws.AuthFailed, "connection limit exceeded")
-	default:
-		delete(d.ws.tickets, token)
-		// Keep registration atomic with respect to delivery snapshots. The
-		// handshake write is bounded by the upgrader's handshake timeout.
-		conn, err := d.ws.upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return nil, ""
-		}
-		conn.SetReadLimit(maxFrame)
-		s := &session{conn: conn, done: make(chan struct{}), pending: make(map[string]chan ack)}
-		if d.ws.sessions[saved.appID] == nil {
-			d.ws.sessions[saved.appID] = make(map[*session]struct{})
-		}
-		d.ws.sessions[saved.appID][s] = struct{}{}
-		d.ws.running++
-		d.ws.readers.Add(1)
-		return s, saved.appID
+		return "", &handshakeRejection{http.StatusForbidden, larkws.Forbidden, "ticket binding mismatch"}
 	}
-	return nil, ""
+	app := d.ws.apps[saved.appID]
+	if app == nil {
+		app = &appConnections{changed: make(chan struct{})}
+		d.ws.apps[saved.appID] = app
+	}
+	if len(app.sessions)+app.upgrading >= d.opts.MaxConnectionsPerApp {
+		return "", &handshakeRejection{http.StatusForbidden, larkws.AuthFailed, "app connection limit exceeded"}
+	}
+	delete(d.ws.tickets, token)
+	app.upgrading++
+	d.ws.connections.Add(1)
+	return saved.appID, nil
+}
+
+func (d *Dispatcher) registerSession(appID string, s *session) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	app := d.ws.apps[appID]
+	app.upgrading--
+	registered := s != nil && !d.closed
+	if registered {
+		app.sessions = append(app.sessions, s)
+	}
+	close(app.changed)
+	if len(app.sessions) == 0 && app.upgrading == 0 {
+		delete(d.ws.apps, appID)
+	} else {
+		app.changed = make(chan struct{})
+	}
+	return registered
 }
 
 func (d *Dispatcher) removeSession(appID string, s *session) {
 	_ = s.conn.Close()
-	close(s.done)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	delete(d.ws.sessions[appID], s)
-	if len(d.ws.sessions[appID]) == 0 {
-		delete(d.ws.sessions, appID)
+	app := d.ws.apps[appID]
+	idx := slices.Index(app.sessions, s)
+	app.sessions = slices.Delete(app.sessions, idx, idx+1)
+	if idx < app.next {
+		app.next--
 	}
-	d.ws.running--
+	if len(app.sessions) == 0 && app.upgrading == 0 {
+		delete(d.ws.apps, appID)
+	}
+	close(s.done)
 }
 
 // SessionCount reports the number of active long connections for an app.
 func (d *Dispatcher) SessionCount(appID string) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return len(d.ws.sessions[appID])
+	if app := d.ws.apps[appID]; app != nil {
+		return len(app.sessions)
+	}
+	return 0
+}
+
+func (d *Dispatcher) selectSession(ctx context.Context, appID string) *session {
+	for {
+		d.mu.Lock()
+		app := d.ws.apps[appID]
+		switch {
+		case app == nil:
+			d.mu.Unlock()
+			return nil
+		case len(app.sessions) > 0:
+			i := app.next % len(app.sessions)
+			s := app.sessions[i]
+			app.next = i + 1
+			d.mu.Unlock()
+			return s
+		default:
+			// A client can start dispatch as soon as it receives the 101.
+			// Wait for the reserved session to register or fail.
+			changed := app.changed
+			d.mu.Unlock()
+			select {
+			case <-changed:
+			case <-d.stopping:
+				return nil
+			case <-ctx.Done():
+				return nil
+			}
+		}
+	}
 }
 
 type session struct {
@@ -223,7 +297,6 @@ type session struct {
 
 type ack struct {
 	response wsproto.Response
-	wire     []byte
 	err      error
 }
 
@@ -293,7 +366,7 @@ func (s *session) handleFrame(ctx context.Context, frame wsproto.Frame) error {
 		if ch, ok := s.pending[id]; ok {
 			delete(s.pending, id)
 			response, err := wsproto.DecodeResponse(frame.Payload)
-			ch <- ack{response: response, wire: frame.Payload, err: err}
+			ch <- ack{response: response, err: err}
 		}
 	}
 	return nil

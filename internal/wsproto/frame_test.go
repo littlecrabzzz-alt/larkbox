@@ -86,6 +86,42 @@ func TestMalformedFrames(t *testing.T) {
 	}
 }
 
+func TestVarintOverflowBoundaries(t *testing.T) {
+	const (
+		fields   = "0800100018002000"
+		overlong = "808080808080808080"
+		maxValue = "ffffffffffffffffff01"
+		overflow = "ffffffffffffffffff02"
+	)
+	for _, tc := range []struct {
+		name, wire string
+		valid      bool
+	}{
+		{"max uint64", "08" + maxValue + "100018002000", true},
+		{"maximum tenth byte is one", "08" + overlong + "01" + "100018002000", true},
+		{"overflowing frame value", "08" + overflow + "100018002000", false},
+		{"overflowing frame tag", fields + "d0808080808080808002" + "00", false},
+		{"overflowing frame payload length", fields + "42" + overlong + "02", false},
+		{"valid ten-byte header length", fields + "2a0d0a" + overlong + "00" + "1200", true},
+		{"overflowing header length", fields + "2a0d0a" + overlong + "02" + "1200", false},
+		{"overflowing varint in unknown header field", fields + "2a0f0a00120018" + overflow, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire, err := hex.DecodeString(tc.wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame, err := wsproto.Decode(wire)
+			if (err == nil) != tc.valid {
+				t.Fatalf("Decode returned %+v, %v", frame, err)
+			}
+			if tc.name == "max uint64" && frame.SeqID != math.MaxUint64 {
+				t.Fatalf("decoded %d, want %d", frame.SeqID, uint64(math.MaxUint64))
+			}
+		})
+	}
+}
+
 func TestControlDataAndResponse(t *testing.T) {
 	config := larkws.ClientConfig{ReconnectCount: -1, PingInterval: 120}
 	pong, err := wsproto.ControlFrame(7, wsproto.Pong, &config)

@@ -1,14 +1,18 @@
 package event
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,7 +174,7 @@ func TestBootstrapCredentialsAndTickets(t *testing.T) {
 func TestSocketAcknowledgementCorrelationAndTimeout(t *testing.T) {
 	cfg := config.Default()
 	app := cfg.Apps[0]
-	d := testDispatcher(t, cfg, Options{AckTimeout: 250 * time.Millisecond}, nil)
+	d := testDispatcher(t, cfg, Options{AckTimeout: 250 * time.Millisecond, WebSocketMaxAttempts: 1}, nil)
 	s := testGateway(t, d)
 	conn := connect(t, ticketURL(t, d, strings.TrimPrefix(s.URL, "http://"), app), http.StatusSwitchingProtocols)
 	type outcome struct {
@@ -213,7 +217,7 @@ func TestSocketAcknowledgementCorrelationAndTimeout(t *testing.T) {
 	}
 	traces := d.state.Traces()
 	if len(traces) != 2 || traces[0].EventID != delivered.result.EventID || traces[0].EventType != "card.action.trigger" ||
-		traces[0].Channel != "websocket" || !bytes.Equal(traces[0].ResponseBody, frame.Payload) ||
+		traces[0].Channel != "websocket" || !bytes.Contains(traces[0].ResponseBody, []byte("eyJ0b2FzdCI6e319")) ||
 		traces[1].EventID != result.EventID || traces[1].Error == "" || traces[1].Attempt != 1 {
 		t.Fatalf("unexpected traces: %+v", traces)
 	}
@@ -222,7 +226,7 @@ func TestSocketAcknowledgementCorrelationAndTimeout(t *testing.T) {
 func TestConcurrentSocketLifecycle(t *testing.T) {
 	cfg := config.Default()
 	app := cfg.Apps[0]
-	d := testDispatcher(t, cfg, Options{AckTimeout: 200 * time.Millisecond}, nil)
+	d := testDispatcher(t, cfg, Options{AckTimeout: 200 * time.Millisecond, WebSocketMaxAttempts: 1}, nil)
 	s := testGateway(t, d)
 	host := strings.TrimPrefix(s.URL, "http://")
 	stable := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
@@ -270,15 +274,18 @@ func TestConcurrentSocketLifecycle(t *testing.T) {
 		go func() {
 			defer calls.Done()
 			result, _ := d.Dispatch(t.Context(), app.AppID, "test.concurrent", struct{}{})
-			for _, delivery := range result.Deliveries {
-				if delivery.Status == 200 {
-					return
-				}
+			if len(result.Deliveries) > 1 {
+				t.Error("concurrent dispatch selected more than one recipient")
 			}
-			t.Error("stable connection did not acknowledge dispatch")
 		}()
 	}
 	calls.Wait()
+	waitForSessions(t, d, app.AppID, 1)
+	result, err := d.Dispatch(t.Context(), app.AppID, "test.stable", struct{}{})
+	requireNoError(t, err)
+	if len(result.Deliveries) != 1 || result.Deliveries[0].Status != 200 {
+		t.Fatalf("stable connection did not acknowledge: %+v", result)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	requireNoError(t, d.Shutdown(ctx))
@@ -340,10 +347,47 @@ func TestConcurrentTicketReplay(t *testing.T) {
 	}
 }
 
-func TestDispatchFanoutAndAppIsolation(t *testing.T) {
+func noBackoff(int) time.Duration { return 0 }
+
+func readDataFrame(t *testing.T, conn *websocket.Conn) wsproto.Frame {
+	t.Helper()
+	kind, wire, err := conn.ReadMessage()
+	requireNoError(t, err)
+	frame, err := wsproto.Decode(wire)
+	requireNoError(t, err)
+	if kind != websocket.BinaryMessage || frame.Method != wsproto.Data {
+		t.Fatalf("unexpected event frame: %+v", frame)
+	}
+	return frame
+}
+
+func writeAck(t *testing.T, conn *websocket.Conn, frame wsproto.Frame, response wsproto.Response) {
+	t.Helper()
+	var err error
+	frame.Payload, err = json.Marshal(response)
+	requireNoError(t, err)
+	wire, err := wsproto.Encode(&frame)
+	requireNoError(t, err)
+	requireNoError(t, conn.WriteMessage(websocket.BinaryMessage, wire))
+}
+
+func dispatchAsync(t *testing.T, d *Dispatcher, appID string) <-chan Result {
+	t.Helper()
+	done := make(chan Result, 1)
+	go func() {
+		result, err := d.Dispatch(t.Context(), appID, "test.delivery", struct{}{})
+		if err != nil {
+			t.Error(err)
+		}
+		done <- result
+	}()
+	return done
+}
+
+func TestDispatchSelectsOneReplicaAndIsolatesApps(t *testing.T) {
 	cfg := config.Default()
 	cfg.Apps[0].EncryptKey = ""
-	captured := make(chan envelope, 1)
+	captured := make(chan envelope, 4)
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var e envelope
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
@@ -360,64 +404,317 @@ func TestDispatchFanoutAndAppIsolation(t *testing.T) {
 	other := app
 	other.AppID, other.WebhookURL = "cli_other", ""
 	cfg.Apps = []config.App{app, other}
-	d := testDispatcher(t, cfg, Options{WebhookMaxAttempts: 1}, nil)
+	d := testDispatcher(t, cfg, Options{WebSocketMaxAttempts: 1, WebhookMaxAttempts: 1}, nil)
 	s := testGateway(t, d)
 	host := strings.TrimPrefix(s.URL, "http://")
-	connect(t, ticketURL(t, d, host, other), http.StatusSwitchingProtocols)
 	clients := []*websocket.Conn{
 		connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols),
 		connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols),
+		connect(t, ticketURL(t, d, host, other), http.StatusSwitchingProtocols),
 	}
+	waitForSessions(t, d, app.AppID, 2)
+	waitForSessions(t, d, other.AppID, 1)
 
-	done := make(chan Result, 1)
-	go func() {
-		result, err := d.Dispatch(t.Context(), app.AppID, "test.fanout", map[string]string{"text": "hello"})
-		if err != nil {
-			t.Error(err)
-		}
-		done <- result
-	}()
-	var socketIDs []string
-	for _, conn := range clients {
-		_, wire, err := conn.ReadMessage()
-		requireNoError(t, err)
-		frame, err := wsproto.Decode(wire)
-		requireNoError(t, err)
-		var e envelope
-		requireNoError(t, json.Unmarshal(frame.Payload, &e))
-		if e.Header.AppID != app.AppID || e.Header.Type != "test.fanout" {
-			t.Errorf("unexpected websocket event: %+v", e.Header)
-		}
-		socketIDs = append(socketIDs, e.Header.ID)
-		frame.Payload = []byte(`{"code":204}`)
-		wire, err = wsproto.Encode(&frame)
-		requireNoError(t, err)
-		requireNoError(t, conn.WriteMessage(websocket.BinaryMessage, wire))
+	type observation struct {
+		replica int
+		event   envelope
 	}
+	var readers sync.WaitGroup
+	observed := make(chan observation, 6)
+	for i, conn := range clients {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				_, wire, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				frame, err := wsproto.Decode(wire)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				var e envelope
+				if err := json.Unmarshal(frame.Payload, &e); err != nil {
+					t.Error(err)
+					return
+				}
+				observed <- observation{i, e}
+				frame.Payload = []byte(`{"code":204}`)
+				wire, err = wsproto.Encode(&frame)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if err := conn.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	seen := map[int]bool{}
+	for range 2 {
+		result, err := d.Dispatch(t.Context(), app.AppID, "test.delivery", struct{}{})
+		requireNoError(t, err)
+		if len(result.Deliveries) != 2 || result.Deliveries[0].Channel != "websocket" || result.Deliveries[1].Channel != "webhook" {
+			t.Fatalf("unexpected deliveries: %+v", result.Deliveries)
+		}
+		select {
+		case got := <-observed:
+			if got.replica == 2 || seen[got.replica] || got.event.Header.ID != result.EventID || got.event.Header.AppID != app.AppID {
+				t.Fatalf("unexpected replica delivery: %+v", got)
+			}
+			seen[got.replica] = true
+		default:
+			t.Fatal("no WebSocket recipient")
+		}
+		select {
+		case got := <-captured:
+			if got.Header.AppID != app.AppID || got.Header.ID != result.EventID {
+				t.Fatalf("unexpected webhook event: %+v", got.Header)
+			}
+		default:
+			t.Fatal("webhook not called")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	requireNoError(t, d.Shutdown(ctx))
+	readers.Wait()
+	if len(observed) != 0 || len(d.state.Traces()) != 4 {
+		t.Fatal("event reached an extra recipient")
+	}
+}
+
+func waitForSessions(t *testing.T, d *Dispatcher, app string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for d.SessionCount(app) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("app %s has %d sessions, want %d", app, d.SessionCount(app), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSocketRetriesFailedACKAndTimeout(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	d := testDispatcher(t, cfg, Options{AckTimeout: 250 * time.Millisecond, WebSocketMaxAttempts: 3, RetryBackoff: noBackoff}, nil)
+	srv := testGateway(t, d)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	conn := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 1)
+	replica := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 2)
+	done := dispatchAsync(t, d, app.AppID)
+	first := readDataFrame(t, conn)
+	writeAck(t, conn, first, wsproto.Response{StatusCode: 500})
+	second := readDataFrame(t, conn) // Leave this attempt unacknowledged.
+	third := readDataFrame(t, conn)
+	writeAck(t, conn, second, wsproto.Response{StatusCode: 500}) // A late ACK cannot fail the third attempt.
+	writeAck(t, conn, third, wsproto.Response{StatusCode: 200})
 	result := <-done
-	if len(result.Deliveries) != 3 {
-		t.Fatalf("expected two sockets and one webhook, got %+v", result.Deliveries)
+	if len(result.Deliveries) != 1 || result.Deliveries[0].Status != 200 {
+		t.Fatalf("unexpected delivery: %+v", result)
 	}
-	select {
-	case e := <-captured:
-		if e.Header.AppID != app.AppID || e.Header.ID != result.EventID {
-			t.Errorf("unexpected webhook event: %+v", e.Header)
+	ids := map[string]bool{}
+	for _, frame := range []wsproto.Frame{first, second, third} {
+		id := wsproto.HeaderValue(frame, wsproto.MessageID)
+		if id == "" || ids[id] || wsproto.HeaderValue(frame, wsproto.TraceID) != result.EventID || !bytes.Equal(frame.Payload, first.Payload) {
+			t.Fatal("retry changed event data or reused an ACK ID")
 		}
-	default:
-		t.Fatal("webhook not called")
-	}
-	for _, id := range socketIDs {
-		if id != result.EventID {
-			t.Errorf("websocket saw event ID %q, want %q", id, result.EventID)
-		}
+		ids[id] = true
 	}
 	traces := d.state.Traces()
 	if len(traces) != 3 {
-		t.Fatalf("expected three attempts, got %d", len(traces))
+		t.Fatalf("unexpected attempts: %+v", traces)
 	}
-	for _, trace := range traces {
-		if trace.Status != 204 || trace.EventID != result.EventID || trace.AppID != app.AppID || trace.Attempt != 1 {
-			t.Errorf("invalid fanout trace: %+v", trace)
+	for i, trace := range traces {
+		if trace.Attempt != i+1 || trace.EventID != result.EventID || trace.Status != []int{500, 0, 200}[i] ||
+			(trace.Error == "") != (i == 2) {
+			t.Fatalf("invalid attempt: %+v", trace)
 		}
+	}
+	if !strings.Contains(traces[1].Error, "deadline") {
+		t.Fatal("timeout was not audited")
+	}
+	next := dispatchAsync(t, d, app.AppID)
+	nextFrame := readDataFrame(t, replica)
+	if wsproto.HeaderValue(nextFrame, wsproto.TraceID) == result.EventID {
+		t.Fatal("a second replica received a retry for the same event")
+	}
+	writeAck(t, replica, nextFrame, wsproto.Response{StatusCode: 200})
+	<-next
+}
+
+func TestOversizedACKHeadersAreSanitizedOnlyInAudit(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	d := testDispatcher(t, cfg, Options{}, nil)
+	srv := testGateway(t, d)
+	conn := connect(t, ticketURL(t, d, strings.TrimPrefix(srv.URL, "http://"), app), http.StatusSwitchingProtocols)
+	done := dispatchAsync(t, d, app.AppID)
+	frame := readDataFrame(t, conn)
+	long := strings.Repeat("x", store.TraceHeaderValueLimit*2)
+	headers := map[string]string{"Authorization": "private credential", "Set-Cookie": "private cookie", "X-Request-Id": long}
+	for i := range 100 {
+		headers[fmt.Sprintf("X-Extra-%d", i)] = long
+	}
+	writeAck(t, conn, frame, wsproto.Response{StatusCode: 200, Headers: headers, Data: []byte("unchanged")})
+	result := <-done
+	if len(result.Deliveries) != 1 {
+		t.Fatalf("unexpected delivery: %+v", result)
+	}
+	delivery := result.Deliveries[0]
+	if len(delivery.Headers) != len(headers) || delivery.Headers.Get("Authorization") != headers["Authorization"] ||
+		delivery.Headers.Get("X-Request-Id") != long || string(delivery.Data) != "unchanged" {
+		t.Fatal("audit modified the caller's ACK")
+	}
+	trace := d.state.Traces()[0]
+	if len(trace.ResponseHeaders) != 1 || trace.ResponseHeaders.Get("X-Request-Id") != long[:store.TraceHeaderValueLimit] ||
+		bytes.Contains(trace.ResponseBody, []byte("private")) || len(trace.ResponseBody) > store.TraceHeaderLimit {
+		t.Fatalf("audit retained sensitive or oversized ACK headers: %+v", trace.ResponseHeaders)
+	}
+}
+
+type gatedUpgradeWriter struct {
+	http.ResponseWriter
+	release <-chan struct{}
+}
+
+func (w gatedUpgradeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &gatedUpgradeConn{Conn: conn, release: w.release}, rw, nil
+}
+
+type gatedUpgradeConn struct {
+	net.Conn
+	first   sync.Once
+	release <-chan struct{}
+}
+
+func (c *gatedUpgradeConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.first.Do(func() { <-c.release })
+	return n, err
+}
+
+func TestUpgradeReservationAndShutdown(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first delivery", true: "shutdown"}[shutdown], func(t *testing.T) {
+			cfg := config.Default()
+			app := cfg.Apps[0]
+			other := app
+			other.AppID = "cli_other"
+			cfg.Apps = append(cfg.Apps, other)
+			d := testDispatcher(t, cfg, Options{MaxConnectionsPerApp: 1}, nil)
+			release := make(chan struct{})
+			resume := sync.OnceFunc(func() { close(release) })
+			defer time.AfterFunc(3*time.Second, resume).Stop()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("gate") == "1" {
+					w = gatedUpgradeWriter{w, release}
+				}
+				d.upgrade(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(resume)
+			host := strings.TrimPrefix(srv.URL, "http://")
+			ticket := ticketURL(t, d, host, app)
+			ticket.RawQuery += "&gate=1"
+			conn := connect(t, ticket, http.StatusSwitchingProtocols)
+			if d.SessionCount(app.AppID) != 0 {
+				t.Fatal("session was registered before upgrade completed")
+			}
+
+			limitTicket := ticketURL(t, d, host, app)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			c, resp, err := websocket.DefaultDialer.DialContext(ctx, limitTicket.String(), nil)
+			if c != nil {
+				_ = c.Close()
+			}
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden ||
+				resp.Header.Get(larkws.HeaderHandshakeAuthErrCode) != strconv.Itoa(larkws.ExceedConnLimit) {
+				t.Fatalf("reservation did not count toward app limit: %v, %v", resp, err)
+			}
+			connect(t, ticketURL(t, d, host, other), http.StatusSwitchingProtocols)
+			if shutdown {
+				done := make(chan error, 1)
+				go func() { done <- d.Shutdown(ctx) }()
+				<-d.stopping
+				select {
+				case err := <-done:
+					t.Fatalf("shutdown returned before the upgrade finished: %v", err)
+				default:
+				}
+				resume()
+				requireNoError(t, <-done)
+				if d.SessionCount(app.AppID) != 0 {
+					t.Fatal("shutdown registered a pending session")
+				}
+				_, _, err := conn.ReadMessage()
+				if !websocket.IsCloseError(err, websocket.CloseGoingAway) {
+					t.Fatalf("pending upgrade did not close cleanly: %v", err)
+				}
+				return
+			}
+			done := dispatchAsync(t, d, app.AppID)
+			select {
+			case <-done:
+				t.Fatal("event was lost before the session registered")
+			case <-time.After(25 * time.Millisecond):
+			}
+			resume()
+			frame := readDataFrame(t, conn)
+			writeAck(t, conn, frame, wsproto.Response{StatusCode: 200})
+			if result := <-done; len(result.Deliveries) != 1 || result.Deliveries[0].Status != 200 {
+				t.Fatalf("first event failed: %+v", result)
+			}
+			connect(t, limitTicket, http.StatusForbidden)
+			_ = conn.Close()
+			waitForSessions(t, d, app.AppID, 0)
+			connect(t, limitTicket, http.StatusSwitchingProtocols)
+		})
+	}
+}
+
+func TestShutdownInterruptsWebSocketBackoff(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	backoff := make(chan time.Duration, 1)
+	d := testDispatcher(t, cfg, Options{RetryBackoff: func(attempt int) time.Duration {
+		delay := defaultRetryBackoff(attempt)
+		backoff <- delay
+		return delay
+	}}, nil)
+	srv := testGateway(t, d)
+	conn := connect(t, ticketURL(t, d, strings.TrimPrefix(srv.URL, "http://"), app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 1)
+	d.EnqueueMessageRecalled(app.AppID, "oc_test", "om_test", "message_owner", d.state.Now())
+	frame := readDataFrame(t, conn)
+	writeAck(t, conn, frame, wsproto.Response{StatusCode: 500})
+	select {
+	case delay := <-backoff:
+		if delay != 15*time.Second {
+			t.Fatalf("expected the default backoff, got %v", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not enter retry backoff")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	requireNoError(t, d.Shutdown(ctx))
+	if ctx.Err() != nil || len(d.state.Traces()) != 1 {
+		t.Fatal("shutdown waited for the backoff or started another attempt")
 	}
 }

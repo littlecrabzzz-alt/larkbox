@@ -316,6 +316,37 @@ func (s *Store) imMessage(actor IMActor, id string) (Message, error) {
 func (s *Store) ChangeIMMessage(actor IMActor, id string, change func(*Message, Chat) error) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.changeIMMessage(actor, id, change)
+}
+
+// RecallIMMessage marks a message recalled and captures the receiving apps
+// from the same chat membership snapshot used to authorize the mutation.
+// The authorization callback runs under the lock and must not call the store.
+func (s *Store) RecallIMMessage(actor IMActor, id string, authorize func(*Message, Chat) error) (Message, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.changeIMMessage(actor, id, func(m *Message, chat Chat) error {
+		if err := authorize(m, chat); err != nil {
+			return err
+		}
+		m.Deleted, m.UpdatedAt = true, s.Now()
+		return nil
+	})
+	if err != nil {
+		return Message{}, nil, err
+	}
+	members := s.chats.items[m.ChatID].MemberIDs
+	var recipients []string
+	for _, app := range s.apps.items {
+		if app.BotOpenID != "" && slices.Contains(members, app.BotOpenID) {
+			recipients = append(recipients, app.AppID)
+		}
+	}
+	slices.Sort(recipients)
+	return m, recipients, nil
+}
+
+func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, Chat) error) (Message, error) {
 	m, err := s.imMessage(actor, id)
 	if err != nil {
 		return Message{}, err

@@ -2,6 +2,7 @@
 package wsproto
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 
@@ -44,8 +45,63 @@ func Encode(frame *Frame) ([]byte, error) { return frame.Marshal() }
 // Decode unmarshals one complete pbbp2.Frame.
 func Decode(wire []byte) (Frame, error) {
 	var frame Frame
+	if !validWire(wire, true) {
+		return frame, errors.New("invalid protobuf frame wire data")
+	}
 	err := frame.Unmarshal(wire)
 	return frame, err
+}
+
+// validWire guards the SDK decoder against overflowing protobuf varints.
+func validWire(wire []byte, frame bool) bool {
+	depth := 0
+	for len(wire) > 0 {
+		tag, n := binary.Uvarint(wire)
+		if n <= 0 {
+			return false
+		}
+		wire = wire[n:]
+		switch tag & 7 {
+		case 0:
+			_, n = binary.Uvarint(wire)
+			if n <= 0 {
+				return false
+			}
+		case 1:
+			n = 8
+		case 2:
+			length, width := binary.Uvarint(wire)
+			if width <= 0 {
+				return false
+			}
+			// #nosec G115 -- Uvarint never consumes more bytes than wire contains.
+			if length > uint64(len(wire)-width) {
+				return false
+			}
+			n = width + int(length) // #nosec G115 -- length fits the remaining slice.
+			if frame && depth == 0 && tag == 5<<3|2 && !validWire(wire[width:n], false) {
+				return false
+			}
+		case 3:
+			depth++
+			n = 0
+		case 4:
+			depth--
+			if depth < 0 {
+				return false
+			}
+			n = 0
+		case 5:
+			n = 4
+		default:
+			return false
+		}
+		if n > len(wire) {
+			return false
+		}
+		wire = wire[n:]
+	}
+	return depth == 0
 }
 
 // HeaderValue returns the first value for a frame header, as the SDK does.

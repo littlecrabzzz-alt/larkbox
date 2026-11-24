@@ -25,9 +25,12 @@ const (
 
 // Options controls event delivery timeouts and retries. Zero values use defaults.
 type Options struct {
-	WebhookTimeout     time.Duration
-	WebhookMaxAttempts int
-	// RetryBackoff receives the failed attempt number, starting at 1.
+	WebhookTimeout       time.Duration
+	VerificationTimeout  time.Duration
+	WebhookMaxAttempts   int
+	WebSocketMaxAttempts int
+	MaxConnectionsPerApp int
+	// RetryBackoff receives a failed attempt number, starting at 1, for either transport.
 	RetryBackoff func(int) time.Duration
 	AckTimeout   time.Duration
 	TicketTTL    time.Duration
@@ -73,12 +76,13 @@ type deliveryJob struct {
 
 // Dispatcher manages event delivery and long connections for one server.
 type Dispatcher struct {
-	state  *store.Store
-	opts   Options
-	client *http.Client
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
+	state    *store.Store
+	opts     Options
+	client   *http.Client
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan struct{}
+	stopping chan struct{}
 
 	mu      sync.Mutex
 	closed  bool
@@ -95,6 +99,15 @@ func New(state *store.Store, opts Options) *Dispatcher {
 	if opts.WebhookMaxAttempts <= 0 {
 		opts.WebhookMaxAttempts = 5
 	}
+	if opts.VerificationTimeout <= 0 {
+		opts.VerificationTimeout = time.Second
+	}
+	if opts.WebSocketMaxAttempts <= 0 {
+		opts.WebSocketMaxAttempts = 5
+	}
+	if opts.MaxConnectionsPerApp <= 0 {
+		opts.MaxConnectionsPerApp = 50
+	}
 	if opts.AckTimeout <= 0 {
 		opts.AckTimeout = defaultTimeout
 	}
@@ -108,7 +121,7 @@ func New(state *store.Store, opts Options) *Dispatcher {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxResponseHeaderBytes = store.TraceBodyLimit
 	return &Dispatcher{
-		state: state, opts: opts, ctx: ctx, cancel: cancel, done: make(chan struct{}),
+		state: state, opts: opts, ctx: ctx, cancel: cancel, done: make(chan struct{}), stopping: make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -116,7 +129,7 @@ func New(state *store.Store, opts Options) *Dispatcher {
 			},
 		},
 		ws: gateway{
-			tickets: make(map[string]ticket), sessions: make(map[string]map[*session]struct{}),
+			tickets: make(map[string]ticket), apps: make(map[string]*appConnections),
 			upgrader: websocket.Upgrader{HandshakeTimeout: time.Second},
 		},
 	}
@@ -127,16 +140,23 @@ func defaultRetryBackoff(attempt int) time.Duration {
 	return delays[min(attempt, len(delays))-1]
 }
 
-// Shutdown rejects new work, drains admitted deliveries, and closes long
-// connections. If ctx expires, it cancels outstanding network operations.
-func (d *Dispatcher) Shutdown(ctx context.Context) error {
+// StopAccepting closes admission and abandons delivery retries. Attempts
+// already in progress can finish until a Shutdown deadline expires.
+func (d *Dispatcher) StopAccepting() {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if !d.closed {
 		d.closed = true
+		close(d.stopping)
 		clear(d.ws.tickets)
 		go d.finish()
 	}
-	d.mu.Unlock()
+}
+
+// Shutdown waits for admitted work and connections to finish. If ctx
+// expires, it cancels outstanding network operations.
+func (d *Dispatcher) Shutdown(ctx context.Context) error {
+	d.StopAccepting()
 
 	select {
 	case <-d.done:
@@ -152,29 +172,34 @@ func (d *Dispatcher) finish() {
 	d.active.Wait()
 	d.cancel()
 	d.closeSessions(true)
-	d.ws.readers.Wait()
+	d.ws.connections.Wait()
 	d.client.CloseIdleConnections()
 	close(d.done)
 }
 
 func (d *Dispatcher) closeSessions(graceful bool) {
 	d.mu.Lock()
-	sessions := make([]*session, 0, d.ws.running)
-	for _, appSessions := range d.ws.sessions {
-		for s := range appSessions {
-			sessions = append(sessions, s)
-		}
+	var sessions []*session
+	for _, app := range d.ws.apps {
+		sessions = append(sessions, app.sessions...)
 	}
 	d.mu.Unlock()
 
-	deadline := time.Now().Add(100 * time.Millisecond)
-	closeFrame := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
-	for _, s := range sessions {
-		if graceful {
-			_ = s.conn.WriteControl(websocket.CloseMessage, closeFrame, deadline)
-		}
-		_ = s.conn.Close()
+	var deadline time.Time
+	if graceful {
+		deadline = time.Now().Add(100 * time.Millisecond)
 	}
+	for _, s := range sessions {
+		closeSession(s, deadline)
+	}
+}
+
+func closeSession(s *session, deadline time.Time) {
+	if !deadline.IsZero() {
+		frame := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+		_ = s.conn.WriteControl(websocket.CloseMessage, frame, deadline)
+	}
+	_ = s.conn.Close()
 }
 
 func (d *Dispatcher) begin(ctx context.Context) (context.Context, func(), error) {
@@ -231,7 +256,7 @@ func tenantKey(app store.App) string {
 
 func millis(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
 
-// Dispatch delivers a Schema 2.0 event to every active session for the app
+// Dispatch delivers a Schema 2.0 event to one active session for the app
 // and to its configured webhook. It waits for each receiver's outcome.
 func (d *Dispatcher) Dispatch(ctx context.Context, appID, kind string, payload any) (Result, error) {
 	job, err := d.newJob(appID, kind, time.Time{}, payload)
@@ -256,7 +281,7 @@ func (d *Dispatcher) enqueue(appID, kind string, at time.Time, payload any) {
 	switch {
 	case d.closed:
 		err = errors.New("event dispatcher is shutting down")
-	case job.app.WebhookURL == "" && len(d.ws.sessions[appID]) == 0:
+	case job.app.WebhookURL == "" && d.ws.apps[appID] == nil:
 		// Nothing is subscribed for this app.
 	case d.pending >= maxPendingEvents:
 		err = errors.New("too many pending events")
@@ -280,38 +305,83 @@ func (d *Dispatcher) runJob(job deliveryJob) {
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, job deliveryJob) (Result, error) {
-	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.ws.sessions[job.app.AppID]))
-	for session := range d.ws.sessions[job.app.AppID] {
-		sessions = append(sessions, session)
+	result := Result{EventID: job.id}
+	if job.app.WebhookURL == "" {
+		result.Deliveries = appendDelivery(nil, d.deliverWebSocket(ctx, job))
+	} else {
+		// One transport can still deliver while the other is waiting for a
+		// response or retrying.
+		socket := make(chan Delivery, 1)
+		go func() { socket <- d.deliverWebSocket(ctx, job) }()
+		webhook := d.deliverWebhook(ctx, job)
+		result.Deliveries = append(appendDelivery(nil, <-socket), webhook)
 	}
-	d.mu.Unlock()
-
-	result := Result{EventID: job.id, Deliveries: make([]Delivery, len(sessions))}
-	if job.app.WebhookURL != "" {
-		result.Deliveries = append(result.Deliveries, Delivery{})
-	}
-	var sockets sync.WaitGroup
-	for i, s := range sessions {
-		sockets.Add(1)
-		go func() {
-			defer sockets.Done()
-			result.Deliveries[i] = d.deliverSocket(ctx, s, job)
-		}()
-	}
-	if job.app.WebhookURL != "" {
-		result.Deliveries[len(sessions)] = d.deliverWebhook(ctx, job)
-	}
-	sockets.Wait()
 	var err error
 	for _, delivered := range result.Deliveries {
 		err = errors.Join(err, delivered.Err)
 	}
-	return result, err
+	return result, errors.Join(err, ctx.Err())
 }
 
-func (d *Dispatcher) deliverSocket(ctx context.Context, s *session, job deliveryJob) Delivery {
-	trace := job.trace("websocket", 1)
+func appendDelivery(deliveries []Delivery, delivery Delivery) []Delivery {
+	if delivery.Channel != "" {
+		return append(deliveries, delivery)
+	}
+	return deliveries
+}
+
+func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Delivery {
+	// Keep the retries for one event on the same replica. A disconnected
+	// peer cannot acknowledge later attempts.
+	s := d.selectSession(ctx, job.app.AppID)
+	if s == nil {
+		return Delivery{}
+	}
+	var result Delivery
+	for i := 1; i <= d.opts.WebSocketMaxAttempts; i++ {
+		if i > 1 && !d.canRetry(ctx) {
+			break
+		}
+		select {
+		case <-s.done:
+			return result
+		default:
+		}
+		result = d.socketAttempt(ctx, s, job, i)
+		if result.Err == nil || i == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, i, s.done) {
+			break
+		}
+	}
+	return result
+}
+
+func (d *Dispatcher) canRetry(ctx context.Context) bool {
+	select {
+	case <-d.stopping:
+		return false
+	default:
+		return ctx.Err() == nil
+	}
+}
+
+func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, peerDone <-chan struct{}) bool {
+	if !d.canRetry(ctx) {
+		return false
+	}
+	timer := time.NewTimer(d.opts.RetryBackoff(attempt))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return d.canRetry(ctx)
+	case <-ctx.Done():
+	case <-d.stopping:
+	case <-peerDone:
+	}
+	return false
+}
+
+func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job deliveryJob, attempt int) Delivery {
+	trace := job.trace("websocket", attempt)
 	trace.Path = socketPath
 	ctx, cancel := context.WithTimeout(ctx, d.opts.AckTimeout)
 	defer cancel()
@@ -326,10 +396,19 @@ func (d *Dispatcher) deliverSocket(ctx context.Context, s *session, job delivery
 		headers.Add(k, v)
 	}
 	trace.Status = result.response.StatusCode
-	trace.ResponseBody = result.wire
 	trace.ResponseHeaders = headers
-	if result.err == nil && !success(trace.Status) {
-		result.err = fmt.Errorf("websocket acknowledgement status %d", trace.Status)
+	if result.err == nil {
+		// The acknowledgement embeds headers in its JSON body as well.
+		// Store the same safe subset in both places.
+		audit := result.response
+		audit.Headers = make(map[string]string)
+		for key, values := range store.TraceHeaders(headers) {
+			audit.Headers[key] = values[0]
+		}
+		trace.ResponseBody, _ = json.Marshal(audit)
+		if !success(trace.Status) {
+			result.err = fmt.Errorf("websocket acknowledgement status %d", trace.Status)
+		}
 	}
 	d.record(trace, result.err)
 	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: headers, Data: result.response.Data, Err: result.err}

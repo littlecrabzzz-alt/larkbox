@@ -206,7 +206,11 @@ func TestShutdownDrainsHookDeliveriesAndCancelsOnDeadline(t *testing.T) {
 					t.Fatalf("shutdown error = %v", err)
 				}
 			} else {
+				drained := make(chan error, 1)
+				go func() { drained <- d.Shutdown(ctx) }()
+				<-d.stopping
 				close(resume)
+				requireNoError(t, <-drained)
 			}
 			requireNoError(t, d.Shutdown(ctx))
 			traces := d.state.Traces()
@@ -214,5 +218,85 @@ func TestShutdownDrainsHookDeliveriesAndCancelsOnDeadline(t *testing.T) {
 				t.Fatalf("invalid shutdown traces: %+v", traces)
 			}
 		})
+	}
+}
+
+func TestVerificationUsesItsOwnTimeoutWithoutRetries(t *testing.T) {
+	cfg := config.Default()
+	app := &cfg.Apps[0]
+	app.EncryptKey = ""
+	var challenges, events atomic.Int32
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Type      string `json:"type"`
+			Challenge string `json:"challenge"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body.Type == "url_verification" {
+			challenges.Add(1)
+		} else {
+			events.Add(1)
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
+		if body.Type == "url_verification" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"challenge": body.Challenge})
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer receiver.Close()
+	app.WebhookURL = receiver.URL
+	defaults := testDispatcher(t, cfg, Options{}, nil)
+	if defaults.opts.VerificationTimeout != time.Second || defaults.opts.WebhookTimeout != 3*time.Second {
+		t.Fatalf("unexpected timeout defaults: %v and %v", defaults.opts.VerificationTimeout, defaults.opts.WebhookTimeout)
+	}
+	d := testDispatcher(t, cfg, Options{VerificationTimeout: 50 * time.Millisecond, RetryBackoff: noBackoff}, nil)
+	if err := d.VerifyWebhook(t.Context(), app.AppID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("slow challenge returned %v", err)
+	}
+	result, err := d.Dispatch(t.Context(), app.AppID, "test.event", struct{}{})
+	requireNoError(t, err)
+	if challenges.Load() != 1 || events.Load() != 1 || len(result.Deliveries) != 1 || result.Deliveries[0].Status != 204 {
+		t.Fatalf("unexpected attempts: %d verification, %d events, %+v", challenges.Load(), events.Load(), result)
+	}
+}
+
+func TestShutdownInterruptsWebhookBackoff(t *testing.T) {
+	cfg := config.Default()
+	var requests atomic.Int32
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer receiver.Close()
+	cfg.Apps[0].WebhookURL = receiver.URL
+	backoff := make(chan time.Duration, 1)
+	d := testDispatcher(t, cfg, Options{RetryBackoff: func(attempt int) time.Duration {
+		delay := defaultRetryBackoff(attempt)
+		backoff <- delay
+		return delay
+	}}, nil)
+	d.EnqueueMessageRecalled(cfg.Apps[0].AppID, "oc_test", "om_test", "message_owner", d.state.Now())
+	select {
+	case delay := <-backoff:
+		if delay != 15*time.Second {
+			t.Fatalf("expected the default backoff, got %v", delay)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery did not enter retry backoff")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	requireNoError(t, d.Shutdown(ctx))
+	if ctx.Err() != nil || requests.Load() != 1 || len(d.state.Traces()) != 1 {
+		t.Fatal("shutdown waited for the backoff or started another attempt")
 	}
 }

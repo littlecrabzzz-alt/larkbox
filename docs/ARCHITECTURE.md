@@ -67,7 +67,7 @@ When an event occurs (e.g., user sends a message via `/_sandbox/messages/send`, 
 
 1. Event payload is constructed in authentic **Feishu Schema 2.0** format (including `@_user_1` mention placeholders and `mentions` metadata for `@bot` messages).
 2. The `Dispatcher` inspects the target `app_id`:
-   - **WebSocket channel**: If one or more official SDK `ws.Client` sessions are connected to `/ws/v2` for that app, the event is serialized into a `pbbp2.Frame` (`method=1`, header `type=event` or `type=card`) and delivered over the active WebSocket. For `card.action.trigger`, the gateway awaits the client's response frame and applies returned `toast` / updated `card` payload back to the store.
+   - **WebSocket channel**: If one or more official SDK `ws.Client` sessions are connected to `/ws/v2` for that app, the event is serialized into a `pbbp2.Frame` (`method=1`, header `type=event` or `type=card`) and delivered to one active session for that app. Failed acknowledgements and timeouts can be retried with the same event ID. For `card.action.trigger`, the gateway awaits the client's response frame and applies returned `toast` / updated `card` payload back to the store.
    - **Webhook channel**: If a webhook URL is configured for the app, the event is dispatched via HTTP POST with optional encryption, signature headers, and retry tracking.
 3. Every delivery attempt, latency, and client response is recorded in the Audit Trace store for inspection.
 

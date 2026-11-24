@@ -368,8 +368,10 @@ func (s *Store) reset() {
 
 // AppendTrace records an exchange, evicting the oldest trace when full.
 func (s *Store) AppendTrace(trace Trace) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if trace.Direction == Outbound {
+		trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
+		trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
+	}
 	if len(trace.RequestBody) > TraceBodyLimit {
 		trace.RequestBody = trace.RequestBody[:TraceBodyLimit]
 		trace.RequestBodyTruncated = true
@@ -380,6 +382,8 @@ func (s *Store) AppendTrace(trace Trace) {
 	}
 	trace.Error = trace.Error[:min(len(trace.Error), TraceBodyLimit)]
 	trace = cloneTrace(trace)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.traces) < cap(s.traces) {
 		s.traces = append(s.traces, trace)
 		return

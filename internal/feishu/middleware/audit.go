@@ -10,18 +10,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
 // auditBodyLimit caps memory used to record each HTTP body.
-const (
-	auditBodyLimit        = store.TraceBodyLimit
-	auditHeaderValueLimit = 1024
-	auditHeaderLimit      = 8 * 1024
-)
+const auditBodyLimit = store.TraceBodyLimit
 
 // Audit records bounded request and response snapshots for Open API calls.
 // It omits credential headers, redacts JSON credentials, and skips body
@@ -31,7 +26,7 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 		started := time.Now()
 		trace := store.Trace{
 			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
-			RequestHeaders: auditHeaders(r.Header),
+			RequestHeaders: store.TraceHeaders(r.Header),
 		}
 		r = r.WithContext(context.WithValue(r.Context(), traceAppKey{}, &trace.AppID))
 		requestContentType := r.Header.Get("Content-Type")
@@ -126,7 +121,7 @@ type auditWriter struct {
 func (w *auditWriter) commit(status int) {
 	if w.status == 0 {
 		w.status = status
-		w.headers = auditHeaders(w.Header())
+		w.headers = store.TraceHeaders(w.Header())
 		w.contentType = w.Header().Get("Content-Type")
 		w.attachment = w.Header().Get("Content-Disposition") != ""
 	}
@@ -166,7 +161,7 @@ func (w *auditWriter) FlushError() error {
 	if w.status != 0 {
 		return controller.Flush()
 	}
-	headers := auditHeaders(w.Header())
+	headers := store.TraceHeaders(w.Header())
 	contentType := w.Header().Get("Content-Type")
 	attachment := w.Header().Get("Content-Disposition") != ""
 	err := controller.Flush()
@@ -174,31 +169,6 @@ func (w *auditWriter) FlushError() error {
 		w.status, w.headers, w.contentType, w.attachment = http.StatusOK, headers, contentType, attachment
 	}
 	return err
-}
-
-func auditHeaders(headers http.Header) http.Header {
-	result := make(http.Header)
-	remaining := auditHeaderLimit
-	for _, name := range []string{
-		"Accept", "Content-Type", "Content-Length", "Content-Disposition", "Content-Encoding", "User-Agent",
-		"Retry-After", "X-Ogw-Ratelimit-Limit", "X-Ogw-Ratelimit-Reset",
-		"X-Request-Id", "X-Tt-Logid", "X-Lark-Request-Timestamp",
-	} {
-		for _, value := range headers.Values(name) {
-			// Charge each entry for its key and slice/string bookkeeping.
-			overhead := len(name) + 16
-			if remaining <= overhead {
-				return result
-			}
-			n := min(len(value), auditHeaderValueLimit, remaining-overhead)
-			for n > 0 && n < len(value) && !utf8.RuneStart(value[n]) {
-				n--
-			}
-			result.Add(name, strings.Clone(value[:n]))
-			remaining -= overhead + n
-		}
-	}
-	return result
 }
 
 func auditBody(body []byte, contentType string, truncated bool) []byte {

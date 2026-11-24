@@ -37,7 +37,7 @@ func (d *Dispatcher) VerifyWebhook(ctx context.Context, appID string) error {
 		return err
 	}
 	job := deliveryJob{app: app, kind: "url_verification", body: body}
-	delivery := d.webhookAttempt(ctx, job, 1, func(body []byte) error {
+	delivery := d.webhookAttempt(ctx, job, 1, d.opts.VerificationTimeout, func(body []byte) error {
 		var echo struct {
 			Challenge string `json:"challenge"`
 		}
@@ -55,29 +55,28 @@ func (d *Dispatcher) VerifyWebhook(ctx context.Context, appID string) error {
 func (d *Dispatcher) deliverWebhook(ctx context.Context, job deliveryJob) Delivery {
 	var result Delivery
 	for i := 1; i <= d.opts.WebhookMaxAttempts; i++ {
-		result = d.webhookAttempt(ctx, job, i, nil)
-		if result.Err == nil || i == d.opts.WebhookMaxAttempts || ctx.Err() != nil {
-			return result
+		if i > 1 && !d.canRetry(ctx) {
+			break
 		}
-		timer := time.NewTimer(d.opts.RetryBackoff(i))
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return result
+		result = d.webhookAttempt(ctx, job, i, d.opts.WebhookTimeout, nil)
+		if result.Err == nil || i == d.opts.WebhookMaxAttempts || !d.waitRetry(ctx, i, nil) {
+			break
 		}
 	}
 	return result
 }
 
-func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attempt int, verify func([]byte) error) Delivery {
+func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attempt int, timeout time.Duration, verify func([]byte) error) Delivery {
 	trace := job.trace("webhook", attempt)
 	trace.Method = http.MethodPost
-	ctx, cancel := context.WithTimeout(ctx, d.opts.WebhookTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := d.postWebhook(ctx, job.app, &trace)
 	if err == nil && verify != nil {
 		err = verify(trace.ResponseBody)
+		if err == nil {
+			err = ctx.Err()
+		}
 	}
 	d.record(trace, err)
 	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: trace.ResponseHeaders, Data: trace.ResponseBody, Err: err}

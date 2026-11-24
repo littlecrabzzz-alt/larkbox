@@ -134,10 +134,15 @@ func sdkRecallEvent(t *testing.T, client *lark.Client, chatID string) string {
 	t.Helper()
 	message := sdkSend(t, client, "chat_id", chatID, "text", `{"text":"recall this"}`)
 	id := value(message.MessageId)
+	sdkRecallMessage(t, client, id)
+	return id
+}
+
+func sdkRecallMessage(t *testing.T, client *lark.Client, id string) {
+	t.Helper()
 	resp, err := client.Im.Message.Delete(t.Context(), larkim.NewDeleteMessageReqBuilder().MessageId(id).Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, resp.CodeError, 0)
-	return id
 }
 
 func assertSDKBotJoin(t *testing.T, inbox sdkEventInbox, cfg config.Config) {
@@ -151,12 +156,12 @@ func assertSDKBotJoin(t *testing.T, inbox sdkEventInbox, cfg config.Config) {
 	}
 }
 
-func assertSDKRecall(t *testing.T, inbox sdkEventInbox, cfg config.Config, id string) {
+func assertSDKRecall(t *testing.T, inbox sdkEventInbox, app config.App, chatID, id, recallType string) {
 	t.Helper()
 	recalled := receiveSDKEvent(t, inbox.recalled)
-	assertSDKEventHeader(t, recalled.EventV2Base, cfg.Apps[1], "im.message.recalled_v1")
-	if recalled.Event == nil || value(recalled.Event.MessageId) != id || value(recalled.Event.ChatId) != cfg.Chats[0].ChatID ||
-		value(recalled.Event.RecallType) != "message_owner" || value(recalled.Event.RecallTime) != recalled.EventV2Base.Header.CreateTime {
+	assertSDKEventHeader(t, recalled.EventV2Base, app, "im.message.recalled_v1")
+	if recalled.Event == nil || value(recalled.Event.MessageId) != id || value(recalled.Event.ChatId) != chatID ||
+		value(recalled.Event.RecallType) != recallType || value(recalled.Event.RecallTime) != recalled.EventV2Base.Header.CreateTime {
 		t.Fatalf("invalid recall: %+v", recalled.Event)
 	}
 }
@@ -201,8 +206,13 @@ func assertSDKMessageReceive(t *testing.T, inbox sdkEventInbox, cfg config.Confi
 
 func TestOfficialSDKWebSocketEvents(t *testing.T) {
 	cfg := sdkEventConfig()
+	cfg.Chats[0].AppID = cfg.Apps[0].AppID
+	ownerHandler, ownerInbox := sdkEventDispatcher(cfg.Apps[0])
+	ownerWebhook := httptest.NewServer(http.HandlerFunc(httpserverext.NewEventHandlerFunc(ownerHandler)))
+	t.Cleanup(ownerWebhook.Close)
+	cfg.Apps[0].WebhookURL = ownerWebhook.URL
 	app := cfg.Apps[1]
-	srv, web := sdkEventServer(t, cfg, event.Options{})
+	srv, web := sdkEventServer(t, cfg, event.Options{WebSocketMaxAttempts: 1, WebhookMaxAttempts: 1})
 	handler, inbox := sdkEventDispatcher(app)
 	handler.OnP2CardActionTrigger(func(_ context.Context, incoming *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 		if incoming.Event == nil || incoming.Event.Host != "im_message" {
@@ -261,7 +271,13 @@ func TestOfficialSDKWebSocketEvents(t *testing.T) {
 	}
 
 	id := sdkRecallEvent(t, target, chatID)
-	assertSDKRecall(t, inbox, cfg, id)
+	assertSDKRecall(t, inbox, app, chatID, id, "message_owner")
+	assertSDKRecall(t, ownerInbox, cfg.Apps[0], chatID, id, "message_owner")
+	// The second bot receives a recall of a message authored by the first.
+	id = sdkRecallEvent(t, owner, chatID)
+	assertSDKRecall(t, inbox, app, chatID, id, "message_owner")
+	assertSDKRecall(t, ownerInbox, cfg.Apps[0], chatID, id, "message_owner")
+	priorMessage := sdkSend(t, target, "chat_id", chatID, "text", `{"text":"sent before leaving"}`)
 	removeBody, err := larkim.NewDeleteChatMembersPathReqBodyBuilder().IdList([]string{app.AppID}).Build()
 	requireSDKNetwork(t, err)
 	removed, err := target.Im.ChatMembers.Delete(t.Context(), larkim.NewDeleteChatMembersReqBuilder().
@@ -273,6 +289,10 @@ func TestOfficialSDKWebSocketEvents(t *testing.T) {
 	if deleted.Event == nil || value(deleted.Event.ChatId) != chatID {
 		t.Fatalf("invalid bot removal: %+v", deleted.Event)
 	}
+	// The chat manager can recall the departed bot's message without
+	// notifying the departed bot, even while its subscription is still open.
+	sdkRecallMessage(t, owner, value(priorMessage.MessageId))
+	assertSDKRecall(t, ownerInbox, cfg.Apps[0], chatID, value(priorMessage.MessageId), "group_manager")
 
 	card, err := srv.Events().DispatchCardAction(t.Context(), app.AppID, callback.CardActionTriggerRequest{Host: "im_message"})
 	requireSDKNetwork(t, err)
@@ -292,6 +312,11 @@ func TestOfficialSDKWebSocketEvents(t *testing.T) {
 	case <-stopped:
 	case <-ctx.Done():
 		t.Fatal("server did not disconnect the SDK")
+	}
+	select {
+	case recalled := <-inbox.recalled:
+		t.Fatalf("removed bot received recall for its old chat: %+v", recalled.Event)
+	default:
 	}
 }
 
@@ -338,7 +363,8 @@ func TestOfficialSDKHTTPWebhookEvents(t *testing.T) {
 			result, err := srv.Events().DispatchMessageReceive(t.Context(), app.AppID, message)
 			requireSDKNetwork(t, err)
 			assertSDKMessageReceive(t, inbox, cfg, message, "p2p", result.EventID)
-			assertSDKRecall(t, inbox, cfg, sdkRecallEvent(t, sdkEventREST(web, *app), chatID))
+			id := sdkRecallEvent(t, sdkEventREST(web, *app), chatID)
+			assertSDKRecall(t, inbox, *app, chatID, id, "message_owner")
 
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 			defer cancel()
