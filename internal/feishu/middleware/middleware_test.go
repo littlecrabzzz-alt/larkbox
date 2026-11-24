@@ -31,7 +31,9 @@ func TestBearer(t *testing.T) {
 		{Value: "a-expired", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now},
 		{Value: "u-expired", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_test", ExpiresAt: now},
 		{Value: "u-revoked", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_test", Revoked: true, ExpiresAt: now.Add(time.Second)},
-		{Value: "t-illegal", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
+		{Value: "t-app", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now.Add(time.Second)},
+		{Value: "t-app-expired", Kind: store.AppToken, AppID: "cli_test", ExpiresAt: now},
+		{Value: "t-app-owner-deleted", Kind: store.AppToken, AppID: "cli_removed", ExpiresAt: now.Add(time.Second)},
 		{Value: "t-owner-deleted", Kind: store.TenantToken, AppID: "cli_removed", ExpiresAt: now.Add(time.Second)},
 		{Value: "u-owner-deleted", Kind: store.UserToken, AppID: "cli_test", UserOpenID: "ou_removed", ExpiresAt: now.Add(time.Second)},
 	} {
@@ -66,7 +68,7 @@ func TestBearer(t *testing.T) {
 		{"unrecognized prefix", Tenant, []string{"Bearer unrecognized"}, 400, 99991671, format, "", false},
 		{"refresh in authorization", TenantOrUser, []string{"Bearer r-valid"}, 400, 99991671, format, "", false},
 		{"unknown tenant", Tenant, []string{"Bearer t-unknown"}, 400, 99991665, "invalid tenant code", "", false},
-		{"illegal tenant", Tenant, []string{"Bearer t-illegal"}, 400, 99991665, "invalid tenant code", "", false},
+		{"t-prefixed app on tenant route", Tenant, []string{"Bearer t-app"}, 400, 99991664, "invalid app token", "", false},
 		{"tenant missing owner", Tenant, []string{"Bearer t-owner-deleted"}, 400, 99991665, "invalid tenant code", "", false},
 		{"user missing owner", User, []string{"Bearer u-owner-deleted"}, 400, 99991668, invalid, "", false},
 		{"unknown user", TenantOrUser, []string{"Bearer u-unknown"}, 400, 99991668, invalid, "", false},
@@ -80,7 +82,10 @@ func TestBearer(t *testing.T) {
 		{"user on a tenant route", Tenant, []string{"Bearer u-valid"}, 400, 99991668, "user access token not support", "", false},
 		{"app on tenant or user route", TenantOrUser, []string{"Bearer a-valid"}, 400, 99991664, "invalid app token", "", false},
 		{"tenant", Tenant, []string{"bearer  t-valid"}, 200, 0, "ok", store.TenantToken, false},
-		{"app", App, []string{"Bearer a-valid"}, 200, 0, "ok", store.AppToken, false},
+		{"a-prefixed app", App, []string{"Bearer a-valid"}, 200, 0, "ok", store.AppToken, false},
+		{"t-prefixed app", App, []string{"Bearer t-app"}, 200, 0, "ok", store.AppToken, false},
+		{"t-prefixed app expired", App, []string{"Bearer t-app-expired"}, 400, 99991664, "invalid app token", "", false},
+		{"t-prefixed app missing owner", App, []string{"Bearer t-app-owner-deleted"}, 400, 99991664, "invalid app token", "", false},
 		{"user", User, []string{"Bearer u-valid"}, 200, 0, "ok", store.UserToken, false},
 		{"tenant or user uses tenant", TenantOrUser, []string{"Bearer t-valid"}, 200, 0, "ok", store.TenantToken, false},
 		{"tenant or user uses user", TenantOrUser, []string{"Bearer u-valid"}, 200, 0, "ok", store.UserToken, false},
@@ -277,6 +282,12 @@ func TestAuditFlushCommitsHeaders(t *testing.T) {
 			writer = withoutFlush{recorder}
 		}
 		Audit(state, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if _, ok := w.(http.Flusher); ok != supported {
+				t.Errorf("direct http.Flusher support = %t, want %t", ok, supported)
+			}
+			if wrapped, ok := w.(interface{ Unwrap() http.ResponseWriter }); !ok || wrapped.Unwrap() != writer {
+				t.Error("audit writer did not unwrap to the original writer")
+			}
 			w.Header().Set("X-Request-Id", "before flush")
 			err := http.NewResponseController(w).Flush()
 			if supported && err != nil || !supported && !errors.Is(err, http.ErrNotSupported) {

@@ -161,12 +161,14 @@ func (s *Store) DeleteToken(value string) bool {
 
 // CheckToken returns a credential if its owners exist and it is currently valid.
 // For an expired or revoked credential, it also returns stored metadata.
+// If an owner is missing, it returns only the stored kind with ErrTokenOwner.
 func (s *Store) CheckToken(value string) (Token, error) {
 	return s.CheckTokenBinding(value, "", "")
 }
 
 // CheckTokenBinding atomically validates a credential, its owners, and its
 // expected app and user bindings. An empty expected field imposes no constraint.
+// If an owner is missing, it returns only the stored kind with ErrTokenOwner.
 func (s *Store) CheckTokenBinding(value, appID, userOpenID string) (Token, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -175,7 +177,7 @@ func (s *Store) CheckTokenBinding(value, appID, userOpenID string) (Token, error
 	case !ok:
 		return Token{}, ErrNotFound
 	case !s.tokenOwnersExist(token):
-		return Token{}, ErrTokenOwner
+		return Token{Kind: token.Kind}, ErrTokenOwner
 	case appID != "" && token.AppID != appID, userOpenID != "" && token.UserOpenID != userOpenID:
 		return Token{}, ErrTokenBinding
 	case token.Revoked:

@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -67,20 +68,22 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	if !bearer {
 		return Auth{}, protocol.NewError(protocol.InvalidToken, nil)
 	}
-	kind := credentialKind(value)
-	if kind == "" {
+	prefixKind := bearerPrefixKind(value)
+	if prefixKind == "" {
 		return Auth{}, protocol.NewError(protocol.InvalidTokenFormat, nil)
 	}
 	token, err := state.CheckToken(value)
-	// The store returns a token on failure only for expiry and revocation.
-	if token.Kind != kind {
-		return Auth{}, credentialError(kind, invalidCredential)
-	}
-	if err != nil {
-		return Auth{}, credentialError(kind, inactiveCredential)
-	}
-	if !accepts(required, kind) {
-		return Auth{}, credentialError(kind, unsupportedCredential)
+	// The t- prefix is shared by tenant and app tokens. Only an unknown
+	// credential needs the prefix as a fallback for its error code.
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return Auth{}, credentialError(prefixKind, invalidCredential)
+	case errors.Is(err, store.ErrTokenExpired), errors.Is(err, store.ErrTokenRevoked):
+		return Auth{}, credentialError(token.Kind, inactiveCredential)
+	case err != nil:
+		return Auth{}, credentialError(token.Kind, invalidCredential)
+	case !accepts(required, token.Kind):
+		return Auth{}, credentialError(token.Kind, unsupportedCredential)
 	}
 	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind}, protocol.APIError{}
 }
@@ -93,7 +96,7 @@ func bearerToken(headers []string) (string, bool) {
 	return strings.TrimLeft(value, " "), strings.EqualFold(scheme, "Bearer")
 }
 
-func credentialKind(value string) store.TokenKind {
+func bearerPrefixKind(value string) store.TokenKind {
 	if len(value) <= 2 || !bearerValue.MatchString(value[2:]) {
 		return ""
 	}

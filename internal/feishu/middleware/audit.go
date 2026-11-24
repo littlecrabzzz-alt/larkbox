@@ -38,7 +38,11 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 		}
 
 		response := &auditWriter{ResponseWriter: w}
-		next.ServeHTTP(response, r)
+		var wrapped http.ResponseWriter = response
+		if _, ok := w.(http.Flusher); ok {
+			wrapped = &flushingAuditWriter{response}
+		}
+		next.ServeHTTP(wrapped, r)
 		response.commit(http.StatusOK) // A handler that writes nothing gets an implicit 200.
 		trace.Latency = time.Since(started)
 		if request != nil {
@@ -133,7 +137,9 @@ func (w *auditWriter) SetFeishuCode(code protocol.Code) {
 
 func (w *auditWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-func (w *auditWriter) Flush() { _ = w.FlushError() }
+type flushingAuditWriter struct{ *auditWriter }
+
+func (w *flushingAuditWriter) Flush() { _ = w.FlushError() }
 
 func (w *auditWriter) FlushError() error {
 	controller := http.NewResponseController(w.ResponseWriter)
