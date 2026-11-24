@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -47,15 +48,21 @@ type internalResponse struct {
 
 func (h handler) internalToken(includeApp bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fields, ok := readJSON(w, r, "app_id", "app_secret")
+		fields, err := readJSON(w, r, "app_id", "app_secret")
+		if errors.Is(err, errMalformedJSON) {
+			writeAPIError(w, protocol.MalformedRequest)
+			return
+		}
 		appID, secret := fields["app_id"], fields["app_secret"]
-		if !ok || appID == "" || secret == "" {
-			writeAPIError(w, protocol.InvalidParameter)
+		if err != nil || appID == "" || secret == "" {
+			_ = protocol.WriteJSON(w, http.StatusOK, protocol.Envelope{
+				Code: protocol.InvalidParameter, Msg: "invalid param", Data: struct{}{},
+			})
 			return
 		}
 		app, found := h.state.Apps().Get(appID)
 		if !found {
-			writeAPIError(w, protocol.AppUnauthorized)
+			writeUnknownInternalApp(w)
 			return
 		}
 		if !matchesSecret(app, secret) {
@@ -80,7 +87,7 @@ func (h handler) internalToken(includeApp bool) http.HandlerFunc {
 			response.App, response.Expire = appToken.Value, h.ttls.App
 		}
 		if err := h.state.PutTokens(tokens...); err != nil {
-			writeAPIError(w, protocol.AppUnauthorized)
+			writeUnknownInternalApp(w)
 			return
 		}
 		_ = protocol.WriteResult(w, http.StatusOK, response.Code, response)
@@ -95,33 +102,44 @@ func seconds(value int64) time.Duration { return time.Duration(value) * time.Sec
 
 const maxRequestBody = 16 * 1024
 
-// readJSON accepts exactly one object with unique, recognized string fields.
-func readJSON(w http.ResponseWriter, r *http.Request, allowed ...string) (map[string]string, bool) {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody))
+var (
+	errMalformedJSON = errors.New("malformed JSON")
+	errInvalidFields = errors.New("request must be an object with unique, recognized string fields")
+)
+
+// readJSON distinguishes malformed syntax from invalid fields in a JSON value.
+func readJSON(w http.ResponseWriter, r *http.Request, allowed ...string) (map[string]string, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err != nil || !json.Valid(body) {
+		return nil, errMalformedJSON
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	if start, err := decoder.Token(); err != nil || start != json.Delim('{') {
-		return nil, false
+		return nil, errInvalidFields
 	}
 	fields := make(map[string]string, len(allowed))
 	for decoder.More() {
 		key, err := decoder.Token()
 		name, ok := key.(string)
 		if err != nil || !ok || !slices.Contains(allowed, name) {
-			return nil, false
+			return nil, errInvalidFields
 		}
 		if _, duplicate := fields[name]; duplicate {
-			return nil, false
+			return nil, errInvalidFields
 		}
 		var value *string
 		if err := decoder.Decode(&value); err != nil || value == nil {
-			return nil, false
+			return nil, errInvalidFields
 		}
 		fields[name] = *value
 	}
-	if _, err := decoder.Token(); err != nil {
-		return nil, false
-	}
-	_, err := decoder.Token()
-	return fields, errors.Is(err, io.EOF)
+	return fields, nil
+}
+
+func writeUnknownInternalApp(w http.ResponseWriter) {
+	apiErr := protocol.NewError(protocol.AppUnauthorized, nil)
+	apiErr.Message = "app id not exists"
+	_ = protocol.WriteError(w, apiErr)
 }
 
 func writeAPIError(w http.ResponseWriter, code protocol.Code) {

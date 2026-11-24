@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -41,24 +42,20 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, protocol.InvalidParameter)
 		return
 	}
-	if _, ok := h.state.Apps().Get(appID); !ok {
+	app, ok := h.state.Apps().Get(appID)
+	if !ok {
 		writeLegacyError(w, oauthUnknownApp)
 		return
 	}
 	middleware.SetTraceApp(r, appID)
 
 	redirectURI := query.Get("redirect_uri")
-	redirect, err := url.Parse(redirectURI)
-	if err != nil || (redirect.Scheme != "http" && redirect.Scheme != "https") ||
-		redirect.Hostname() == "" || redirect.User != nil {
+	redirect, err := config.ParseRedirectURI(redirectURI)
+	if err != nil || !slices.Contains(app.RedirectURIs, redirectURI) {
 		writeLegacyError(w, oauthRedirect)
 		return
 	}
-	callback, err := url.ParseQuery(redirect.RawQuery)
-	if err != nil {
-		writeLegacyError(w, oauthRedirect)
-		return
-	}
+	callback := redirect.Query()
 	if responseType := query.Get("response_type"); responseType != "" && responseType != "code" {
 		writeLegacyError(w, oauthInvalidRequest)
 		return
@@ -102,7 +99,7 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int64  `json:"expires_in"`
 	Scope        string `json:"scope"`
@@ -116,7 +113,7 @@ type oidcResponse struct {
 type oauthResponse struct {
 	Code protocol.Code `json:"code"`
 	tokenResponse
-	RefreshExpiresIn int64 `json:"refresh_token_expires_in"`
+	RefreshExpiresIn int64 `json:"refresh_token_expires_in,omitempty"`
 }
 
 func (h handler) oidcToken(refresh bool) http.HandlerFunc {
@@ -128,9 +125,9 @@ func (h handler) oidcToken(refresh bool) http.HandlerFunc {
 			wantGrant, tokenField = refreshGrant, "refresh_token"
 			allowed = []string{"grant_type", "refresh_token"}
 		}
-		fields, ok := readJSON(w, r, allowed...)
+		fields, err := readJSON(w, r, allowed...)
 		switch {
-		case !ok || fields["grant_type"] == "":
+		case err != nil || fields["grant_type"] == "":
 			writeLegacyError(w, oauthInvalidRequest)
 			return
 		case fields["grant_type"] != wantGrant:
@@ -156,7 +153,8 @@ func readOAuthFields(w http.ResponseWriter, r *http.Request) (map[string]string,
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	switch {
 	case mediaType == "application/json" || r.Header.Get("Content-Type") == "":
-		return readJSON(w, r, allowed...)
+		fields, err := readJSON(w, r, allowed...)
+		return fields, err == nil
 	case err != nil || mediaType != "application/x-www-form-urlencoded":
 		return nil, false
 	}
@@ -182,24 +180,43 @@ func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	fields, ok := readOAuthFields(w, r)
 	if !ok {
-		writeOAuthError(w, oauthMalformed)
+		writeOAuthErrorDescription(w, oauthInvalidRequest, "The request is malformed. Please check your request.")
 		return
 	}
-	appID, secret := fields["client_id"], fields["client_secret"]
-	grantType := fields["grant_type"]
-	switch {
-	case appID == "" || secret == "" || grantType == "":
-		writeOAuthError(w, oauthInvalidRequest)
-		return
-	case grantType != authorizationCode && grantType != refreshGrant:
+	for _, field := range []string{"grant_type", "client_id", "client_secret"} {
+		if fields[field] == "" {
+			writeMissingOAuthField(w, field)
+			return
+		}
+	}
+
+	tokenField, kind := "code", store.OAuthCode
+	refresh := fields["grant_type"] == refreshGrant
+	switch fields["grant_type"] {
+	case refreshGrant:
+		tokenField, kind = "refresh_token", store.RefreshToken
+	case authorizationCode:
+	default:
 		writeOAuthError(w, oauthGrantType)
 		return
-	case grantType == authorizationCode && fields["code"] == "", grantType == refreshGrant && fields["refresh_token"] == "":
-		writeOAuthError(w, oauthMalformed)
+	}
+	if fields[tokenField] == "" {
+		writeMissingOAuthField(w, tokenField)
 		return
 	}
+
+	appID, secret := fields["client_id"], fields["client_secret"]
 	app, found := h.state.Apps().Get(appID)
 	if !found {
+		grant, _ := h.state.CheckToken(fields[tokenField])
+		if grant.Kind != kind {
+			if refresh {
+				writeOAuthError(w, oauthInvalidRefresh)
+			} else {
+				writeOAuthError(w, oauthCode(protocol.InvalidOAuthCode))
+			}
+			return
+		}
 		writeOAuthError(w, oauthAppNotFound)
 		return
 	}
@@ -209,13 +226,15 @@ func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	middleware.SetTraceApp(r, appID)
-	refresh := grantType == refreshGrant
 	tokens, err := h.exchange(appID, fields, refresh, true)
 	if err != nil {
 		writeOAuthError(w, exchangeCode(err, refresh, true))
 		return
 	}
-	body := oauthResponse{protocol.Success, h.tokenData(tokens), h.ttls.Refresh}
+	body := oauthResponse{Code: protocol.Success, tokenResponse: h.tokenData(tokens)}
+	if tokens[1].Value != "" {
+		body.RefreshExpiresIn = h.ttls.Refresh
+	}
 	_ = protocol.WriteResult(w, http.StatusOK, body.Code, body)
 }
 
@@ -230,7 +249,8 @@ func (h handler) exchange(appID string, fields map[string]string, refresh, v2 bo
 			if (v2 || redirectURI != "") && redirectURI != grant.RedirectURI {
 				return [2]store.Token{}, oauthRedirectMismatch
 			}
-			if !verifyPKCE(grant, fields["code_verifier"]) {
+			verifier, supplied := fields["code_verifier"]
+			if !verifyPKCE(grant, verifier, supplied) {
 				return [2]store.Token{}, oauthPKCE
 			}
 		}
@@ -239,18 +259,24 @@ func (h handler) exchange(appID string, fields map[string]string, refresh, v2 bo
 		if err != nil {
 			return [2]store.Token{}, err
 		}
-		return [2]store.Token{
-			{Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-				Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User))},
-			{Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-				Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh))},
-		}, nil
+		access := store.Token{
+			Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+			Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User)),
+		}
+		var replacement store.Token
+		if !v2 || slices.Contains(strings.Split(scope, " "), "offline_access") {
+			replacement = store.Token{
+				Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+				Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh)),
+			}
+		}
+		return [2]store.Token{access, replacement}, nil
 	})
 }
 
-func verifyPKCE(grant store.Token, verifier string) bool {
+func verifyPKCE(grant store.Token, verifier string, supplied bool) bool {
 	if grant.CodeChallenge == "" {
-		return true
+		return !supplied
 	}
 	if !pkceValue.MatchString(verifier) {
 		return false
@@ -270,9 +296,12 @@ func tokenScope(granted, requested string) (string, error) {
 	if requested == "" {
 		return granted, nil
 	}
-	allowed := strings.Fields(granted)
+	allowed := strings.Split(granted, " ")
 	seen := make(map[string]bool)
-	for _, scope := range strings.Fields(requested) {
+	for scope := range strings.SplitSeq(requested, " ") {
+		if scope == "" {
+			continue
+		}
 		if seen[scope] {
 			return "", oauthDuplicateScope
 		}
@@ -309,6 +338,9 @@ func (h handler) userInfo(w http.ResponseWriter, r *http.Request) {
 		"open_id": user.OpenID, "union_id": user.UnionID, "email": user.Email,
 		"enterprise_email": user.EnterpriseEmail, "user_id": user.UserID, "mobile": user.Mobile,
 		"tenant_key": user.TenantKey,
+	}
+	if user.EmployeeNo != "" {
+		data["employee_no"] = user.EmployeeNo
 	}
 	_ = protocol.WriteJSON(w, http.StatusOK, protocol.Envelope{Code: protocol.Success, Msg: "success", Data: data})
 }

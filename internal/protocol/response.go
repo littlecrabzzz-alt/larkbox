@@ -13,6 +13,7 @@ type Code int
 // Common Feishu Open API result codes.
 const (
 	Success            Code = 0        // Successful request.
+	MalformedRequest   Code = 9499     // Request body could not be parsed.
 	InvalidParameter   Code = 10003    // Missing or invalid request parameter.
 	AppUnauthorized    Code = 10014    // App is unavailable.
 	WrongAppSecret     Code = 10015    // App secret does not match.
@@ -83,6 +84,7 @@ type codeInfo struct {
 
 var codes = map[Code]codeInfo{
 	Success:            {http.StatusOK, "ok"},
+	MalformedRequest:   {http.StatusBadRequest, "bad request or invalid param"},
 	InvalidParameter:   {http.StatusOK, "invalid parameter"},
 	AppUnauthorized:    {http.StatusOK, "app unauthorized"},
 	WrongAppSecret:     {http.StatusOK, "wrong app secret"},

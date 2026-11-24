@@ -24,6 +24,8 @@ const (
 
 func TestOfficialSDKAuth(t *testing.T) {
 	cfg := config.Default()
+	cfg.Apps[0].RedirectURIs = []string{callbackURL}
+	cfg.Users[0].EmployeeNo = "EMP-001"
 	app := cfg.Apps[0]
 	srv := server.New(cfg)
 	ts := httptest.NewServer(srv.Handler())
@@ -238,7 +240,8 @@ func assertProfile(t *testing.T, client *lark.Client, token string, user config.
 		info.Data.OpenId == nil || *info.Data.OpenId != user.OpenID ||
 		info.Data.Name == nil || *info.Data.Name != user.Name ||
 		info.Data.Email == nil || *info.Data.Email != user.Email ||
-		info.Data.UnionId == nil || *info.Data.UnionId != user.UnionID {
+		info.Data.UnionId == nil || *info.Data.UnionId != user.UnionID ||
+		info.Data.EmployeeNo == nil || *info.Data.EmployeeNo != user.EmployeeNo {
 		t.Fatalf("unexpected user info result: %+v", info.CodeError)
 	}
 }

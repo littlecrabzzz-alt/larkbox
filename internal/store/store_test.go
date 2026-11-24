@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -142,7 +143,7 @@ func TestSeedAndReset(t *testing.T) {
 	app, appFound := state.Apps().Get(cfg.Apps[0].AppID)
 	user, userFound := state.Users().Get(cfg.Users[0].OpenID)
 	chat, chatFound := state.Chats().Get(chatID)
-	if !appFound || app != cfg.Apps[0] || !userFound || user != cfg.Users[0] || !chatFound || chat.MemberIDs[0] != owner || slices.Contains(chat.MemberIDs, "ou_added") {
+	if !appFound || !reflect.DeepEqual(app, cfg.Apps[0]) || !userFound || user != cfg.Users[0] || !chatFound || chat.MemberIDs[0] != owner || slices.Contains(chat.MemberIDs, "ou_added") {
 		t.Fatal("reset did not restore the original seed")
 	}
 	if _, err := state.CheckToken("t-test"); !errors.Is(err, ErrNotFound) {
@@ -328,4 +329,31 @@ func TestQueryTracesAfterRingWrap(t *testing.T) {
 			trace.RequestBody[0] = 'x'
 		}
 	}
+}
+
+func TestAppRedirectURISnapshots(t *testing.T) {
+	cfg := config.Default()
+	state := New(nil, 0)
+	state.Seed(cfg)
+	id, original := cfg.Apps[0].AppID, cfg.Apps[0].RedirectURIs[0]
+	cfg.Apps[0].RedirectURIs[0] = "https://changed.test/seed"
+	read := func(want string) App {
+		t.Helper()
+		app, ok := state.Apps().Get(id)
+		if !ok || app.RedirectURIs[0] != want {
+			t.Fatalf("app did not preserve callback %q", want)
+		}
+		return app
+	}
+	app := read(original)
+	app.RedirectURIs[0] = "https://changed.test/runtime"
+	read(original)
+	state.Apps().Put(app)
+	app.RedirectURIs[0] = "https://changed.test/after-put"
+	read("https://changed.test/runtime")
+	listed := state.Apps().List()
+	listed[0].RedirectURIs[0] = "https://changed.test/list"
+	read("https://changed.test/runtime")
+	state.Reset()
+	read(original)
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -110,13 +111,22 @@ func (f fixture) v2(t *testing.T, fields map[string]string) *httptest.ResponseRe
 	return f.post(oauthPath, "", jsonFields(t, fields))
 }
 
-func expectOAuthError(t *testing.T, w *httptest.ResponseRecorder, code int, kind string) {
+func (f fixture) v2Form(fields map[string]string) *httptest.ResponseRecorder {
+	form := make(url.Values)
+	for name, value := range fields {
+		form.Set(name, value)
+	}
+	return f.call(http.MethodPost, oauthPath, "", "application/x-www-form-urlencoded; charset=utf-8", form.Encode())
+}
+
+func expectOAuthError(t *testing.T, w *httptest.ResponseRecorder, code int, kind string) wireResponse {
 	t.Helper()
 	wire := readResponse(t, w, http.StatusBadRequest, code)
 	if wire.Error != kind || wire.ErrorDescription == "" || wire.Msg != "" || len(wire.Data) != 0 ||
 		w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("invalid OAuth error shape: %s", w.Body)
 	}
+	return wire
 }
 
 func TestOAuthV2ErrorsAndRotation(t *testing.T) {
@@ -125,11 +135,8 @@ func TestOAuthV2ErrorsAndRotation(t *testing.T) {
 		name, grant, token, key, value, kind string
 		code                                 int
 	}{
-		{"missing grant", "", "", "", "", "invalid_request", 20001},
-		{"missing credentials", authorizationCode, "value", "client_id", "", "invalid_request", 20001},
-		{"missing code", authorizationCode, "", "", "", "invalid_request", 20063},
-		{"missing refresh token", refreshGrant, "", "", "", "invalid_request", 20063},
-		{"unknown app", authorizationCode, "value", "client_id", "unknown", "invalid_client", 20048},
+		{"unknown code and app", authorizationCode, "unknown", "client_id", "unknown", "invalid_grant", 20003},
+		{"unknown refresh and app", refreshGrant, "unknown", "client_id", "unknown", "invalid_grant", 20026},
 		{"wrong secret", authorizationCode, "value", "client_secret", "wrong", "invalid_client", 20002},
 		{"unsupported grant", "client_credentials", "", "", "", "unsupported_grant_type", 20036},
 		{"unknown code", authorizationCode, "unknown", "", "", "invalid_grant", 20003},
@@ -141,6 +148,7 @@ func TestOAuthV2ErrorsAndRotation(t *testing.T) {
 				fields[tc.key] = tc.value
 			}
 			expectOAuthError(t, f.v2(t, fields), tc.code, tc.kind)
+			f.assertAudit(t, oauthPath, http.StatusBadRequest, tc.code)
 		})
 	}
 	for _, tc := range []struct{ path, mediaType, body string }{
@@ -149,14 +157,35 @@ func TestOAuthV2ErrorsAndRotation(t *testing.T) {
 		{oauthPath, "application/x-www-form-urlencoded", "grant_type=authorization_code&grant_type=refresh_token"},
 		{oauthPath, "application/x-www-form-urlencoded", "code=%"},
 	} {
-		expectOAuthError(t, f.call(http.MethodPost, tc.path, "", tc.mediaType, tc.body), 20063, "invalid_request")
+		wire := expectOAuthError(t, f.call(http.MethodPost, tc.path, "", tc.mediaType, tc.body), 20001, "invalid_request")
+		if wire.ErrorDescription != "The request is malformed. Please check your request." {
+			t.Fatalf("unexpected parse error: %q", wire.ErrorDescription)
+		}
+		f.assertAudit(t, oauthPath, http.StatusBadRequest, 20001)
 	}
 	query := url.Values{"client_id": {f.app.AppID}, "client_secret": {f.app.AppSecret}}
 	expectOAuthError(t, f.call(http.MethodPost, oauthPath+"?"+query.Encode(), "", "application/x-www-form-urlencoded",
-		"grant_type=refresh_token&refresh_token=test"), 20001, "invalid_request")
+		"grant_type=refresh_token&refresh_token=test"), 20063, "invalid_request")
+
+	for _, field := range []string{"grant_type", "client_id", "client_secret", "code", "refresh_token"} {
+		grant := authorizationCode
+		if field == "refresh_token" {
+			grant = refreshGrant
+		}
+		fields := oauthFields(f.app, grant, "value")
+		delete(fields, field)
+		wire := expectOAuthError(t, f.v2(t, fields), 20063, "invalid_request")
+		if want := "Missing required parameter: " + field + "."; wire.ErrorDescription != want {
+			t.Fatalf("error description = %q, want %q", wire.ErrorDescription, want)
+		}
+		f.assertAudit(t, oauthPath, http.StatusBadRequest, 20063)
+	}
 
 	const scope = "offline_access scope1 scope2"
 	code := f.authorize(t, authorizePath, url.Values{"scope": {scope}}).Query().Get("code")
+	missingApp := f.app
+	missingApp.AppID = "unknown"
+	expectOAuthError(t, f.v2(t, oauthFields(missingApp, authorizationCode, code)), 20048, "invalid_client")
 	expectOAuthError(t, f.v2(t, oauthFields(f.foreign, authorizationCode, code)), 20024, "invalid_grant")
 	fields := oauthFields(f.app, authorizationCode, code)
 	fields["redirect_uri"] = "https://example.test/other"
@@ -169,20 +198,19 @@ func TestOAuthV2ErrorsAndRotation(t *testing.T) {
 	expectOAuthError(t, f.v2(t, fields), 20067, "invalid_scope")
 	fields["scope"] = "ungranted"
 	expectOAuthError(t, f.v2(t, fields), 20068, "invalid_scope")
-	fields["scope"] = "scope2"
+	fields["scope"] = "offline_access scope2"
 	first := v2Tokens(t, f, f.v2(t, fields))
 	expectOAuthError(t, f.v2(t, fields), 20065, "invalid_grant")
-	if first.Scope != "scope2" {
+	if first.Scope != "offline_access scope2" {
 		t.Fatalf("scope = %q, want restricted scope", first.Scope)
 	}
 
+	expectOAuthError(t, f.v2(t, oauthFields(missingApp, refreshGrant, first.RefreshToken)), 20048, "invalid_client")
+	expectOAuthError(t, f.v2(t, oauthFields(missingApp, authorizationCode, first.RefreshToken)), 20003, "invalid_grant")
+	expectOAuthError(t, f.v2(t, oauthFields(missingApp, refreshGrant, code)), 20026, "invalid_grant")
 	expectOAuthError(t, f.v2(t, oauthFields(f.foreign, refreshGrant, first.RefreshToken)), 20024, "invalid_grant")
 	refresh := oauthFields(f.app, refreshGrant, first.RefreshToken)
-	form := make(url.Values)
-	for name, value := range refresh {
-		form.Set(name, value)
-	}
-	rotated := v2Tokens(t, f, f.call(http.MethodPost, oauthPath, "", "application/x-www-form-urlencoded; charset=utf-8", form.Encode()))
+	rotated := v2Tokens(t, f, f.v2Form(refresh))
 	expectOAuthError(t, f.v2(t, refresh), 20073, "invalid_grant")
 	if rotated.Scope != scope || rotated.AccessToken == first.AccessToken || rotated.RefreshToken == first.RefreshToken {
 		t.Fatal("OAuth v2 refresh lost the original grant or reused credentials")
@@ -207,7 +235,7 @@ func TestPKCE(t *testing.T) {
 			f := newFixture()
 			appToken := f.internal(t, appPath, f.app).App
 			code := f.authorize(t, authorizePath, url.Values{
-				"code_challenge": {tc.challenge}, "code_challenge_method": {tc.method},
+				"code_challenge": {tc.challenge}, "code_challenge_method": {tc.method}, "scope": {"offline_access"},
 			}).Query().Get("code")
 
 			body := jsonFields(t, map[string]string{"grant_type": "authorization_code", "code": code})
@@ -225,7 +253,7 @@ func TestPKCE(t *testing.T) {
 func TestConcurrentGrantExchange(t *testing.T) {
 	f := newFixture()
 	appToken := f.internal(t, appPath, f.app).App
-	code := f.authorize(t, authorizePath, nil).Query().Get("code")
+	code := f.authorize(t, authorizePath, url.Values{"scope": {"offline_access"}}).Query().Get("code")
 	v1 := jsonFields(t, map[string]string{"grant_type": authorizationCode, "code": code})
 	v2 := jsonFields(t, oauthFields(f.app, authorizationCode, code))
 	winner := raceExchange(t, func(i int) *httptest.ResponseRecorder {
@@ -292,4 +320,108 @@ func raceExchange(t *testing.T, call func(int) *httptest.ResponseRecorder, v1Fai
 		t.Fatal("no worker exchanged the OAuth grant")
 	}
 	return winner
+}
+
+func TestUnchallengedCodeRejectsSuppliedVerifier(t *testing.T) {
+	for _, format := range []string{"json", "form"} {
+		t.Run(format, func(t *testing.T) {
+			f := newFixture()
+			code := f.authorize(t, authorizePath, url.Values{"scope": {"offline_access"}}).Query().Get("code")
+			fields := oauthFields(f.app, authorizationCode, code)
+			exchange := func() *httptest.ResponseRecorder {
+				if format == "form" {
+					return f.v2Form(fields)
+				}
+				return f.v2(t, fields)
+			}
+			for _, verifier := range []string{strings.Repeat("v", 43), ""} {
+				fields["code_verifier"] = verifier
+				expectOAuthError(t, exchange(), 20049, "invalid_grant")
+				grant, err := f.state.CheckToken(code)
+				if err != nil || grant.Consumed || grant.Revoked {
+					t.Fatal("rejected PKCE request spent the grant")
+				}
+			}
+			delete(fields, "code_verifier")
+			v2Tokens(t, f, exchange())
+		})
+	}
+}
+
+func TestOAuthV2OfflineAccess(t *testing.T) {
+	f := newFixture()
+	for _, tc := range []struct{ granted, requested, effective string }{
+		{"profile", "", "profile"},
+		{"profile offline_access_extra", "", "profile offline_access_extra"},
+		{"profile\toffline_access", "", "profile\toffline_access"},
+		{"profile offline_access", "profile", "profile"},
+	} {
+		code := f.authorize(t, authorizePath, url.Values{"scope": {tc.granted}}).Query().Get("code")
+		fields := oauthFields(f.app, authorizationCode, code)
+		fields["scope"] = tc.requested
+		assertAccessOnly(t, f, f.v2(t, fields), tc.effective)
+	}
+
+	code := f.authorize(t, authorizePath, url.Values{"scope": {"profile offline_access"}}).Query().Get("code")
+	first := v2Tokens(t, f, f.v2(t, oauthFields(f.app, authorizationCode, code)))
+	refresh := oauthFields(f.app, refreshGrant, first.RefreshToken)
+	rotated := v2Tokens(t, f, f.v2(t, refresh))
+	if rotated.RefreshToken == first.RefreshToken {
+		t.Fatal("refresh with offline_access did not rotate the refresh token")
+	}
+	refresh = oauthFields(f.app, refreshGrant, rotated.RefreshToken)
+	refresh["scope"] = "profile"
+	assertAccessOnly(t, f, f.v2(t, refresh), "profile")
+	expectOAuthError(t, f.v2(t, refresh), 20073, "invalid_grant")
+
+	// A v1 refresh token without offline_access can yield a v2 access token.
+	appToken := f.internal(t, appPath, f.app).App
+	code = f.authorize(t, authorizePath, url.Values{"scope": {"profile"}}).Query().Get("code")
+	body := jsonFields(t, map[string]string{"grant_type": authorizationCode, "code": code})
+	legacy := v1Tokens(t, f, oidcPath, appToken, body)
+	assertAccessOnly(t, f, f.v2(t, oauthFields(f.app, refreshGrant, legacy.RefreshToken)), "profile")
+	if _, err := f.state.CheckToken(""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("access-only exchange stored an empty refresh credential: %v", err)
+	}
+}
+
+func assertAccessOnly(t *testing.T, f fixture, w *httptest.ResponseRecorder, scope string) {
+	t.Helper()
+	readResponse(t, w, http.StatusOK, 0)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["refresh_token"] != nil || fields["refresh_token_expires_in"] != nil {
+		t.Fatal("OAuth v2 response included refresh fields without offline_access")
+	}
+	var result oauthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Scope != scope || result.TokenType != "Bearer" || result.ExpiresIn != f.cfg.TokenTTLs.User {
+		t.Fatal("unexpected access-only token result")
+	}
+	assertStored(t, f, result.AccessToken, "u-", store.UserToken, f.cfg.TokenTTLs.User)
+}
+
+func TestOAuthV2RevokedAndConsumedRefreshTokens(t *testing.T) {
+	f := newFixture()
+	code := f.authorize(t, authorizePath, url.Values{"scope": {"offline_access"}}).Query().Get("code")
+	initial := v2Tokens(t, f, f.v2(t, oauthFields(f.app, authorizationCode, code)))
+	first := oauthFields(f.app, refreshGrant, initial.RefreshToken)
+	rotated := v2Tokens(t, f, f.v2(t, first))
+	if !f.state.RevokeToken(rotated.RefreshToken) {
+		t.Fatal("missing refresh token to revoke")
+	}
+	expectOAuthError(t, f.v2(t, first), 20073, "invalid_grant")
+	expectOAuthError(t, f.v2(t, oauthFields(f.app, refreshGrant, rotated.RefreshToken)), 20064, "invalid_grant")
+	consumed, err := f.state.CheckToken(initial.RefreshToken)
+	if !errors.Is(err, store.ErrTokenConsumed) || !consumed.Consumed || consumed.Revoked {
+		t.Fatal("successful exchange did not preserve a distinct consumed state")
+	}
+	revoked, err := f.state.CheckToken(rotated.RefreshToken)
+	if !errors.Is(err, store.ErrTokenRevoked) || !revoked.Revoked || revoked.Consumed {
+		t.Fatal("explicit revocation did not preserve a distinct revoked state")
+	}
 }

@@ -24,7 +24,8 @@ const (
 	oauthAppNotFound      oauthCode = 20048
 	oauthPKCE             oauthCode = 20049
 	oauthServerError      oauthCode = 20050
-	oauthMalformed        oauthCode = 20063
+	oauthMissingField     oauthCode = 20063
+	oauthRevokedRefresh   oauthCode = 20064
 	oauthUsedCode         oauthCode = 20065
 	oauthDuplicateScope   oauthCode = 20067
 	oauthInvalidScope     oauthCode = 20068
@@ -52,7 +53,8 @@ var oauthErrors = map[oauthCode]errorInfo{
 	oauthAppNotFound:                     {"invalid_client", "The specified app does not exist."},
 	oauthPKCE:                            {"invalid_grant", "PKCE code challenge failed."},
 	oauthServerError:                     {"server_error", "The server could not complete the request."},
-	oauthMalformed:                       {"invalid_request", "The request is malformed."},
+	oauthMissingField:                    {"invalid_request", "The request is missing a required parameter."},
+	oauthRevokedRefresh:                  {"invalid_grant", "The refresh token has been revoked."},
 	oauthUsedCode:                        {"invalid_grant", "The authorization code has already been used."},
 	oauthDuplicateScope:                  {"invalid_scope", "The requested scopes contain duplicates."},
 	oauthInvalidScope:                    {"invalid_scope", "The requested scopes exceed the authorized scopes."},
@@ -71,6 +73,14 @@ func writeLegacyError(w http.ResponseWriter, code oauthCode) {
 }
 
 func writeOAuthError(w http.ResponseWriter, code oauthCode) {
+	writeOAuthErrorDescription(w, code, code.Error())
+}
+
+func writeMissingOAuthField(w http.ResponseWriter, field string) {
+	writeOAuthErrorDescription(w, oauthMissingField, "Missing required parameter: "+field+".")
+}
+
+func writeOAuthErrorDescription(w http.ResponseWriter, code oauthCode, description string) {
 	status := http.StatusBadRequest
 	if code == oauthServerError {
 		status = http.StatusInternalServerError
@@ -80,7 +90,7 @@ func writeOAuthError(w http.ResponseWriter, code oauthCode) {
 		Code             protocol.Code `json:"code"`
 		Error            string        `json:"error"`
 		ErrorDescription string        `json:"error_description"`
-	}{protocol.Code(code), info.kind, info.description}
+	}{protocol.Code(code), info.kind, description}
 	_ = protocol.WriteResult(w, status, body.Code, body)
 }
 
@@ -106,6 +116,14 @@ func exchangeCode(err error, refresh, v2 bool) oauthCode {
 		}
 		return oauthCode(protocol.ExpiredOAuthCode)
 	case errors.Is(err, store.ErrTokenRevoked):
+		if v2 && refresh {
+			return oauthRevokedRefresh
+		}
+		if refresh {
+			return oauthRefreshNotFound
+		}
+		return oauthCode(protocol.InvalidOAuthCode)
+	case errors.Is(err, store.ErrTokenConsumed):
 		if v2 {
 			if refresh {
 				return oauthUsedRefresh

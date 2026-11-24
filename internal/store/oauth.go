@@ -35,7 +35,8 @@ func (s *Store) OAuthUser(openID, userID string) (User, bool) {
 
 // ExchangeOAuthGrant atomically replaces a valid authorization code or refresh
 // token with new credentials. The callback validates request-specific bindings
-// and builds the replacements without calling back into the store.
+// and builds the replacements without calling back into the store. The second
+// replacement may be empty if the grant does not allow a refresh token.
 func (s *Store) ExchangeOAuthGrant(value, appID string, kind TokenKind, issue func(Token, time.Time) ([2]Token, error)) ([2]Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -58,14 +59,18 @@ func (s *Store) ExchangeOAuthGrant(value, appID string, kind TokenKind, issue fu
 	if err != nil {
 		return [2]Token{}, err
 	}
-	for _, token := range tokens {
+	replacements := tokens[:]
+	if tokens[1].Value == "" {
+		replacements = tokens[:1]
+	}
+	for _, token := range replacements {
 		if _, exists := s.tokens[token.Value]; exists {
 			return [2]Token{}, ErrAlreadyExists
 		}
 	}
-	grant.Revoked = true
+	grant.Consumed = true
 	s.tokens[value] = grant
-	for _, token := range tokens {
+	for _, token := range replacements {
 		s.tokens[token.Value] = token
 	}
 	return tokens, nil

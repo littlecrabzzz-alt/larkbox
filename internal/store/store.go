@@ -22,6 +22,8 @@ var (
 	ErrStaleSequence = errors.New("card sequence must increase")
 	// ErrTokenRevoked indicates the credential is no longer usable.
 	ErrTokenRevoked = errors.New("token revoked")
+	// ErrTokenConsumed indicates the OAuth credential was already exchanged.
+	ErrTokenConsumed = errors.New("token consumed")
 	// ErrTokenExpired indicates the credential reached its expiry time.
 	ErrTokenExpired = errors.New("token expired")
 	// ErrTokenOwner indicates a token has a missing or unknown owner.
@@ -112,7 +114,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 		traceCapacity = defaultTraceCapacity
 	}
 	s := &Store{now: now, tokens: make(map[string]Token), traces: make([]Trace, 0, traceCapacity)}
-	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, nil)
+	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, cloneApp)
 	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, nil)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
@@ -169,7 +171,7 @@ func (s *Store) DeleteToken(value string) bool {
 }
 
 // CheckToken returns a credential if its owners exist and it is currently valid.
-// For an expired or revoked credential, it also returns stored metadata.
+// For an expired, revoked, or consumed credential, it also returns stored metadata.
 // If an owner is missing, it returns only the stored kind with ErrTokenOwner.
 func (s *Store) CheckToken(value string) (Token, error) {
 	return s.CheckTokenBinding(value, "", "")
@@ -196,6 +198,8 @@ func (s *Store) checkTokenBinding(value, appID, userOpenID string, now time.Time
 		return Token{}, ErrTokenBinding
 	case token.Revoked:
 		return token, ErrTokenRevoked
+	case token.Consumed:
+		return token, ErrTokenConsumed
 	case !now.Before(token.ExpiresAt):
 		return token, ErrTokenExpired
 	default:
@@ -290,7 +294,10 @@ func (s *Store) DeleteCard(id string) bool { return s.cards.Delete(id) }
 func (s *Store) Seed(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seed.Apps = slices.Clone(cfg.Apps)
+	s.seed.Apps = make([]App, len(cfg.Apps))
+	for i, app := range cfg.Apps {
+		s.seed.Apps[i] = cloneApp(app)
+	}
 	s.seed.Users = slices.Clone(cfg.Users)
 	s.seed.Chats = make([]Chat, len(cfg.Chats))
 	for i, chat := range cfg.Chats {
@@ -318,7 +325,7 @@ func (s *Store) reset() {
 	s.traces = s.traces[:0]
 	s.tracePos = 0
 	for _, app := range s.seed.Apps {
-		s.apps.items[app.AppID] = app
+		s.apps.items[app.AppID] = cloneApp(app)
 	}
 	for _, user := range s.seed.Users {
 		s.users.items[user.OpenID] = user
@@ -374,6 +381,11 @@ func (s *Store) QueryTraces(filter TraceFilter) []Trace {
 	}
 	slices.Reverse(result)
 	return result
+}
+
+func cloneApp(app App) App {
+	app.RedirectURIs = slices.Clone(app.RedirectURIs)
+	return app
 }
 
 func cloneChat(chat Chat) Chat {

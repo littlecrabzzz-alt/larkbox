@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -27,7 +29,7 @@ const (
 )
 
 type fixture struct {
-	mux          *http.ServeMux
+	mux          http.Handler
 	state        *store.Store
 	cfg          config.Config
 	now          *time.Time
@@ -46,8 +48,11 @@ func newFixture() fixture {
 	cfg.Users[0].EnterpriseEmail = "bob@enterprise.example"
 	cfg.Users[0].Mobile = "+1234567890"
 	cfg.Users[0].TenantKey = "tenant-local"
+	cfg.Users[0].EmployeeNo = "EMP-002"
+	cfg.Apps[0].RedirectURIs = []string{redirectURI}
 	foreign := cfg.Apps[0]
 	foreign.AppID += "_foreign"
+	foreign.RedirectURIs = []string{"https://foreign.example.test/callback"}
 	cfg.Apps = append(cfg.Apps, foreign)
 	cfg.TokenTTLs = config.TokenTTLs{Tenant: 9, App: 11, User: 13, Refresh: 17, Code: 5}
 	now := time.Unix(1000, 0)
@@ -55,7 +60,7 @@ func newFixture() fixture {
 	state.Seed(cfg)
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, cfg, state)
-	return fixture{mux, state, cfg, &now, cfg.Apps[0], foreign}
+	return fixture{middleware.Audit(state, mux), state, cfg, &now, cfg.Apps[0], foreign}
 }
 
 func (f fixture) call(method, path, bearer, mediaType, body string) *httptest.ResponseRecorder {
@@ -131,28 +136,42 @@ func TestInternalTokens(t *testing.T) {
 			assertStored(t, f, success.Tenant, "t-", store.TenantToken, f.cfg.TokenTTLs.Tenant)
 
 			for _, tc := range []struct {
-				name, body string
-				code       int
+				name, body, msg string
+				status, code    int
 			}{
-				{"invalid syntax", `{"app_id":`, 10003},
-				{"invalid type", `{"app_id":1,"app_secret":"value"}`, 10003},
-				{"missing app", `{"app_secret":"value"}`, 10003},
-				{"missing secret", `{"app_id":"cli_larkbox"}`, 10003},
-				{"null secret", `{"app_id":"cli_larkbox","app_secret":null}`, 10003},
-				{"extra field", `{"app_id":"cli_larkbox","app_secret":"value","extra":1}`, 10003},
-				{"duplicate key", `{"app_id":"first","app_id":"cli_larkbox","app_secret":"value"}`, 10003},
-				{"trailing value", `{"app_id":"cli_larkbox","app_secret":"value"} {}`, 10003},
-				{"unknown app", `{"app_id":"unknown","app_secret":"value"}`, 10014},
-				{"wrong secret", `{"app_id":"cli_larkbox","app_secret":"value"}`, 10015},
+				{"invalid syntax", `{"app_id":`, "bad request or invalid param", 400, 9499},
+				{"invalid type", `{"app_id":1,"app_secret":"value"}`, "invalid param", 200, 10003},
+				{"missing app", `{"app_secret":"value"}`, "invalid param", 200, 10003},
+				{"missing secret", `{"app_id":"cli_larkbox"}`, "invalid param", 200, 10003},
+				{"null secret", `{"app_id":"cli_larkbox","app_secret":null}`, "invalid param", 200, 10003},
+				{"extra field", `{"app_id":"cli_larkbox","app_secret":"value","extra":1}`, "invalid param", 200, 10003},
+				{"duplicate key", `{"app_id":"first","app_id":"cli_larkbox","app_secret":"value"}`, "invalid param", 200, 10003},
+				{"trailing value", `{"app_id":"cli_larkbox","app_secret":"value"} {}`, "bad request or invalid param", 400, 9499},
+				{"unknown app", `{"app_id":"unknown","app_secret":"value"}`, "app id not exists", 200, 10014},
+				{"wrong secret", `{"app_id":"cli_larkbox","app_secret":"value"}`, "wrong app secret", 200, 10015},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					response := readResponse(t, f.post(path, "", tc.body), http.StatusOK, tc.code)
-					if response.Msg == "" || response.Tenant != "" || response.App != "" {
-						t.Fatal("internal token error response included credentials or omitted msg")
+					w := f.post(path, "", tc.body)
+					readResponse(t, w, tc.status, tc.code)
+					want := fmt.Sprintf(`{"code":%d,"msg":%q}`, tc.code, tc.msg)
+					if tc.code == 10003 {
+						want = fmt.Sprintf(`{"code":%d,"msg":%q,"data":{}}`, tc.code, tc.msg)
 					}
+					if w.Body.String() != want {
+						t.Fatalf("response = %s, want %s", w.Body, want)
+					}
+					f.assertAudit(t, path, tc.status, tc.code)
 				})
 			}
 		})
+	}
+}
+
+func (f fixture) assertAudit(t *testing.T, path string, status, code int) {
+	t.Helper()
+	traces := f.state.QueryTraces(store.TraceFilter{PathPrefix: path, Limit: 1})
+	if len(traces) != 1 || traces[0].Status != status || traces[0].Code == nil || *traces[0].Code != code {
+		t.Fatalf("audit did not capture HTTP %d with code %d on %s", status, code, path)
 	}
 }
 
@@ -273,7 +292,7 @@ func TestUserInfoAndBearerKind(t *testing.T) {
 		"avatar_thumb": "https://example.test/avatar/72", "avatar_middle": "https://example.test/avatar/240",
 		"avatar_big": "https://example.test/avatar/640", "open_id": "ou_larkbox_bob", "union_id": "on_larkbox_bob",
 		"email": "bob@example.test", "enterprise_email": "bob@enterprise.example", "user_id": "bob",
-		"mobile": "+1234567890", "tenant_key": "tenant-local",
+		"mobile": "+1234567890", "tenant_key": "tenant-local", "employee_no": "EMP-002",
 	}
 	if profile.Msg != "success" || !reflect.DeepEqual(fields, want) {
 		t.Fatalf("profile = %+v, want %+v", fields, want)
@@ -282,5 +301,37 @@ func TestUserInfoAndBearerKind(t *testing.T) {
 	response := readResponse(t, f.call(http.MethodGet, userPath, token.AccessToken, "", ""), http.StatusBadRequest, 99991668)
 	if response.Msg != "token invalid" {
 		t.Fatalf("expired user token msg = %q", response.Msg)
+	}
+}
+
+func TestAuthorizeRequiresRegisteredCallback(t *testing.T) {
+	f := newFixture()
+	invalid := []string{
+		redirectURI + "#", redirectURI + "#fragment",
+		"http://localhost:99999/callback", "http://localhost:0/callback",
+		"http://localhost:abc/callback", "http://localhost:/callback",
+		"http://[example.test]/callback", "http://user@localhost/callback",
+	}
+	// Exercise runtime validation even if a callback enters the store
+	// without going through config loading.
+	app := f.app
+	app.RedirectURIs = append([]string{redirectURI}, invalid...)
+	f.state.Apps().Put(app)
+	for _, path := range []string{authorizePath, indexPath} {
+		t.Run(path, func(t *testing.T) {
+			f.authorize(t, path, nil)
+			for _, callback := range append([]string{
+				f.foreign.RedirectURIs[0],
+				"http://unregistered.example.test/callback",
+				"http://127.0.0.1:8081/callback?keep=one",
+			}, invalid...) {
+				query := url.Values{"app_id": {f.app.AppID}, "redirect_uri": {callback}}
+				w := f.call(http.MethodGet, path+"?"+query.Encode(), "", "", "")
+				readResponse(t, w, http.StatusOK, 20029)
+				if w.Header().Get("Location") != "" {
+					t.Fatalf("unauthorized callback got a redirect: %s", callback)
+				}
+			}
+		})
 	}
 }

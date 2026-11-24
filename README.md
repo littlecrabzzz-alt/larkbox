@@ -56,7 +56,9 @@ Configuration precedence is built-in defaults, then the YAML or JSON file passed
 - `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
 - `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS` (JSON arrays)
 
-For local OAuth, use `app_id` (or `client_id`) and an HTTP(S) `redirect_uri` on the authorization URL. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user. Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use.
+For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exactly matches one of the app's configured `redirect_uris`. The demo app registers `http://127.0.0.1:8080/callback` and `http://localhost:8080/callback`. Callbacks must use HTTP or HTTPS and have no fragment. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user.
+
+Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
 ## Non-Goals
 

@@ -38,6 +38,7 @@ type Token struct {
 	UserOpenID          string
 	ExpiresAt           time.Time
 	Revoked             bool
+	Consumed            bool
 	Scope               string
 	RedirectURI         string
 	CodeChallenge       string
