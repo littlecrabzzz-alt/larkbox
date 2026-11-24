@@ -141,12 +141,21 @@ func (s *Store) Now() time.Time { return s.now() }
 
 // PutToken creates or replaces a credential whose referenced owners exist.
 func (s *Store) PutToken(token Token) error {
+	return s.PutTokens(token)
+}
+
+// PutTokens installs credentials together after validating every owner.
+func (s *Store) PutTokens(tokens ...Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.tokenOwnersExist(token) {
-		return ErrTokenOwner
+	for _, token := range tokens {
+		if !s.tokenOwnersExist(token) {
+			return ErrTokenOwner
+		}
 	}
-	s.tokens[token.Value] = token
+	for _, token := range tokens {
+		s.tokens[token.Value] = token
+	}
 	return nil
 }
 
@@ -172,6 +181,11 @@ func (s *Store) CheckToken(value string) (Token, error) {
 func (s *Store) CheckTokenBinding(value, appID, userOpenID string) (Token, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.checkTokenBinding(value, appID, userOpenID, s.Now())
+}
+
+// checkTokenBinding requires the store lock.
+func (s *Store) checkTokenBinding(value, appID, userOpenID string, now time.Time) (Token, error) {
 	token, ok := s.tokens[value]
 	switch {
 	case !ok:
@@ -182,7 +196,7 @@ func (s *Store) CheckTokenBinding(value, appID, userOpenID string) (Token, error
 		return Token{}, ErrTokenBinding
 	case token.Revoked:
 		return token, ErrTokenRevoked
-	case !s.Now().Before(token.ExpiresAt):
+	case !now.Before(token.ExpiresAt):
 		return token, ErrTokenExpired
 	default:
 		return token, nil

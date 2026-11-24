@@ -67,6 +67,13 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 	})
 }
 
+// SetTraceApp records the app identified by an Open API handler.
+func SetTraceApp(r *http.Request, appID string) {
+	if traceAppID, ok := r.Context().Value(traceAppKey{}).(*string); ok {
+		*traceAppID = appID
+	}
+}
+
 type bodyCapture struct {
 	body      bytes.Buffer
 	truncated bool
@@ -222,7 +229,7 @@ func credentialField(name string, value any) bool {
 	switch strings.ToLower(name) {
 	case "authorization", "app_secret", "client_secret", "encrypt_key", "password", "token",
 		"access_token", "app_access_token", "tenant_access_token", "user_access_token", "refresh_token",
-		"verification_token", "app_ticket":
+		"verification_token", "app_ticket", "code_verifier":
 		return true
 	case "code":
 		_, isString := value.(string)

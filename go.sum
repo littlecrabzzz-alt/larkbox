@@ -1,3 +1,5 @@
+github.com/larksuite/oapi-sdk-go/v3 v3.13.0 h1:v+x3V8a16HVXdcUEwj9LVwe+ku/K9WUy7Cp4WjQCVHo=
+github.com/larksuite/oapi-sdk-go/v3 v3.13.0/go.mod h1:F1nwLfYBSKvD8mS/OFw90Gr+V4RIugPBR44m/ThA5jg=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=

@@ -311,3 +311,67 @@ func TestShutdownDrainsRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAuthenticationAuditAndFaultHook(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	const tenantPath = "/open-apis/auth/v3/tenant_access_token/internal"
+	const oauthPath = "/open-apis/authen/v2/oauth/token"
+	srv := New(cfg, WithFaultHook(authFaultHook{}))
+	for _, tc := range []struct {
+		path         string
+		body         map[string]string
+		fault        bool
+		status, code int
+		tracedApp    string
+	}{
+		{tenantPath, map[string]string{"app_id": app.AppID, "app_secret": app.AppSecret}, false, 200, 0, app.AppID},
+		{oauthPath, map[string]string{
+			"grant_type": "authorization_code", "client_id": app.AppID, "client_secret": app.AppSecret,
+			"code": "authorization-secret", "code_verifier": "verifier-secret",
+		}, false, 400, 20003, app.AppID},
+		{tenantPath, nil, true, 429, 99991400, ""},
+		{oauthPath, nil, true, 429, 99991400, ""},
+	} {
+		body, err := json.Marshal(tc.body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(string(body)))
+		r.Header.Set("Content-Type", "application/json")
+		if tc.fault {
+			r.Header.Set("X-Test-Fault", "true")
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		traces := srv.Store().QueryTraces(store.TraceFilter{Limit: 1})
+		if len(traces) != 1 {
+			t.Fatalf("expected audit trace for %s", tc.path)
+		}
+		trace := traces[0]
+		if w.Code != tc.status || trace.Path != tc.path || trace.Status != tc.status ||
+			trace.Code == nil || *trace.Code != tc.code || trace.AppID != tc.tracedApp {
+			t.Fatalf("unexpected auth route response or trace metadata for %s: HTTP %d, status=%d, code=%v, app=%q",
+				tc.path, w.Code, trace.Status, trace.Code, trace.AppID)
+		}
+		captured := string(trace.RequestBody) + string(trace.ResponseBody)
+		for _, secret := range []string{app.AppSecret, "authorization-secret", "verifier-secret"} {
+			if strings.Contains(captured, secret) {
+				t.Fatal("auth audit contains a credential")
+			}
+		}
+		if tc.code == 0 && !strings.Contains(string(trace.ResponseBody), `"tenant_access_token":"[REDACTED]"`) {
+			t.Fatal("audit did not capture and redact the top-level tenant credential")
+		}
+	}
+}
+
+type authFaultHook struct{}
+
+func (authFaultHook) BeforeRequest(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Test-Fault") != "true" {
+		return false
+	}
+	_ = protocol.WriteError(w, protocol.NewError(protocol.RateLimited, nil))
+	return true
+}

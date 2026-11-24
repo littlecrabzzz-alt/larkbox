@@ -30,12 +30,19 @@ type App struct {
 
 // User describes a virtual Feishu user.
 type User struct {
-	OpenID  string `json:"open_id" yaml:"open_id"`
-	UserID  string `json:"user_id" yaml:"user_id"`
-	UnionID string `json:"union_id" yaml:"union_id"`
-	Name    string `json:"name" yaml:"name"`
-	Email   string `json:"email" yaml:"email"`
-	Avatar  string `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	OpenID          string `json:"open_id" yaml:"open_id"`
+	UserID          string `json:"user_id" yaml:"user_id"`
+	UnionID         string `json:"union_id" yaml:"union_id"`
+	Name            string `json:"name" yaml:"name"`
+	Email           string `json:"email" yaml:"email"`
+	Avatar          string `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	EnName          string `json:"en_name,omitempty" yaml:"en_name,omitempty"`
+	AvatarThumb     string `json:"avatar_thumb,omitempty" yaml:"avatar_thumb,omitempty"`
+	AvatarMiddle    string `json:"avatar_middle,omitempty" yaml:"avatar_middle,omitempty"`
+	AvatarBig       string `json:"avatar_big,omitempty" yaml:"avatar_big,omitempty"`
+	EnterpriseEmail string `json:"enterprise_email,omitempty" yaml:"enterprise_email,omitempty"`
+	Mobile          string `json:"mobile,omitempty" yaml:"mobile,omitempty"`
+	TenantKey       string `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
 }
 
 // Chat describes a virtual p2p or group chat.

@@ -21,7 +21,8 @@ const (
 	TenantToken  IDPrefix = "t-"       // Tenant access token.
 	AppToken     IDPrefix = "a-"       // App access token.
 	UserToken    IDPrefix = "u-"       // User access token.
-	RefreshToken IDPrefix = "r-"       // OAuth refresh token.
+	RefreshToken IDPrefix = "ur-"      // OAuth refresh token.
+	OAuthCode    IDPrefix = ""         // OAuth authorization code.
 	CardID       IDPrefix = "card_"    // Selects a decimal CardKit ID.
 	EventID      IDPrefix = "evt_"     // Event ID.
 	FrameID      IDPrefix = "msg_"     // Message frame ID.

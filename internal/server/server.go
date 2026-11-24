@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/auth"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -60,6 +61,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	state.Seed(cfg)
 
 	feishu := http.NewServeMux()
+	auth.RegisterRoutes(feishu, cfg, state)
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}
@@ -125,9 +127,12 @@ func (w *openAPIFallbackWriter) Write(body []byte) (int, error) {
 // Store returns the server's virtual state.
 func (s *Server) Store() *store.Store { return s.store }
 
+// Handler returns the server routing tree.
+func (s *Server) Handler() http.Handler { return s.http.Handler }
+
 // ServeHTTP dispatches an HTTP request to the server routing tree.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.http.Handler.ServeHTTP(w, r)
+	s.Handler().ServeHTTP(w, r)
 }
 
 // Serve accepts HTTP connections until the listener or server closes.

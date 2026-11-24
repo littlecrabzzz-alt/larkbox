@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pure-Go CLI, YAML/JSON configuration with local seed data, and a health endpoint with graceful shutdown.
 - Feishu response, ID, and webhook crypto helpers, plus an in-memory store with token expiry, CardKit sequencing, and audit traces.
 - Bearer authentication, inbound auditing, and fault-injection middleware hooks.
+- Auth v3 internal app and tenant tokens, user OAuth v1/v2 with PKCE and single-use grants, and authenticated user profiles.
+- Official Feishu Go SDK integration tests for the complete authentication flow.
 - Sample environment for optional live differential testing.
 
 ### Changed

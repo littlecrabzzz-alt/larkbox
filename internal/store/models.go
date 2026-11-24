@@ -32,12 +32,16 @@ const (
 
 // Token stores a credential, its ownership, and its validity window.
 type Token struct {
-	Value      string
-	Kind       TokenKind
-	AppID      string
-	UserOpenID string
-	ExpiresAt  time.Time
-	Revoked    bool
+	Value               string
+	Kind                TokenKind
+	AppID               string
+	UserOpenID          string
+	ExpiresAt           time.Time
+	Revoked             bool
+	Scope               string
+	RedirectURI         string
+	CodeChallenge       string
+	CodeChallengeMethod string
 }
 
 // Mention describes a user or bot referenced by a message.
