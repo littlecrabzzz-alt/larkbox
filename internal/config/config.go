@@ -19,6 +19,7 @@ import (
 
 // App describes a virtual Feishu application and its bot.
 type App struct {
+	TenantKey         string   `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
 	AppID             string   `json:"app_id" yaml:"app_id"`
 	AppSecret         string   `json:"app_secret" yaml:"app_secret"`
 	BotOpenID         string   `json:"bot_open_id" yaml:"bot_open_id"`

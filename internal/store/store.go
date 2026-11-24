@@ -13,6 +13,9 @@ import (
 
 const defaultTraceCapacity = 256
 
+// TraceBodyLimit caps each request and response body stored in the audit ring.
+const TraceBodyLimit = 64 * 1024
+
 var (
 	// ErrNotFound indicates the requested entity does not exist.
 	ErrNotFound = errors.New("entity not found")
@@ -367,6 +370,15 @@ func (s *Store) reset() {
 func (s *Store) AppendTrace(trace Trace) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(trace.RequestBody) > TraceBodyLimit {
+		trace.RequestBody = trace.RequestBody[:TraceBodyLimit]
+		trace.RequestBodyTruncated = true
+	}
+	if len(trace.ResponseBody) > TraceBodyLimit {
+		trace.ResponseBody = trace.ResponseBody[:TraceBodyLimit]
+		trace.ResponseBodyTruncated = true
+	}
+	trace.Error = trace.Error[:min(len(trace.Error), TraceBodyLimit)]
 	trace = cloneTrace(trace)
 	if len(s.traces) < cap(s.traces) {
 		s.traces = append(s.traces, trace)

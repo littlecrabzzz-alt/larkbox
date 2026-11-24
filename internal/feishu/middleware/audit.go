@@ -18,7 +18,7 @@ import (
 
 // auditBodyLimit caps memory used to record each HTTP body.
 const (
-	auditBodyLimit        = 64 * 1024
+	auditBodyLimit        = store.TraceBodyLimit
 	auditHeaderValueLimit = 1024
 	auditHeaderLimit      = 8 * 1024
 )

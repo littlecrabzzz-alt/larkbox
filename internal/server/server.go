@@ -3,11 +3,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/auth"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/bot"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
@@ -21,8 +23,9 @@ const Version = "0.1.0-dev"
 
 // Server is both an HTTP handler and a gracefully stoppable HTTP server.
 type Server struct {
-	http  *http.Server
-	store *store.Store
+	http   *http.Server
+	store  *store.Store
+	events *event.Dispatcher
 }
 
 // RegisterRoutes attaches handlers to one route group. Patterns include the
@@ -33,10 +36,11 @@ type RegisterRoutes func(*http.ServeMux, config.Config, *store.Store)
 type Option func(*options)
 
 type options struct {
-	feishu  []RegisterRoutes
-	sandbox []RegisterRoutes
-	fault   middleware.FaultHook
-	emitter im.EventEmitter
+	feishu       []RegisterRoutes
+	sandbox      []RegisterRoutes
+	fault        middleware.FaultHook
+	emitter      im.EventEmitter
+	eventOptions event.Options
 }
 
 // WithFeishuRoutes registers routes under /open-apis/.
@@ -59,6 +63,28 @@ func WithEventEmitter(emitter im.EventEmitter) Option {
 	return func(opts *options) { opts.emitter = emitter }
 }
 
+// WithEventOptions configures the built-in event dispatcher.
+func WithEventOptions(opts event.Options) Option {
+	return func(settings *options) { settings.eventOptions = opts }
+}
+
+type eventEmitter struct {
+	dispatcher *event.Dispatcher
+	next       im.EventEmitter
+}
+
+func (e eventEmitter) Emit(ctx context.Context, notification im.Event) {
+	switch notification.Type {
+	case "im.message.recalled_v1":
+		e.dispatcher.EnqueueMessageRecalled(notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
+	case "im.chat.member.bot.added_v1", "im.chat.member.bot.deleted_v1":
+		e.dispatcher.EnqueueBotMembership(notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
+	}
+	if e.next != nil {
+		e.next.Emit(ctx, notification)
+	}
+}
+
 // New creates and seeds a server and registers the configured routes.
 func New(cfg config.Config, opts ...Option) *Server {
 	settings := options{}
@@ -67,11 +93,12 @@ func New(cfg config.Config, opts ...Option) *Server {
 	}
 	state := store.New(nil, 0)
 	state.Seed(cfg)
+	events := event.New(state, settings.eventOptions)
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
 	bot.RegisterRoutes(feishu, state)
-	im.RegisterRoutes(feishu, state, settings.emitter)
+	im.RegisterRoutes(feishu, state, eventEmitter{dispatcher: events, next: settings.emitter})
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}
@@ -81,6 +108,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	}
 
 	mux := http.NewServeMux()
+	events.RegisterRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_ = protocol.WriteJSON(w, http.StatusOK, struct {
 			Status     string `json:"status"`
@@ -96,7 +124,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 			Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		},
-		store: state,
+		store: state, events: events,
 	}
 }
 
@@ -137,6 +165,9 @@ func (w *openAPIFallbackWriter) Write(body []byte) (int, error) {
 // Store returns the server's virtual state.
 func (s *Server) Store() *store.Store { return s.store }
 
+// Events returns the built-in event dispatcher.
+func (s *Server) Events() *event.Dispatcher { return s.events }
+
 // Handler returns the server routing tree.
 func (s *Server) Handler() http.Handler { return s.http.Handler }
 
@@ -149,4 +180,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Serve(listener net.Listener) error { return s.http.Serve(listener) }
 
 // Shutdown stops accepting connections and waits for active requests to finish.
-func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error {
+	httpErr := s.http.Shutdown(ctx)
+	return errors.Join(httpErr, s.events.Shutdown(ctx))
+}

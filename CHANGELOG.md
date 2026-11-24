@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Image and file uploads and binary downloads, including resources referenced by messages.
 - In-process IM event hooks for bot membership changes and message recalls.
 - Official Feishu Go SDK REST tests for Bot, IM, reactions, and media.
+- SDK-compatible WebSocket event delivery with single-use tickets, Protobuf ping/pong, and correlated client acknowledgements.
+- Schema 2.0 webhooks with URL verification, optional encryption and signing, and retries that preserve the event ID.
+- Outbound audit traces for WebSocket and webhook attempts, with official Go SDK coverage for received and recalled messages and bot membership events.
 - Sample environment for optional live differential testing.
 
 ### Changed
