@@ -303,8 +303,8 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	}
 	for _, field := range []string{
 		`"max_length":"123"`, `"max_length":1.0`, `"max_length":5.2`, `"max_length":0`, `"max_length":1001`,
-		`"default_value":2`, `"required":"true"`, `"disabled":1`, `"input_type":true`, `"rows":0`, `"rows":2.0`,
-		`"max_rows":"3"`, `"max_rows":-1`, `"show_icon":"false"`, `"width":20`, `"name":[]`,
+		`"default_value":2`, `"required":"true"`, `"disabled":1`, `"input_type":true`, `"input_type":"number"`, `"rows":0`, `"rows":2.0`,
+		`"max_rows":"3"`, `"max_rows":true`, `"max_rows":{}`, `"max_rows":1e1000`, `"show_icon":"false"`, `"width":20`, `"name":[]`,
 		`"placeholder":"Plain text"`, `"label":{"tag":"plain_text","content":4}`,
 	} {
 		invalidCards = append(invalidCards, nestedInput(field))
@@ -353,9 +353,18 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	}
 
 	validInput := nestedInput(`"max_length":1000,"default_value":"Draft","required":true,"disabled":false,
-		"input_type":"multiline_text","rows":1,"max_rows":5,"auto_resize":true,"show_icon":false,"width":"fill","name":"feedback",
+		"input_type":"multiline_text","rows":1,"max_rows":2.5,"auto_resize":true,"show_icon":false,"width":"fill","name":"feedback",
 		"placeholder":{"content":"Type here"},"label":{"tag":"plain_text","content":"Feedback"}`)
 	inputMessage := sdkSend(t, client, "chat_id", chatID, "interactive", validInput)
-	requireSDKCode(t, patch(value(inputMessage.MessageId), nestedInput(`"max_length":1,"rows":1,"max_rows":1`)).CodeError, 0)
+	inputID := value(inputMessage.MessageId)
+	replacement := nestedInput(`"input_type":"multiline_text","auto_resize":true,"max_length":1,"rows":1,"max_rows":2.5`)
+	requireSDKCode(t, patch(inputID, replacement).CodeError, 0)
+	inputDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(inputID).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, inputDetail.CodeError, 0)
+	if len(inputDetail.Data.Items) != 1 || value(inputDetail.Data.Items[0].Body.Content) != replacement {
+		t.Fatalf("fractional max_rows was not preserved after PATCH: %s", inputDetail.RawBody)
+	}
+	requireSDKCode(t, patch(inputID, nestedInput(`"input_type":"multiline_text","auto_resize":true,"max_rows":-1`)).CodeError, 0)
 	requireSDKCode(t, patch(id, `{"schema":"2.0","body":{"elements":[]}}`).CodeError, 0)
 }

@@ -78,6 +78,25 @@ func optionalCardInts(obj map[string]any, max int64, names ...string) bool {
 	return true
 }
 
+func validCardNumber(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	// The decoder already enforces JSON number syntax. Float64 rejects overflow.
+	_, err := number.Float64()
+	return err == nil
+}
+
+func validCardInputType(value any) bool {
+	switch value {
+	case "text", "multiline_text", "password":
+		return true
+	default:
+		return false
+	}
+}
+
 func optionalCardCheck(obj map[string]any, field string, check func(any) bool) bool {
 	value, present := obj[field]
 	return !present || check(value)
@@ -250,10 +269,12 @@ func validCardComponent(node map[string]any) bool {
 	case "input":
 		return optionalCardCheck(node, "placeholder", validInputText) && optionalCardCheck(node, "label", validInputText) &&
 			optionalCardCheck(node, "text", validCardText) &&
-			optionalCardType[string](node, "name", "width", "margin", "default_value", "input_type", "label_position") &&
+			optionalCardType[string](node, "name", "width", "margin", "default_value", "label_position") &&
+			optionalCardCheck(node, "input_type", validCardInputType) &&
 			optionalCardType[bool](node, "show_icon", "auto_resize") &&
 			optionalCardInts(node, 1000, "max_length") &&
-			optionalCardInts(node, math.MaxInt64, "rows", "max_rows")
+			optionalCardInts(node, math.MaxInt64, "rows") &&
+			optionalCardCheck(node, "max_rows", validCardNumber)
 	case "checker":
 		return validCardPicker(node) && optionalCardCheck(node, "text", validCardText) &&
 			optionalCardType[bool](node, "checked", "overall_checkable")
