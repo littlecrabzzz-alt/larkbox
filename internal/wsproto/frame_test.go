@@ -2,6 +2,7 @@ package wsproto_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"math"
@@ -117,6 +118,36 @@ func TestVarintOverflowBoundaries(t *testing.T) {
 			}
 			if tc.name == "max uint64" && frame.SeqID != math.MaxUint64 {
 				t.Fatalf("decoded %d, want %d", frame.SeqID, uint64(math.MaxUint64))
+			}
+		})
+	}
+}
+
+func TestFieldNumberBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field uint64
+		valid bool
+	}{
+		{"zero", 0, false},
+		{"maximum", 1<<29 - 1, true},
+		{"above maximum", 1 << 29, false},
+		{"aliases field one after int32 conversion", 1<<32 | 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := []byte{0x08, 0, 0x10, 0, 0x18, 0, 0x20, 0}
+			tag := tc.field << 3
+			outer := binary.AppendUvarint(bytes.Clone(base), tag)
+			outer = append(outer, 0)
+			header := binary.AppendUvarint([]byte{0x0a, 0, 0x12, 0}, tag)
+			header = append(header, 0)
+			nested := append(bytes.Clone(base), 0x2a)
+			nested = binary.AppendUvarint(nested, uint64(len(header))) // #nosec G115 -- slice length is nonnegative.
+			nested = append(nested, header...)
+			for _, wire := range [][]byte{outer, nested} {
+				if _, err := wsproto.Decode(wire); (err == nil) != tc.valid {
+					t.Errorf("Decode(%x) returned %v, valid = %t", wire, err, tc.valid)
+				}
 			}
 		})
 	}

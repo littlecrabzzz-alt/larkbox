@@ -718,3 +718,116 @@ func TestShutdownInterruptsWebSocketBackoff(t *testing.T) {
 		t.Fatal("shutdown waited for the backoff or started another attempt")
 	}
 }
+
+func TestFirstSocketWriteFailsOverIfSelectedReplicaDisconnects(t *testing.T) {
+	for _, hasReplica := range []bool{false, true} {
+		t.Run(map[bool]string{false: "last replica", true: "another replica"}[hasReplica], func(t *testing.T) {
+			cfg := config.Default()
+			app := cfg.Apps[0]
+			d := testDispatcher(t, cfg, Options{WebSocketMaxAttempts: 1, AckTimeout: 2 * time.Second}, nil)
+			srv := testGateway(t, d)
+			host := strings.TrimPrefix(srv.URL, "http://")
+			conn := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+			waitForSessions(t, d, app.AppID, 1)
+			d.mu.Lock()
+			selected := d.ws.apps[app.AppID].sessions[0]
+			d.mu.Unlock()
+			var other *websocket.Conn
+			if hasReplica {
+				other = connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+				waitForSessions(t, d, app.AppID, 2)
+			}
+
+			// Hold the selected replica's writer until dispatch has selected
+			// it and is waiting to write its first frame.
+			selected.writer.Lock()
+			release := sync.OnceFunc(selected.writer.Unlock)
+			defer release()
+			type outcome struct {
+				result Result
+				err    error
+			}
+			finished := make(chan outcome, 1)
+			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+			defer cancel()
+			go func() {
+				result, err := d.Dispatch(ctx, app.AppID, "test.disconnect_before_write", struct{}{})
+				finished <- outcome{result, err}
+			}()
+			waitForPendingACK(t, selected)
+			requireNoError(t, conn.Close())
+			select {
+			case <-selected.done:
+			case <-ctx.Done():
+				t.Fatal("selected replica did not disconnect")
+			}
+			release()
+
+			if hasReplica {
+				frame := readDataFrame(t, other)
+				writeAck(t, other, frame, wsproto.Response{StatusCode: http.StatusOK})
+			}
+			got := <-finished
+			if len(got.result.Deliveries) != 1 || got.result.Deliveries[0].Channel != "websocket" {
+				t.Fatalf("expected an explicit websocket outcome, got %+v", got.result)
+			}
+			traces := d.state.Traces()
+			if len(traces) == 0 || traces[0].Attempt != 1 || traces[0].Status != 0 ||
+				traces[0].Error != errDisconnectedBeforeWrite.Error() || traces[0].EventID != got.result.EventID {
+				t.Fatalf("first disconnect was not audited: %+v", traces)
+			}
+			if hasReplica {
+				requireNoError(t, got.err)
+				if got.result.Deliveries[0].Status != http.StatusOK || len(traces) != 2 ||
+					traces[1].Attempt != 2 || traces[1].Status != http.StatusOK || traces[1].EventID != got.result.EventID {
+					t.Fatalf("replacement delivery was not audited: %+v", traces)
+				}
+			} else if !errors.Is(got.err, errDisconnectedBeforeWrite) || len(traces) != 1 ||
+				!errors.Is(got.result.Deliveries[0].Err, errDisconnectedBeforeWrite) {
+				t.Fatalf("last-replica disconnect returned %+v, %v", got.result, got.err)
+			}
+		})
+	}
+}
+
+func waitForPendingACK(t *testing.T, s *session) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		count := len(s.pending)
+		s.mu.Unlock()
+		if count > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("dispatch did not reach the selected replica")
+}
+
+func TestTicketExpirySampledWhileHoldingReservationLock(t *testing.T) {
+	cfg := config.Default()
+	var d *Dispatcher
+	now, expired := time.Unix(1, 0), false
+	d = testDispatcher(t, cfg, Options{TicketTTL: time.Second}, func() time.Time {
+		if expired {
+			if d.mu.TryLock() {
+				d.mu.Unlock()
+				t.Error("expiry sampled outside the reservation lock")
+				return now
+			}
+			return now.Add(time.Second)
+		}
+		return now
+	})
+	ticket := ticketURL(t, d, "127.0.0.1", cfg.Apps[0])
+	expired = true
+	_, rejection := d.reserveSession(ticket.Query())
+	if rejection == nil {
+		d.ws.connections.Done() // Release the unexpected reservation.
+		t.Fatal("expired ticket was accepted")
+	}
+	if rejection.status != http.StatusUnauthorized {
+		t.Fatalf("unexpected rejection: %+v", rejection)
+	}
+}

@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -383,6 +385,75 @@ func TestOfficialSDKHTTPWebhookEvents(t *testing.T) {
 			}
 		})
 	}
+}
+
+type pauseRecall struct {
+	admitted chan<- struct{}
+	release  <-chan struct{}
+}
+
+func (p pauseRecall) BeforeRequest(_ http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/") {
+		close(p.admitted)
+		<-p.release
+	}
+	return false
+}
+
+func TestOfficialSDKRecallAdmittedBeforeGracefulShutdown(t *testing.T) {
+	cfg := sdkTestConfig()
+	app := &cfg.Apps[0]
+	app.TenantKey = "tenant-shutdown"
+	handler, inbox := sdkEventDispatcher(*app)
+	webhook := httptest.NewServer(http.HandlerFunc(httpserverext.NewEventHandlerFunc(handler)))
+	t.Cleanup(webhook.Close)
+	app.WebhookURL = webhook.URL
+
+	admitted, release := make(chan struct{}), make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	srv := server.New(cfg, server.WithFaultHook(pauseRecall{admitted, release}))
+	t.Cleanup(func() {
+		resume()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		requireSDKNetwork(t, srv.Shutdown(ctx))
+	})
+	listen := net.ListenConfig{}
+	listener, err := listen.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	requireSDKNetwork(t, err)
+	serving := make(chan error, 1)
+	go func() { serving <- srv.Serve(listener) }()
+
+	client := lark.NewClient(app.AppID, app.AppSecret, lark.WithOpenBaseUrl("http://"+listener.Addr().String()))
+	chatID := cfg.Chats[0].ChatID
+	message := sdkSend(t, client, "chat_id", chatID, "text", `{"text":"recall during drain"}`)
+	id := value(message.MessageId)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	type deletion struct {
+		response *larkim.DeleteMessageResp
+		err      error
+	}
+	recalled := make(chan deletion, 1)
+	go func() {
+		response, err := client.Im.Message.Delete(ctx, larkim.NewDeleteMessageReqBuilder().MessageId(id).Build())
+		recalled <- deletion{response, err}
+	}()
+	receiveSDKEvent(t, admitted)
+
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- srv.Shutdown(ctx) }()
+	// Serve returns as soon as shutdown closes the listener, while the
+	// admitted DELETE is still paused in its handler.
+	if err := receiveSDKEvent(t, serving); !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("Serve returned %v", err)
+	}
+	resume()
+	got := receiveSDKEvent(t, recalled)
+	requireSDKNetwork(t, got.err)
+	requireSDKCode(t, got.response.CodeError, 0)
+	requireSDKNetwork(t, receiveSDKEvent(t, shutdown))
+	assertSDKRecall(t, inbox, *app, chatID, id, "message_owner")
 }
 
 func sdkReadWebhook(t *testing.T, w http.ResponseWriter, r *http.Request, key string) ([]byte, bool) {

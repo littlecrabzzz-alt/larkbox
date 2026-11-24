@@ -52,12 +52,13 @@ func Decode(wire []byte) (Frame, error) {
 	return frame, err
 }
 
-// validWire guards the SDK decoder against overflowing protobuf varints.
+// validWire checks varint and field number bounds before the SDK decodes them.
 func validWire(wire []byte, frame bool) bool {
 	depth := 0
 	for len(wire) > 0 {
 		tag, n := binary.Uvarint(wire)
-		if n <= 0 {
+		field := tag >> 3
+		if n <= 0 || field == 0 || field >= 1<<29 {
 			return false
 		}
 		wire = wire[n:]

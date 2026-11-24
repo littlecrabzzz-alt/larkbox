@@ -181,7 +181,7 @@ func (s *Server) Serve(listener net.Listener) error { return s.http.Serve(listen
 
 // Shutdown stops accepting connections and waits for active requests to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.events.StopAccepting()
+	s.events.StopRetries()
 	httpErr := s.http.Shutdown(ctx)
 	return errors.Join(httpErr, s.events.Shutdown(ctx))
 }

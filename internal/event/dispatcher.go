@@ -76,13 +76,15 @@ type deliveryJob struct {
 
 // Dispatcher manages event delivery and long connections for one server.
 type Dispatcher struct {
-	state    *store.Store
-	opts     Options
-	client   *http.Client
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
-	stopping chan struct{}
+	state          *store.Store
+	opts           Options
+	client         *http.Client
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+	stopping       chan struct{}
+	retriesStopped chan struct{}
+	stopRetries    sync.Once
 
 	mu      sync.Mutex
 	closed  bool
@@ -121,7 +123,8 @@ func New(state *store.Store, opts Options) *Dispatcher {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxResponseHeaderBytes = store.TraceBodyLimit
 	return &Dispatcher{
-		state: state, opts: opts, ctx: ctx, cancel: cancel, done: make(chan struct{}), stopping: make(chan struct{}),
+		state: state, opts: opts, ctx: ctx, cancel: cancel,
+		done: make(chan struct{}), stopping: make(chan struct{}), retriesStopped: make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -140,23 +143,24 @@ func defaultRetryBackoff(attempt int) time.Duration {
 	return delays[min(attempt, len(delays))-1]
 }
 
-// StopAccepting closes admission and abandons delivery retries. Attempts
-// already in progress can finish until a Shutdown deadline expires.
-func (d *Dispatcher) StopAccepting() {
+// StopRetries abandons retry backoffs and prevents further retry attempts.
+// New events and their first attempts can still be admitted while HTTP drains.
+func (d *Dispatcher) StopRetries() {
+	d.stopRetries.Do(func() { close(d.retriesStopped) })
+}
+
+// Shutdown closes admission and waits for admitted deliveries and connections.
+// If ctx expires, it cancels outstanding network operations.
+func (d *Dispatcher) Shutdown(ctx context.Context) error {
+	d.StopRetries()
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if !d.closed {
 		d.closed = true
 		close(d.stopping)
 		clear(d.ws.tickets)
 		go d.finish()
 	}
-}
-
-// Shutdown waits for admitted work and connections to finish. If ctx
-// expires, it cancels outstanding network operations.
-func (d *Dispatcher) Shutdown(ctx context.Context) error {
-	d.StopAccepting()
+	d.mu.Unlock()
 
 	select {
 	case <-d.done:
@@ -199,7 +203,7 @@ func closeSession(s *session, deadline time.Time) {
 		frame := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
 		_ = s.conn.WriteControl(websocket.CloseMessage, frame, deadline)
 	}
-	_ = s.conn.Close()
+	s.disconnect()
 }
 
 func (d *Dispatcher) begin(ctx context.Context) (context.Context, func(), error) {
@@ -331,33 +335,39 @@ func appendDelivery(deliveries []Delivery, delivery Delivery) []Delivery {
 }
 
 func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Delivery {
-	// Keep the retries for one event on the same replica. A disconnected
-	// peer cannot acknowledge later attempts.
-	s := d.selectSession(ctx, job.app.AppID)
+	s := d.selectSession(ctx, job.app.AppID, true)
 	if s == nil {
 		return Delivery{}
 	}
 	var result Delivery
-	for i := 1; i <= d.opts.WebSocketMaxAttempts; i++ {
-		if i > 1 && !d.canRetry(ctx) {
-			break
-		}
-		select {
-		case <-s.done:
+	attempts := 0
+	for attempt := 1; ; attempt++ {
+		if attempts > 0 && (!d.canRetry(ctx) || s.disconnected()) {
 			return result
-		default:
 		}
-		result = d.socketAttempt(ctx, s, job, i)
-		if result.Err == nil || i == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, i, s.done) {
-			break
+		result = d.socketAttempt(ctx, s, job, attempt)
+		if attempts == 0 && errors.Is(result.Err, errDisconnectedBeforeWrite) {
+			// No frame reached this replica. Another live session can still
+			// receive the first delivery without using the ACK retry budget.
+			if ctx.Err() == nil {
+				if next := d.selectSession(ctx, job.app.AppID, false); next != nil {
+					s = next
+					continue
+				}
+			}
+			return result
+		}
+		attempts++
+		// Once a write may have reached a peer, keep retries on that replica.
+		if result.Err == nil || attempts == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, attempts, s.done) {
+			return result
 		}
 	}
-	return result
 }
 
 func (d *Dispatcher) canRetry(ctx context.Context) bool {
 	select {
-	case <-d.stopping:
+	case <-d.retriesStopped:
 		return false
 	default:
 		return ctx.Err() == nil
@@ -374,7 +384,7 @@ func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, peerDone <-chan
 	case <-timer.C:
 		return d.canRetry(ctx)
 	case <-ctx.Done():
-	case <-d.stopping:
+	case <-d.retriesStopped:
 	case <-peerDone:
 	}
 	return false

@@ -186,9 +186,9 @@ type handshakeRejection struct {
 
 func (d *Dispatcher) reserveSession(q url.Values) (string, *handshakeRejection) {
 	token := q.Get("ticket")
-	now := d.state.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.state.Now()
 	saved, found := d.ws.tickets[token]
 	switch {
 	case d.closed:
@@ -232,7 +232,7 @@ func (d *Dispatcher) registerSession(appID string, s *session) bool {
 }
 
 func (d *Dispatcher) removeSession(appID string, s *session) {
-	_ = s.conn.Close()
+	s.disconnect()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	app := d.ws.apps[appID]
@@ -244,7 +244,6 @@ func (d *Dispatcher) removeSession(appID string, s *session) {
 	if len(app.sessions) == 0 && app.upgrading == 0 {
 		delete(d.ws.apps, appID)
 	}
-	close(s.done)
 }
 
 // SessionCount reports the number of active long connections for an app.
@@ -257,42 +256,66 @@ func (d *Dispatcher) SessionCount(appID string) int {
 	return 0
 }
 
-func (d *Dispatcher) selectSession(ctx context.Context, appID string) *session {
+func (d *Dispatcher) selectSession(ctx context.Context, appID string, waitForUpgrade bool) *session {
 	for {
 		d.mu.Lock()
 		app := d.ws.apps[appID]
-		switch {
-		case app == nil:
+		if app == nil {
 			d.mu.Unlock()
 			return nil
-		case len(app.sessions) > 0:
-			i := app.next % len(app.sessions)
+		}
+		for offset := range len(app.sessions) {
+			i := (app.next + offset) % len(app.sessions)
 			s := app.sessions[i]
-			app.next = i + 1
-			d.mu.Unlock()
-			return s
-		default:
-			// A client can start dispatch as soon as it receives the 101.
-			// Wait for the reserved session to register or fail.
-			changed := app.changed
-			d.mu.Unlock()
-			select {
-			case <-changed:
-			case <-d.stopping:
-				return nil
-			case <-ctx.Done():
-				return nil
+			if !s.disconnected() {
+				app.next = i + 1
+				d.mu.Unlock()
+				return s
 			}
+		}
+		if !waitForUpgrade || app.upgrading == 0 {
+			d.mu.Unlock()
+			return nil
+		}
+		// A client can dispatch as soon as it receives the 101. Wait for
+		// its reserved session to register or fail.
+		changed := app.changed
+		d.mu.Unlock()
+		select {
+		case <-changed:
+		case <-d.stopping:
+			return nil
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }
 
+var errDisconnectedBeforeWrite = errors.New("websocket disconnected before event write")
+
 type session struct {
-	conn    *websocket.Conn
-	done    chan struct{}
-	writer  sync.Mutex
-	mu      sync.Mutex
-	pending map[string]chan ack
+	conn      *websocket.Conn
+	done      chan struct{}
+	closeOnce sync.Once
+	writer    sync.Mutex
+	mu        sync.Mutex
+	pending   map[string]chan ack
+}
+
+func (s *session) disconnected() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *session) disconnect() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+		_ = s.conn.Close()
+	})
 }
 
 type ack struct {
@@ -307,6 +330,9 @@ func (s *session) write(ctx context.Context, frame *wsproto.Frame) error {
 	}
 	s.writer.Lock()
 	defer s.writer.Unlock()
+	if s.disconnected() {
+		return errDisconnectedBeforeWrite
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -316,7 +342,10 @@ func (s *session) write(ctx context.Context, frame *wsproto.Frame) error {
 	}
 	if err := s.conn.WriteMessage(websocket.BinaryMessage, wire); err != nil {
 		// Gorilla cannot write to the connection again after a write timeout.
-		_ = s.conn.Close()
+		s.disconnect()
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return errDisconnectedBeforeWrite
+		}
 		return err
 	}
 	return nil
