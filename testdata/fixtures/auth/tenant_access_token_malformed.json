@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "code": 9499,
+    "msg": "bad request or invalid param"
+  }
+}

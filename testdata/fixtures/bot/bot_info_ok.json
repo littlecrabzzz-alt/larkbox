@@ -1,0 +1,14 @@
+{
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "ok",
+    "bot": {
+      "activate_status": 2,
+      "app_name": "Fixture Bot",
+      "avatar_url": "",
+      "ip_white_list": [],
+      "open_id": "fixture:id"
+    }
+  }
+}

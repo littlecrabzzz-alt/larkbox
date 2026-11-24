@@ -1,0 +1,33 @@
+{
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "items": [
+        {
+          "body": {
+            "content": "{\"text\":\"fixture message\"}"
+          },
+          "chat_id": "fixture:id",
+          "create_time": "fixture:millis",
+          "deleted": false,
+          "mentions": [],
+          "message_id": "fixture:id",
+          "msg_type": "text",
+          "sender": {
+            "id": "fixture:id",
+            "id_type": "app_id",
+            "open_bot_id": "fixture:id",
+            "sender_name": "Fixture Bot",
+            "sender_type": "app",
+            "tenant_key": ""
+          },
+          "thread_id": "fixture:id",
+          "update_time": "fixture:millis",
+          "updated": false
+        }
+      ]
+    }
+  }
+}

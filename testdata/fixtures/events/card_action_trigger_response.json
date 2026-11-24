@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "body": {
+    "toast": {
+      "type": "success",
+      "content": "Fixture confirmed"
+    }
+  }
+}

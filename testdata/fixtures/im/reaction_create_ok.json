@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "action_time": "fixture:millis",
+      "operator": {
+        "operator_id": "fixture:id",
+        "operator_type": "app"
+      },
+      "reaction_id": "fixture:id",
+      "reaction_type": {
+        "emoji_type": "THUMBSUP"
+      }
+    }
+  }
+}

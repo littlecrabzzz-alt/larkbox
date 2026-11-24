@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filterable and clearable audit traces, configurable inbound and outbound faults, and direct credential expiry.
 - Black-box official Go SDK coverage for sandbox mentions, card replies and callbacks, fault recovery, and reset.
 - Sample environment for optional live differential testing.
+- Sanitized golden fixtures for Auth, Bot, IM, CardKit, and webhook events, with fixture hygiene and wire-contract tests in standard CI.
+- Build-tagged differential tests for sandbox and Feishu test tenants that share assertions and clean up test messages and reactions.
 
 ### Fixed
 

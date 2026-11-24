@@ -1,0 +1,41 @@
+{
+  "status": 200,
+  "body": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "fixture:id",
+      "event_type": "card.action.trigger",
+      "create_time": "fixture:micros",
+      "token": "fixture:redacted",
+      "app_id": "fixture:id",
+      "tenant_key": "fixture:redacted"
+    },
+    "event": {
+      "operator": {
+        "tenant_key": "fixture:redacted",
+        "user_id": "fixture:id",
+        "open_id": "fixture:id",
+        "union_id": "fixture:id"
+      },
+      "token": "fixture:nonce",
+      "action": {
+        "value": {
+          "action": "confirm"
+        },
+        "tag": "button",
+        "option": "",
+        "timezone": "",
+        "name": "",
+        "form_value": null,
+        "input_value": "",
+        "options": null,
+        "checked": false
+      },
+      "host": "im_message",
+      "context": {
+        "open_message_id": "fixture:id",
+        "open_chat_id": "fixture:id"
+      }
+    }
+  }
+}

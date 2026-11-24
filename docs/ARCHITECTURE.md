@@ -25,8 +25,8 @@ internal/
 web/                  Lightweight Vite + React chat playground & protocol inspector (embedded via //go:embed)
 tests/
   sdk_test/           Offline end-to-end integration tests using official oapi-sdk-go (REST + WS)
-  live_test/          //go:build live differential tests against a real Feishu Test Tenant
-testdata/fixtures/    Sanitized real Feishu request, response, and callback golden fixtures
+  live_test/          //go:build live differential tests for the sandbox and a Feishu test tenant
+testdata/fixtures/    Sanitized REST and webhook wire fixtures
 ```
 
 ---
@@ -80,5 +80,5 @@ When an event occurs (e.g., user sends a message via `/_sandbox/messages/send`, 
 |---|---|---|
 | 1. Unit & State Tests | `go test -race ./internal/...` | Validate strict rules, crypto, error codes, and race safety |
 | 2. Official SDK Tests | `go test -race ./tests/sdk_test/...` | Prove wire compatibility with `oapi-sdk-go` REST & WS clients |
-| 3. Golden Fixtures | `testdata/fixtures/` | Anchor payload shapes to sanitized real Feishu captures |
+| 3. Golden Fixtures | `testdata/fixtures/` | Check payload shapes, types, and HTTP and business codes |
 | 4. Live Differential Tests | `go test -tags=live ./tests/live_test/...` | Compare `larkbox` vs real Feishu Test Tenant behavior on demand |
