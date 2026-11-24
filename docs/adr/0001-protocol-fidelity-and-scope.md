@@ -1,4 +1,4 @@
-# 0001. Bounded Auth+IM Scope, Go Single Binary, and Protocol Fidelity Strategy
+# 0001. Auth and IM Core Scope, Go Single Binary, and Protocol Fidelity Strategy
 
 - **Status:** Accepted
 - **Date:** 2026-11-25
@@ -14,13 +14,22 @@ Previous ad-hoc mock scripts (e.g., thin Python HTTP stubs) suffer from three st
 
 ## Decision
 
-1. **Bounded Core Scope**: Focus `larkbox` exclusively on **Authentication (internal tokens, OAuth v1/v2, callback crypto/signing) + IM / Bot / Media / CardKit + Dual Event Delivery (Webhook Schema 2.0 & WebSocket Long Connection)**. Keep business logic and E2E assertion frameworks strictly out of `larkbox`.
+1. **Core Scope**. Prioritize **Authentication (internal tokens, OAuth v1/v2, callback crypto/signing), IM, Bot, Media, CardKit, and dual event delivery (Webhook Schema 2.0 and WebSocket Long Connection)**. Keep the Feishu Open APIs and `/_sandbox/*` control plane modular so downstream test suites can drive the sandbox and future phases can add end-to-end testing features.
 2. **Pure Go Single-Binary Architecture**: Implement `larkbox` in pure Go (zero CGO) with an optional embedded Web UI (`//go:embed`) so teams using Python, Node.js, Java, or Go can run it with one binary and zero runtime dependencies. Using Go also aligns directly with Feishu's official `oapi-sdk-go` types and `ws` Protobuf framing.
 3. **Strict Mode by Default + Four-Layer Verification**:
    - Enforce real Feishu validation rules and error codes by default.
    - Run official `oapi-sdk-go` (REST + `ws.Client`) integration tests in CI.
    - Maintain sanitized real-Feishu golden fixtures in `testdata/fixtures/`.
    - Maintain an opt-in `//go:build live` differential test harness against a real Feishu Test Tenant to verify protocol parity without requiring live credentials during normal development or CI.
+
+## Deferred / Later Phases
+
+Evaluate Docs, Bitable, Approval, Calendar, Contacts/HR, and Mail in future phases once the core Auth and IM surface matures.
+
+## Non-Goals
+
+- Pixel-perfect reproduction of the native Feishu client.
+- Serving as a production messaging backend.
 
 ## Consequences
 
@@ -29,5 +38,4 @@ Previous ad-hoc mock scripts (e.g., thin Python HTTP stubs) suffer from three st
   - Zero-config drop-in experience for official Feishu SDKs (both Webhook and WebSocket modes).
   - Manageable codebase size with clear acceptance criteria for every new endpoint.
 - **Trade-offs**:
-  - Requests for non-IM Feishu products (e.g., Docs, Bitable, Approval) will be deferred or declined until the core Auth + IM surface reaches high maturity.
   - Strict validation may surface bugs in existing client code that previously passed against permissive mock scripts (considered a feature, not a bug).
