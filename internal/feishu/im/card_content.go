@@ -97,18 +97,22 @@ func renderedTextNodes(value any) []fields {
 	if node["tag"] != "markdown" && node["tag"] != "lark_md" {
 		return []fields{{"tag": "text", "text": text}}
 	}
+	matches := cardMarkdownLink.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return []fields{{"tag": "text", "text": text}}
+	}
+	code := markdownCodeRanges(text)
 	var nodes []fields
 	start := 0
-	for _, match := range cardMarkdownLink.FindAllStringSubmatchIndex(text, -1) {
-		// Image syntax and escaped opening brackets remain literal text.
-		if match[0] > 0 && text[match[0]-1] == '!' {
+	for _, match := range matches {
+		for len(code) > 0 && code[0].end <= match[0] {
+			code = code[1:]
+		}
+		if len(code) > 0 && code[0].start <= match[0] {
 			continue
 		}
-		prefix := match[0]
-		for prefix > start && text[prefix-1] == '\\' {
-			prefix--
-		}
-		if (match[0]-prefix)%2 != 0 {
+		// Image syntax and escaped opening brackets remain literal text.
+		if (match[0] > 0 && text[match[0]-1] == '!') || escapedMarkdown(text, match[0]) {
 			continue
 		}
 		if start < match[0] {
