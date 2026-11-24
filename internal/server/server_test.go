@@ -375,3 +375,40 @@ func (authFaultHook) BeforeRequest(w http.ResponseWriter, r *http.Request) bool 
 	_ = protocol.WriteError(w, protocol.NewError(protocol.RateLimited, nil))
 	return true
 }
+
+func TestWrappedBearerExtensionFaultPrecedence(t *testing.T) {
+	const path = "/open-apis/extension"
+	cfg := config.Default()
+	srv := New(cfg, WithFeishuRoutes(func(mux *http.ServeMux, _ config.Config, state *store.Store) {
+		wrap := func(next http.Handler) http.Handler {
+			return http.TimeoutHandler(next, time.Second, "extension timed out")
+		}
+		mux.Handle("GET "+path, middleware.Bearer(state, middleware.Tenant, true, wrap)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := middleware.AuthFromContext(r.Context()); !ok {
+				t.Error("wrapped handler did not receive the Bearer identity")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})))
+	}))
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	if err := srv.Store().PutToken(store.Token{Value: "t-extension", Kind: store.TenantToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body, bearer string, status int, want string) {
+		t.Helper()
+		r := httptest.NewRequestWithContext(t.Context(), method, path, strings.NewReader(body))
+		if bearer != "" {
+			r.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		if w.Code != status || !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("%s %s returned %d %s, want %d %q", method, path, w.Code, w.Body, status, want)
+		}
+	}
+	call("POST", "/_sandbox/faults", `{"kind":"token_expiry","remaining_hits":1}`, "", 201, "fault_id")
+	call("POST", "/_sandbox/faults", `{"kind":"rate_limit","remaining_hits":1}`, "", 201, "fault_id")
+	call("GET", path, "", "t-extension", 400, "99991663")
+	call("GET", path, "", "t-extension", 429, "99991400")
+	call("GET", path, "", "t-extension", 204, "")
+}

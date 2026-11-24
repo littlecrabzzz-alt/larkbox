@@ -94,7 +94,8 @@ func insertSandboxMentions(kind string, content map[string]any, mentionIDs, botI
 func InspectMessageData(state *store.Store, m store.Message) map[string]any {
 	h := handler{state: state}
 	if m.MsgType == "interactive" {
-		m.Content = string(store.RedactTraceJSON([]byte(m.Content)))
+		redactor := state.DiagnosticRedactor(m.AppID, m.DiagnosticRedactor)
+		m.Content = string(redactor.JSON([]byte(m.Content)))
 	}
 	rendered := cardForRead(m, m.AppID, false)
 	data := h.messageData(rendered, "open_id", false)

@@ -86,7 +86,14 @@ func TestCardActionWebhook(t *testing.T) {
 				case received <- raw:
 				default:
 				}
-				_, _ = io.WriteString(w, `{"token":"`+replyCredential+`","diagnostics":`+replyDiagnostics+`,"toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
+				var wire callback.CardActionTriggerEvent
+				if err := json.Unmarshal(raw, &wire); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				echo, _ := json.Marshal(wire.Event.Token + " / " + wire.Event.Context.PreviewToken + " / " + wire.EventV2Base.Header.Token)
+				_, _ = io.WriteString(w, `{"token":"`+replyCredential+`","echo":`+string(echo)+`,"diagnostics":`+replyDiagnostics+`,"toast":{"type":"success","content":"Saved","i18n":{"en_us":"Saved"}},"card":{"type":"`+tc.kind+`","data":`+tc.data+`}}`)
 			}))
 			t.Cleanup(web.Close)
 			app.WebhookURL = web.URL + "/card-click"
@@ -124,6 +131,10 @@ func TestCardActionWebhook(t *testing.T) {
 			}
 			assertCardAuditTokens(t, trace[0].RequestBody, trace[0].ResponseBody, result.Delivery.Data,
 				app.VerificationToken, e.Token, e.Context.PreviewToken)
+			if !strings.Contains(string(trace[0].ResponseBody), `"echo":"[REDACTED] / [REDACTED] / [REDACTED]"`) ||
+				!strings.Contains(string(result.Delivery.Data), e.Context.PreviewToken) {
+				t.Fatal("reflected webhook credentials were not isolated from the real response")
+			}
 			if result.Toast == nil || result.Toast.I18nContent["en_us"] != "Saved" || result.Card == nil || result.Card.Type != tc.kind || card.Sequence != 7 {
 				t.Fatalf("invalid structured response or sequence: %+v, %+v", result, card)
 			}

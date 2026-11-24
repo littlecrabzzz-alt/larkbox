@@ -152,16 +152,17 @@ type cardView struct {
 	Elements           *map[string]string `json:"elements,omitempty"`
 }
 
-func viewCard(card store.Card, detail bool) cardView {
+func (c *control) viewCard(card store.Card, detail bool) cardView {
 	view := cardView{
 		ID: card.ID, AppID: card.AppID, Type: card.Type, StreamingMode: card.StreamingMode, Sequence: card.Sequence,
 		Revision: card.Revision, CreatedAt: card.CreatedAt, ExpiresAt: card.ExpiresAt(), StreamingExpiresAt: card.StreamingExpiresAt(),
 	}
 	if detail {
-		view.JSON = store.RedactTraceJSON(card.JSON)
+		redactor := c.state.DiagnosticRedactor(card.AppID, card.DiagnosticRedactor)
+		view.JSON = redactor.JSON(card.JSON)
 		elements := make(map[string]string, len(card.Elements))
 		for id, content := range card.Elements {
-			elements[id] = store.RedactDiagnosticText(content)
+			elements[id] = redactor.Text(content)
 		}
 		view.Elements = &elements
 	}
@@ -173,7 +174,7 @@ func (c *control) cardData(detail bool) []cardView {
 	slices.SortFunc(cards, func(a, b store.Card) int { return cmp.Compare(a.ID, b.ID) })
 	result := make([]cardView, 0, len(cards))
 	for _, card := range cards {
-		result = append(result, viewCard(card, detail))
+		result = append(result, c.viewCard(card, detail))
 	}
 	return result
 }
@@ -188,7 +189,7 @@ func (c *control) card(w http.ResponseWriter, r *http.Request) {
 		stateError(w, store.ErrNotFound)
 		return
 	}
-	reply(w, http.StatusOK, viewCard(card, true))
+	reply(w, http.StatusOK, c.viewCard(card, true))
 }
 
 func (c *control) sessions(w http.ResponseWriter, _ *http.Request) {

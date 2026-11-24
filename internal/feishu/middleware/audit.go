@@ -9,6 +9,8 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -29,7 +31,8 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
 			RequestHeaders: store.TraceHeaders(r.Header),
 		}
-		r = r.WithContext(context.WithValue(ctx, traceAppKey{}, &trace.AppID))
+		var traceApp atomic.Pointer[string]
+		r = r.WithContext(context.WithValue(ctx, traceAppKey{}, &traceApp))
 		requestContentType := r.Header.Get("Content-Type")
 		requestLength := r.ContentLength
 		var request *auditReader
@@ -46,10 +49,11 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 		next.ServeHTTP(wrapped, r)
 		response.commit(http.StatusOK) // A handler that writes nothing gets an implicit 200.
 		trace.Latency = time.Since(started)
+		if appID := traceApp.Load(); appID != nil {
+			trace.AppID = *appID
+		}
 		if request != nil {
-			trace.RequestBodyTruncated = request.truncated || request.failed ||
-				(request.bytesRead > 0 && !request.eof && request.bytesRead != requestLength)
-			trace.RequestBody = auditBody(request.body.Bytes(), requestContentType, trace.RequestBodyTruncated)
+			trace.RequestBody, trace.RequestBodyTruncated = request.snapshot(requestContentType, requestLength)
 		}
 		trace.Status = response.status
 		trace.ResponseHeaders = response.headers
@@ -66,14 +70,14 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 				trace.Code = envelope.Code
 			}
 		}
-		state.AppendTraceAt(epoch, trace)
+		state.AppendTraceAt(epoch, trace, store.Redactor{})
 	})
 }
 
 // SetTraceApp records the app identified by an Open API handler.
 func SetTraceApp(r *http.Request, appID string) {
-	if traceAppID, ok := r.Context().Value(traceAppKey{}).(*string); ok {
-		*traceAppID = appID
+	if traceAppID, ok := r.Context().Value(traceAppKey{}).(*atomic.Pointer[string]); ok {
+		traceAppID.Store(&appID)
 	}
 }
 
@@ -90,6 +94,7 @@ func (c *bodyCapture) record(data []byte) {
 
 type auditReader struct {
 	io.ReadCloser
+	mu sync.Mutex
 	bodyCapture
 	bytesRead int64
 	eof       bool
@@ -98,6 +103,8 @@ type auditReader struct {
 
 func (r *auditReader) Read(data []byte) (int, error) {
 	n, err := r.ReadCloser.Read(data)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.record(data[:n])
 	r.bytesRead += int64(n)
 	switch {
@@ -107,6 +114,13 @@ func (r *auditReader) Read(data []byte) (int, error) {
 		r.failed = true
 	}
 	return n, err
+}
+
+func (r *auditReader) snapshot(contentType string, length int64) ([]byte, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	truncated := r.truncated || r.failed || (r.bytesRead > 0 && !r.eof && r.bytesRead != length)
+	return bytes.Clone(auditBody(r.body.Bytes(), contentType, truncated)), truncated
 }
 
 type auditWriter struct {

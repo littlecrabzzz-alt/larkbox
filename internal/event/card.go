@@ -12,6 +12,7 @@ import (
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/cardkit"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
 const cardActionTrigger = "card.action.trigger"
@@ -40,6 +41,7 @@ type CardActionResult struct {
 	Toast    *callback.Toast
 	Card     *CardActionCard
 	Updated  bool
+	Redactor store.Redactor `json:"-"`
 }
 
 type cardOperator struct {
@@ -101,7 +103,8 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 	if err != nil {
 		return CardActionResult{}, err
 	}
-	result := CardActionResult{EventID: job.id}
+	job.redactor = store.AppRedactor(job.app, payload.Token, input.PreviewToken)
+	result := CardActionResult{EventID: job.id, Redactor: job.redactor}
 	verify := func(ctx context.Context, body []byte) error {
 		body = bytes.TrimSpace(body)
 		if len(body) == 0 || bytes.Equal(body, []byte("null")) {
@@ -122,7 +125,7 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 		if err != nil {
 			return fmt.Errorf("invalid card action response card: %w", err)
 		}
-		if err := d.state.ApplyCardAction(ctx, target, card, reference); err != nil {
+		if err := d.state.ApplyCardAction(ctx, target, card, reference, job.redactor); err != nil {
 			return fmt.Errorf("apply card action response: %w", err)
 		}
 		result.Updated = true
@@ -153,7 +156,7 @@ func (d *Dispatcher) deliverCardAction(ctx context.Context, job deliveryJob, ver
 	if err == nil {
 		err = errors.New("app has no active card action receiver")
 	}
-	d.record(job.epoch, job.trace("dispatcher", 0), err)
+	d.record(job, job.trace("dispatcher", 0), err)
 	return Delivery{Channel: "dispatcher", Err: err}
 }
 

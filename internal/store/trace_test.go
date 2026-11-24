@@ -65,7 +65,7 @@ func TestTraceScrubbingCanonicalizesNestedCredentials(t *testing.T) {
 				t.Fatalf("unsafe or incorrectly canonicalized trace: %s / %s", trace.RequestBody, trace.ResponseBody)
 			}
 			for _, malformed := range []string{`{"token":"private"} unexpected`, `{"token":"private"`, `"private"`} {
-				if got := RedactTraceJSON([]byte(malformed)); got != nil {
+				if got := (Redactor{}).JSON([]byte(malformed)); got != nil {
 					t.Fatalf("ambiguous body was retained: %s", got)
 				}
 			}

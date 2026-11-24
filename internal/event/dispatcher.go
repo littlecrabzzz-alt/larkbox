@@ -70,6 +70,7 @@ type eventHeader struct {
 }
 
 type deliveryJob struct {
+	redactor  store.Redactor
 	app       store.App
 	id        string
 	kind      string
@@ -280,7 +281,7 @@ func (d *Dispatcher) newJob(ctx context.Context, appID, kind string, at time.Tim
 	if len(body) > maxFrame {
 		return deliveryJob{epoch: epoch}, errors.New("event payload exceeds size limit")
 	}
-	return deliveryJob{app: app, id: id, kind: kind, body: body, epoch: epoch}, nil
+	return deliveryJob{app: app, id: id, kind: kind, body: body, epoch: epoch, redactor: store.AppRedactor(app)}, nil
 }
 
 func tenantKey(app store.App) string {
@@ -317,7 +318,7 @@ func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.T
 	job, err := d.newJob(ctx, appID, kind, at, payload)
 	if err != nil {
 		d.mu.Unlock()
-		d.record(job.epoch, store.Trace{StartedAt: time.Now(), AppID: appID, EventType: kind, Channel: "dispatcher"}, err)
+		d.record(job, store.Trace{StartedAt: time.Now(), AppID: appID, EventType: kind, Channel: "dispatcher"}, err)
 		return
 	}
 	switch {
@@ -334,7 +335,7 @@ func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.T
 	}
 	d.mu.Unlock()
 	if err != nil {
-		d.record(job.epoch, job.trace("dispatcher", 0), err)
+		d.record(job, job.trace("dispatcher", 0), err)
 	}
 }
 
@@ -463,9 +464,9 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 		// The acknowledgement embeds headers in its JSON body as well.
 		// Store the same safe subset in both places.
 		audit := result.response
-		audit.Data = store.RedactTraceJSON(audit.Data)
+		audit.Data = job.redactor.JSON(audit.Data)
 		audit.Headers = make(map[string]string)
-		for key, values := range store.TraceHeaders(headers) {
+		for key, values := range job.redactor.Headers(headers) {
 			audit.Headers[key] = values[0]
 		}
 		trace.ResponseBody, _ = json.Marshal(audit)
@@ -478,7 +479,7 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 			result.err = verify(ctx, result.response.Data)
 		}
 	}
-	d.record(job.epoch, trace, result.err)
+	d.record(job, trace, result.err)
 	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: headers, Data: result.response.Data, Err: result.err}
 }
 
@@ -493,13 +494,13 @@ func (job deliveryJob) trace(channel string, attempt int) store.Trace {
 	}
 }
 
-func (d *Dispatcher) record(epoch uint64, trace store.Trace, err error) {
+func (d *Dispatcher) record(job deliveryJob, trace store.Trace, err error) {
 	trace.Direction = store.Outbound
 	trace.Latency = time.Since(trace.StartedAt)
 	if err != nil {
 		trace.Error = err.Error()
 	}
-	d.state.AppendTraceAt(epoch, trace)
+	d.state.AppendTraceAt(job.epoch, trace, job.redactor)
 }
 
 func success(status int) bool { return status >= 200 && status < 300 }
@@ -552,7 +553,7 @@ func (d *Dispatcher) withDeliveryFault(ctx context.Context, job deliveryJob, cha
 		if err := effect.Wait(ctx); err != nil {
 			trace := job.trace(channel, 0)
 			trace.Method, trace.Path = method, path
-			d.record(job.epoch, trace, err)
+			d.record(job, trace, err)
 			return Delivery{Channel: channel, Err: err}
 		}
 	case fault.DuplicateEvent:

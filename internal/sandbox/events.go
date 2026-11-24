@@ -197,22 +197,24 @@ func (c *control) cardAction(w http.ResponseWriter, r *http.Request) {
 	if saved, ok := c.state.InspectMessage(input.MessageID); ok {
 		message = im.InspectMessageData(c.state, saved)
 	}
+	cardError := result.Redactor.Replace(errorText(err))
 	delivery := deliveryData(result.Delivery)
+	delivery["error"] = cardError
 	delivery["event_id"] = result.EventID
 	var toast *callback.Toast
 	if result.Toast != nil {
 		redacted := *result.Toast
-		redacted.Content = store.RedactDiagnosticText(redacted.Content)
+		redacted.Content = result.Redactor.Text(redacted.Content)
 		if len(redacted.I18nContent) > 0 {
 			redacted.I18nContent = make(map[string]string, len(result.Toast.I18nContent))
 			for lang, text := range result.Toast.I18nContent {
-				redacted.I18nContent[lang] = store.RedactDiagnosticText(text)
+				redacted.I18nContent[lang] = result.Redactor.Text(text)
 			}
 		}
 		toast = &redacted
 	}
 	reply(w, http.StatusOK, data{
-		"toast": toast, "card_applied": result.Updated, "card_error": errorText(err),
+		"toast": toast, "card_applied": result.Updated, "card_error": cardError,
 		"message": message, "delivery": delivery,
 	})
 }

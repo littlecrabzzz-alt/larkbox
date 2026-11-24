@@ -20,6 +20,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/event"
+	"github.com/littlecrabzzz-alt/larkbox/internal/wsproto"
 )
 
 func sandboxRequest(t *testing.T, web *httptest.Server, method, path string, payload any, status int) []byte {
@@ -56,7 +57,7 @@ func sandboxDecode[T any](t *testing.T, raw []byte) T {
 }
 
 func TestOfficialSDKSandbox(t *testing.T) {
-	const clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"result","content":"Clicked via sandbox"}]}}`
+	const clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"result","content":%q,"icon":{"tag":"standard_icon","token":"info_outlined"}}]}}`
 	cfg := sdkTestConfig()
 	cfg.Apps[0].TenantKey = "sdk-sandbox"
 	app, chat, user := cfg.Apps[0], cfg.Chats[0], cfg.Users[0]
@@ -87,9 +88,10 @@ func TestOfficialSDKSandbox(t *testing.T) {
 		}).
 		OnP2CardActionTrigger(func(_ context.Context, incoming *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			actions <- incoming
+			echo := incoming.Event.Token + " / " + incoming.EventV2Base.Header.Token
 			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{Type: "success", Content: "Confirmed"},
-				Card:  &callback.Card{Type: "raw", Data: json.RawMessage(clickedCard)},
+				Toast: &callback.Toast{Type: "success", Content: "Confirmed " + echo},
+				Card:  &callback.Card{Type: "raw", Data: json.RawMessage(fmt.Sprintf(clickedCard, "Clicked via sandbox "+echo))},
 			}, nil
 		})
 	startSDKCardSocket(t, web, app.AppID, app.AppSecret, handler)
@@ -127,15 +129,37 @@ func TestOfficialSDKSandbox(t *testing.T) {
 	action := receiveSDKEvent(t, actions)
 	callbackID := assertSDKEventHeader(t, action.EventV2Base, app, "card.action.trigger")
 	if action.Event.Context.OpenMessageID != replyID || action.Event.Action.Value["confirm"] != true ||
-		!bytes.Contains(click, []byte(`"card_applied":true`)) || !bytes.Contains(click, []byte("Confirmed")) ||
-		!bytes.Contains(click, []byte(`"content":"Clicked via sandbox"`)) || !bytes.Contains(click, []byte(callbackID)) {
+		!bytes.Contains(click, []byte(`"card_applied":true`)) || !bytes.Contains(click, []byte("Confirmed [REDACTED] / [REDACTED]")) ||
+		!bytes.Contains(click, []byte(`"content":"Clicked via sandbox [REDACTED] / [REDACTED]"`)) || !bytes.Contains(click, []byte(callbackID)) {
 		t.Fatalf("unexpected card action: %+v %s", action.Event, click)
 	}
 	history := request(http.MethodGet, "chats/"+chat.ChatID+"/messages", nil, http.StatusOK)
 	detail := request(http.MethodGet, "cards/"+cardID, nil, http.StatusOK)
 	if !bytes.Contains(history, []byte(`"raw_card_json":{"body"`)) || !bytes.Contains(history, []byte(`"rendered_card_json":`)) ||
-		!bytes.Contains(history, []byte(`"parent_id":"`+messageID+`"`)) || !bytes.Contains(detail, []byte(`"content":"Clicked via sandbox"`)) {
+		!bytes.Contains(history, []byte(`"parent_id":"`+messageID+`"`)) || !bytes.Contains(detail, []byte(`"content":"Clicked via sandbox [REDACTED] / [REDACTED]"`)) {
 		t.Fatalf("updated card was not persisted: %s %s", history, detail)
+	}
+
+	for _, projection := range [][]byte{click, history, detail} {
+		if bytes.Contains(projection, []byte(action.Event.Token)) || bytes.Contains(projection, []byte(app.VerificationToken)) ||
+			!bytes.Contains(projection, []byte(`"token":"info_outlined"`)) {
+			t.Fatalf("card projections changed the icon or exposed a credential")
+		}
+	}
+	ackTrace := request(http.MethodGet, "traces?direction=outbound&event_id="+callbackID, nil, http.StatusOK)
+	acked := sandboxDecode[struct {
+		Traces []struct {
+			Response wsproto.Response `json:"response_body"`
+		}
+	}](t, ackTrace)
+	if len(acked.Traces) != 1 {
+		t.Fatalf("expected one WS ACK trace, got %d", len(acked.Traces))
+	}
+	ack := acked.Traces[0].Response.Data
+	if bytes.Contains(ack, []byte(action.Event.Token)) || bytes.Contains(ack, []byte(app.VerificationToken)) ||
+		!bytes.Contains(ack, []byte("Confirmed [REDACTED] / [REDACTED]")) ||
+		!bytes.Contains(ack, []byte("Clicked via sandbox [REDACTED] / [REDACTED]")) || !bytes.Contains(ack, []byte(`"token":"info_outlined"`)) {
+		t.Fatal("WS ACK trace contains unsanitized callback text")
 	}
 
 	traces := request(http.MethodGet, "traces", nil, http.StatusOK)

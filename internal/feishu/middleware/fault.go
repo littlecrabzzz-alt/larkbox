@@ -39,8 +39,8 @@ func SandboxFaults(engine *fault.Engine, state *store.Store, routes *http.ServeM
 		headers := r.Header.Values("Authorization")
 		handler, _ := routes.Handler(r)
 		var auth Auth
-		if bearer, ok := handler.(*bearerHandler); ok {
-			auth, _ = authenticate(bearer.state, bearer.required, headers)
+		if route, ok := handler.(interface{ faultAuth([]string) Auth }); ok {
+			auth = route.faultAuth(headers)
 		}
 		input.AppID = auth.AppID
 		if value, ok := bearerToken(headers); input.AppID == "" && ok {

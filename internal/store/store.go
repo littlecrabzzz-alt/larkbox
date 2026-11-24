@@ -422,15 +422,16 @@ func (s *Store) reset(seed config.Config) {
 
 // AppendTrace records an exchange, evicting the oldest trace when full.
 func (s *Store) AppendTrace(trace Trace) {
-	s.AppendTraceAt(s.TraceEpoch(), trace)
+	s.AppendTraceAt(s.TraceEpoch(), trace, Redactor{})
 }
 
 // AppendTraceAt records an exchange only if the ring has not been cleared since admission.
-func (s *Store) AppendTraceAt(epoch uint64, trace Trace) {
-	trace.RequestHeaders = TraceHeaders(trace.RequestHeaders)
-	trace.ResponseHeaders = TraceHeaders(trace.ResponseHeaders)
-	trace.RequestBody, trace.RequestBodyTruncated = captureTraceBody(trace.RequestBody, trace.RequestBodyTruncated)
-	trace.ResponseBody, trace.ResponseBodyTruncated = captureTraceBody(trace.ResponseBody, trace.ResponseBodyTruncated)
+func (s *Store) AppendTraceAt(epoch uint64, trace Trace, redactor Redactor) {
+	trace.RequestHeaders = redactor.Headers(trace.RequestHeaders)
+	trace.ResponseHeaders = redactor.Headers(trace.ResponseHeaders)
+	trace.RequestBody, trace.RequestBodyTruncated = redactor.captureTraceBody(trace.RequestBody, trace.RequestBodyTruncated)
+	trace.ResponseBody, trace.ResponseBodyTruncated = redactor.captureTraceBody(trace.ResponseBody, trace.ResponseBodyTruncated)
+	trace.Error = redactor.Replace(trace.Error)
 	trace.Error = trace.Error[:min(len(trace.Error), TraceBodyLimit)]
 	trace = cloneTrace(trace)
 	s.mu.Lock()

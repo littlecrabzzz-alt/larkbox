@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,7 +20,10 @@ const (
 
 // TraceHeaders snapshots diagnostic headers within entry and byte limits.
 // Credential and arbitrary application headers are omitted.
-func TraceHeaders(headers http.Header) http.Header {
+func TraceHeaders(headers http.Header) http.Header { return Redactor{}.Headers(headers) }
+
+// Headers copies the allowlisted headers and scrubs reflected credential values.
+func (r Redactor) Headers(headers http.Header) http.Header {
 	result := make(http.Header)
 	remaining, entries := TraceHeaderLimit, TraceHeaderEntries
 	for _, name := range []string{
@@ -28,6 +32,7 @@ func TraceHeaders(headers http.Header) http.Header {
 		"X-Request-Id", "X-Tt-Logid", "X-Lark-Request-Timestamp",
 	} {
 		for _, value := range headers.Values(name) {
+			value = r.Replace(value)
 			// Charge each entry for its key and slice/string bookkeeping.
 			overhead := len(name) + 16
 			if entries == 0 || remaining <= overhead {
@@ -45,61 +50,118 @@ func TraceHeaders(headers http.Header) http.Header {
 	return result
 }
 
-// RedactTraceJSON canonicalizes structured JSON and removes protocol credentials.
-// Opaque, partial, or ambiguous bodies are omitted.
-func RedactTraceJSON(body []byte) []byte {
-	body = bytes.TrimSpace(body)
-	if len(body) == 0 || (body[0] != '{' && body[0] != '[') || !json.Valid(body) {
+const redactedValue = "[REDACTED]"
+
+// Redactor protects protocol fields and known credentials in diagnostic copies.
+// Its zero value redacts credential fields without replacing specific values.
+type Redactor struct {
+	values *strings.Replacer
+}
+
+// NewRedactor also redacts occurrences of the given nonempty credentials.
+func NewRedactor(secrets ...string) Redactor {
+	if len(secrets) == 0 {
+		return Redactor{}
+	}
+	values := slices.Clone(secrets)
+	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
+	pairs := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		if value != "" {
+			pairs = append(pairs, value, redactedValue)
+		}
+	}
+	if len(pairs) == 0 {
+		return Redactor{}
+	}
+	return Redactor{values: strings.NewReplacer(pairs...)}
+}
+
+// AppRedactor protects the app's credentials in addition to delivery credentials.
+func AppRedactor(app App, deliverySecrets ...string) Redactor {
+	secrets := append([]string{app.VerificationToken, app.AppSecret, app.EncryptKey}, deliverySecrets...)
+	return NewRedactor(secrets...)
+}
+
+// DiagnosticRedactor uses the callback's captured credentials when available.
+// Cards created through the Open API use the app's configured credentials.
+func (s *Store) DiagnosticRedactor(appID string, callback Redactor) Redactor {
+	if callback.values != nil {
+		return callback
+	}
+	app, _ := s.Apps().Get(appID)
+	return AppRedactor(app)
+}
+
+// Replace removes known credentials from a string while preserving its format.
+func (r Redactor) Replace(text string) string {
+	if r.values == nil {
+		return text
+	}
+	return r.values.Replace(text)
+}
+
+// JSON canonicalizes structured JSON and redacts credentials. Opaque, partial,
+// or ambiguous bodies are omitted.
+func (r Redactor) JSON(body []byte) []byte {
+	root, ok := structuredJSON(bytes.TrimSpace(body))
+	if !ok {
 		return nil
 	}
-	var root any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if decoder.Decode(&root) != nil {
-		return nil
-	}
-	redactCredentials(root, 0)
-	redacted, _ := json.Marshal(root)
+	redacted, _ := json.Marshal(r.scrub(root, "", 0))
 	return redacted
 }
 
-// RedactDiagnosticText preserves display text and scrubs JSON encoded inside it.
-func RedactDiagnosticText(text string) string {
-	return redactCredentials(text, 0).(string)
+// Text preserves display text and scrubs any structured JSON encoded inside it.
+func (r Redactor) Text(text string) string {
+	return r.scrub(text, "", 0).(string)
+}
+
+func structuredJSON(body []byte) (any, bool) {
+	if len(body) == 0 || (body[0] != '{' && body[0] != '[') || !json.Valid(body) {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var root any
+	err := decoder.Decode(&root)
+	return root, err == nil
 }
 
 const maxEmbeddedJSONDepth = 4
 
-func redactCredentials(value any, embeddedDepth int) any {
+func (r Redactor) scrub(value any, parent string, embeddedDepth int) any {
 	switch value := value.(type) {
 	case map[string]any:
+		tag, _ := value["tag"].(string)
+		icon := tag == "standard_icon" || parent == "icon" && tag == ""
 		for key, child := range value {
-			if credentialField(key, child) {
-				value[key] = "[REDACTED]"
+			_, iconToken := child.(string)
+			iconToken = iconToken && icon && key == "token"
+			if !iconToken && credentialField(key, child) {
+				value[key] = redactedValue
 			} else {
-				value[key] = redactCredentials(child, embeddedDepth)
+				value[key] = r.scrub(child, key, embeddedDepth)
 			}
 		}
 	case []any:
 		for i, child := range value {
-			value[i] = redactCredentials(child, embeddedDepth)
+			value[i] = r.scrub(child, "", embeddedDepth)
 		}
 	case string:
 		// IM content and CardKit data can contain JSON-encoded objects.
 		raw := strings.TrimSpace(value)
 		if len(raw) == 0 || (raw[0] != '{' && raw[0] != '[') {
-			return value
+			return r.Replace(value)
 		}
 		if embeddedDepth == maxEmbeddedJSONDepth {
 			return "[OMITTED]"
 		}
-		decoder := json.NewDecoder(strings.NewReader(raw))
-		decoder.UseNumber()
-		var nested any
-		if json.Valid([]byte(raw)) && decoder.Decode(&nested) == nil {
-			body, _ := json.Marshal(redactCredentials(nested, embeddedDepth+1))
+		if nested, ok := structuredJSON([]byte(raw)); ok {
+			body, _ := json.Marshal(r.scrub(nested, "", embeddedDepth+1))
 			return string(body)
 		}
+		return r.Replace(value)
 	}
 	return value
 }
@@ -118,11 +180,11 @@ func credentialField(key string, value any) bool {
 	}
 }
 
-func captureTraceBody(body []byte, truncated bool) ([]byte, bool) {
+func (r Redactor) captureTraceBody(body []byte, truncated bool) ([]byte, bool) {
 	if truncated || len(body) > TraceBodyLimit {
 		return nil, true
 	}
-	redacted := RedactTraceJSON(body)
+	redacted := r.JSON(body)
 	if len(redacted) > TraceBodyLimit {
 		return nil, true
 	}

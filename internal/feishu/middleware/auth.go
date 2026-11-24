@@ -43,31 +43,41 @@ func AuthFromContext(ctx context.Context) (Auth, bool) {
 
 // Bearer authenticates a route with the specified Feishu token kind. In
 // permissive mode, unauthenticated requests proceed without an auth identity.
-func Bearer(state *store.Store, required RequiredToken, strict bool) func(http.Handler) http.Handler {
+// Supply wrappers here to retain the route's Bearer policy for fault selection.
+func Bearer(state *store.Store, required RequiredToken, strict bool, wrappers ...func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return &bearerHandler{state: state, required: required, strict: strict, next: next}
+		route := bearerRoute{state: state, required: required}
+		route.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth, failure := authenticate(state, required, r.Header.Values("Authorization"))
+			switch {
+			case failure.Code == protocol.Success:
+				ctx := context.WithValue(r.Context(), authKey{}, auth)
+				SetTraceApp(r, auth.AppID)
+				r = r.WithContext(ctx)
+			case strict:
+				_ = protocol.WriteError(w, failure)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+		for _, wrap := range wrappers {
+			route.Handler = wrap(route.Handler)
+		}
+		return route
 	}
 }
 
-type bearerHandler struct {
+// bearerRoute keeps the authentication policy on the registered handler, even
+// when another middleware sits outside the actual Bearer check.
+type bearerRoute struct {
+	http.Handler
 	state    *store.Store
 	required RequiredToken
-	strict   bool
-	next     http.Handler
 }
 
-func (h *bearerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	auth, failure := authenticate(h.state, h.required, r.Header.Values("Authorization"))
-	switch {
-	case failure.Code == protocol.Success:
-		ctx := context.WithValue(r.Context(), authKey{}, auth)
-		SetTraceApp(r, auth.AppID)
-		r = r.WithContext(ctx)
-	case h.strict:
-		_ = protocol.WriteError(w, failure)
-		return
-	}
-	h.next.ServeHTTP(w, r)
+func (route bearerRoute) faultAuth(headers []string) Auth {
+	auth, _ := authenticate(route.state, route.required, headers)
+	return auth
 }
 
 func authenticate(state *store.Store, required RequiredToken, headers []string) (Auth, protocol.APIError) {

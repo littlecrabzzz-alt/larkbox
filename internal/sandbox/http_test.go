@@ -470,9 +470,22 @@ func TestControlWebhookVerificationCapsEmbeddedTimeout(t *testing.T) {
 func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
 	cfg := config.Default()
 	cfg.Apps[0].EncryptKey = ""
-	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	reflected := make(chan string, 1)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var incoming struct {
+			Header struct{ Token string }
+			Event  struct{ Token string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reflected <- incoming.Event.Token
+		echo := incoming.Event.Token + " / " + incoming.Header.Token
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"toast":{"type":"info","content":"Saved"},"card":{"type":"raw","data":{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"visible","content":"Updated card","preview_token":"private-card-value"}]}}}}`)
+		_, _ = fmt.Fprintf(w, `{"toast":{"type":"info","content":%q,"i18n":{"en_us":%q}},"card":{"type":"raw","data":{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"visible","content":%q,"preview_token":"private-card-value"}]}}}}`,
+			"Saved "+echo, "Localized "+echo, "Updated card "+echo)
 	}))
 	defer hook.Close()
 	cfg.Apps[0].WebhookURL = hook.URL
@@ -483,8 +496,47 @@ func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
 		SenderOpenID: cfg.Apps[0].BotOpenID, CreatedAt: time.Now(),
 	})
 	raw := call(t, srv, "POST", "/_sandbox/cards/action", `{"message_id":"om_click","operator_open_id":"ou_larkbox_alice","action":{"tag":"button"}}`, 200)
-	assertContains(t, raw, `"card_applied":true`, "Updated card", "Saved", `"preview_token":"[REDACTED]"`)
-	if bytes.Contains(raw, []byte("private-card-value")) {
-		t.Fatal("card diagnostics exposed a credential")
+	token := <-reflected
+	if token == "" {
+		t.Fatal("webhook did not receive the action token")
+	}
+	assertContains(t, raw, `"card_applied":true`, "Updated card [REDACTED] / [REDACTED]", "Saved [REDACTED] / [REDACTED]",
+		"Localized [REDACTED] / [REDACTED]", `"preview_token":"[REDACTED]"`)
+	traces := call(t, srv, "GET", "/_sandbox/traces?channel=webhook&event_type=card.action.trigger", "", 200)
+	assertContains(t, traces, "Saved [REDACTED] / [REDACTED]", "Updated card [REDACTED] / [REDACTED]")
+	history := call(t, srv, "GET", "/_sandbox/chats/"+cfg.Chats[0].ChatID+"/messages", "", 200)
+	assertContains(t, history, "Updated card [REDACTED] / [REDACTED]")
+	for _, projection := range [][]byte{raw, traces, history} {
+		for _, secret := range []string{token, cfg.Apps[0].VerificationToken, "private-card-value"} {
+			if bytes.Contains(projection, []byte(secret)) {
+				t.Fatal("webhook callback diagnostics exposed a credential")
+			}
+		}
+	}
+	message, ok := srv.Store().Messages().Get("om_click")
+	if !ok || !strings.Contains(message.Content, token) {
+		t.Fatal("diagnostic redaction changed the stored callback result")
+	}
+}
+
+func TestControlCardDetailPreservesStandardIcon(t *testing.T) {
+	cfg := config.Default()
+	srv := sandboxServer(t, cfg)
+	credential := cfg.Apps[0].VerificationToken
+	card := store.Card{
+		ID: "1", AppID: cfg.Apps[0].AppID, Type: "card_json",
+		JSON: json.RawMessage(fmt.Sprintf(`{"schema":"2.0","body":{"elements":[
+			{"tag":"markdown","content":"Info","icon":{"tag":"standard_icon","token":"info_outlined"}},
+			{"tag":"markdown","content":"Reflected","icon":{"tag":"standard_icon","token":%q}},
+			{"tag":"markdown","content":"Private","value":{"token":"private-value"}}
+		]}}`, credential)),
+	}
+	if err := srv.Store().CreateCard(card); err != nil {
+		t.Fatal(err)
+	}
+	raw := call(t, srv, "GET", "/_sandbox/cards/1", "", 200)
+	assertContains(t, raw, `"icon":{"tag":"standard_icon","token":"info_outlined"}`, `"icon":{"tag":"standard_icon","token":"[REDACTED]"}`, `"value":{"token":"[REDACTED]"}`)
+	if bytes.Contains(raw, []byte(credential)) || bytes.Contains(raw, []byte("private-value")) {
+		t.Fatal("card detail exposed a credential")
 	}
 }
