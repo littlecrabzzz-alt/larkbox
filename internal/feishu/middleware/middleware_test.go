@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -347,5 +348,48 @@ func TestAuditAndFault(t *testing.T) {
 				t.Fatalf("HTTP %d, handler called=%t, trace=%+v", w.Code, called, trace)
 			}
 		})
+	}
+}
+
+func TestAuditHeaderLimitsPreserveDownloads(t *testing.T) {
+	state := store.New(nil, 0)
+	body := "\x00binary\xff"
+	long := strings.Repeat("é", auditHeaderValueLimit)
+	handler := Audit(state, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != long {
+			t.Fatal("request header was modified")
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=fixture.bin")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Request-Id", long)
+		_, _ = io.WriteString(w, body)
+	}))
+	req := httptest.NewRequest("GET", "/images/example", nil)
+	for range 30 {
+		req.Header.Add("Accept", long)
+	}
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Body.String() != body || w.Header().Get("X-Request-Id") != long {
+		t.Fatalf("audit altered the binary response or headers: %v", w.Header())
+	}
+	trace := state.Traces()[0]
+	if len(trace.RequestHeaders.Values("Accept")) >= 30 || trace.RequestHeaders.Get("Accept") != long[:auditHeaderValueLimit] ||
+		trace.ResponseHeaders.Get("X-Request-Id") != long[:auditHeaderValueLimit] || trace.Code != nil || trace.ResponseBody != nil {
+		t.Fatal("trace lost metadata or recorded unbounded headers or attachment bytes")
+	}
+	for _, headers := range []http.Header{trace.RequestHeaders, trace.ResponseHeaders} {
+		var bytes int
+		for name, values := range headers {
+			for _, value := range values {
+				if len(value) > auditHeaderValueLimit || !utf8.ValidString(value) {
+					t.Fatal("captured header value exceeds its bounds or splits a UTF-8 rune")
+				}
+				bytes += len(name) + len(value)
+			}
+		}
+		if bytes > auditHeaderLimit {
+			t.Fatalf("captured %d header bytes", bytes)
+		}
 	}
 }

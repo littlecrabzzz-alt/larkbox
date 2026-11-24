@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bearer authentication, inbound auditing, and fault-injection middleware hooks.
 - Auth v3 internal app and tenant tokens, user OAuth v1/v2 with registered callbacks, PKCE, single-use grants, v2 offline access, and authenticated user profiles.
 - Official Feishu Go SDK integration tests for the complete authentication flow.
+- Bot profiles, chats and membership, message history with replies and threads, edits, recalls, and emoji reactions.
+- Image and file uploads and binary downloads, including resources referenced by messages.
+- In-process IM event hooks for bot membership changes and message recalls.
+- Official Feishu Go SDK REST tests for Bot, IM, reactions, and media.
 - Sample environment for optional live differential testing.
 
 ### Changed

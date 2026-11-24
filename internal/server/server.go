@@ -9,6 +9,8 @@ import (
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/auth"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/bot"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -34,6 +36,7 @@ type options struct {
 	feishu  []RegisterRoutes
 	sandbox []RegisterRoutes
 	fault   middleware.FaultHook
+	emitter im.EventEmitter
 }
 
 // WithFeishuRoutes registers routes under /open-apis/.
@@ -51,6 +54,11 @@ func WithFaultHook(hook middleware.FaultHook) Option {
 	return func(opts *options) { opts.fault = hook }
 }
 
+// WithEventEmitter subscribes to committed IM mutations.
+func WithEventEmitter(emitter im.EventEmitter) Option {
+	return func(opts *options) { opts.emitter = emitter }
+}
+
 // New creates and seeds a server and registers the configured routes.
 func New(cfg config.Config, opts ...Option) *Server {
 	settings := options{}
@@ -62,6 +70,8 @@ func New(cfg config.Config, opts ...Option) *Server {
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
+	bot.RegisterRoutes(feishu, state)
+	im.RegisterRoutes(feishu, state, settings.emitter)
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
 	}

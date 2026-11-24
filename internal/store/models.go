@@ -57,27 +57,32 @@ type Mention struct {
 type Reaction struct {
 	ID             string
 	OperatorOpenID string
+	OperatorAppID  string
+	Order          uint64
 	EmojiType      string
 	CreatedAt      time.Time
 }
 
 // Message stores an IM message and its reply, recall, and reaction state.
 type Message struct {
-	ID           string
-	AppID        string
-	ChatID       string
-	SenderOpenID string
-	RootID       string
-	ParentID     string
-	ThreadID     string
-	MsgType      string
-	Content      string
-	Mentions     []Mention
-	Deleted      bool
-	Updated      bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Reactions    []Reaction
+	ID            string
+	AppID         string
+	ChatID        string
+	SenderOpenID  string
+	SenderIsUser  bool
+	Order         uint64
+	RootID        string
+	ParentID      string
+	ThreadID      string
+	MsgType       string
+	Content       string
+	Mentions      []Mention
+	Deleted       bool
+	Updated       bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	Reactions     []Reaction
+	ReactionOrder uint64
 }
 
 // Card stores a CardKit entity and its last accepted sequence.
@@ -97,6 +102,9 @@ type Media struct {
 	Bytes       []byte
 	ContentType string
 	Filename    string
+	Kind        string
+	UploadType  string
+	Duration    int64
 }
 
 // TraceDirection identifies how an audited exchange originated.
