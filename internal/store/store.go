@@ -106,23 +106,25 @@ func (c *Collection[T]) Delete(key string) bool {
 
 // Store owns the sandbox's in-memory state.
 type Store struct {
-	mu               sync.RWMutex
-	now              func() time.Time
-	seed             config.Config
-	apps             Collection[App]
-	users            Collection[User]
-	chats            Collection[Chat]
-	messages         Collection[Message]
-	messageUUIDs     map[messageRequest]messageDedup
-	chatMessages     map[string]map[string]struct{}
-	threadMessages   map[string]map[string]struct{}
-	messageOrder     uint64
-	nextDedupCleanup time.Time
-	tokens           map[string]Token
-	media            Collection[Media]
-	cards            Collection[Card]
-	traces           []Trace
-	tracePos         int
+	mu                  sync.RWMutex
+	now                 func() time.Time
+	seed                config.Config
+	apps                Collection[App]
+	users               Collection[User]
+	chats               Collection[Chat]
+	messages            Collection[Message]
+	messageUUIDs        map[messageRequest]messageDedup
+	chatMessages        map[string]map[string]struct{}
+	threadMessages      map[string]map[string]struct{}
+	messageOrder        uint64
+	nextDedupCleanup    time.Time
+	tokens              map[string]Token
+	media               Collection[Media]
+	cards               Collection[Card]
+	cardUUIDs           map[cardRequest]time.Time
+	nextCardUUIDCleanup time.Time
+	traces              []Trace
+	tracePos            int
 }
 
 // New creates an empty store. A nil clock uses time.Now. A supplied clock
@@ -145,6 +147,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
 	s.messages.index = s.indexMessage
 	s.media = newCollection(&s.mu, func(m Media) string { return m.Key }, cloneMedia)
+	s.cardUUIDs = make(map[cardRequest]time.Time)
 	s.cards = newCollection(&s.mu, func(c Card) string { return c.ID }, cloneCard)
 	return s
 }
@@ -300,17 +303,10 @@ func (s *Store) Cards() []Card { return s.cards.List() }
 
 // UpdateCard atomically replaces a card if its sequence has strictly advanced.
 func (s *Store) UpdateCard(card Card) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.cards.items[card.ID]
-	if !ok {
-		return ErrNotFound
-	}
-	if card.Sequence <= current.Sequence {
-		return ErrStaleSequence
-	}
-	s.cards.items[card.ID] = cloneCard(card)
-	return nil
+	return s.ChangeCard(card.AppID, card.ID, "", "", card.Sequence, func(current *Card) error {
+		*current = card
+		return nil
+	})
 }
 
 // DeleteCard removes the card and reports whether it existed.
@@ -352,6 +348,8 @@ func (s *Store) reset() {
 	clear(s.tokens)
 	clear(s.media.items)
 	clear(s.cards.items)
+	clear(s.cardUUIDs)
+	s.nextCardUUIDCleanup = time.Time{}
 	clear(s.traces)
 	s.traces = s.traces[:0]
 	s.tracePos = 0

@@ -37,7 +37,7 @@ func (d *Dispatcher) VerifyWebhook(ctx context.Context, appID string) error {
 		return err
 	}
 	job := deliveryJob{app: app, kind: "url_verification", body: body}
-	delivery := d.webhookAttempt(ctx, job, 1, d.opts.VerificationTimeout, func(body []byte) error {
+	delivery := d.webhookAttempt(ctx, job, 1, d.opts.VerificationTimeout, func(_ context.Context, body []byte) error {
 		var echo struct {
 			Challenge string `json:"challenge"`
 		}
@@ -66,16 +66,16 @@ func (d *Dispatcher) deliverWebhook(ctx context.Context, job deliveryJob) Delive
 	return result
 }
 
-func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attempt int, timeout time.Duration, verify func([]byte) error) Delivery {
+func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attempt int, timeout time.Duration, verify func(context.Context, []byte) error) Delivery {
 	trace := job.trace("webhook", attempt)
 	trace.Method = http.MethodPost
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := d.postWebhook(ctx, job.app, &trace)
-	if err == nil && verify != nil {
-		err = verify(trace.ResponseBody)
-		if err == nil {
-			err = ctx.Err()
+	if err == nil {
+		err = ctx.Err()
+		if err == nil && verify != nil {
+			err = verify(ctx, trace.ResponseBody)
 		}
 	}
 	d.record(trace, err)

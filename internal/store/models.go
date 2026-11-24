@@ -76,6 +76,7 @@ type Message struct {
 	ThreadID      string
 	MsgType       string
 	Content       string
+	CardID        string
 	Mentions      []Mention
 	Deleted       bool
 	Updated       bool
@@ -89,6 +90,7 @@ type Message struct {
 type Card struct {
 	ID            string
 	AppID         string
+	Type          string
 	JSON          json.RawMessage
 	Elements      map[string]string
 	StreamingMode bool

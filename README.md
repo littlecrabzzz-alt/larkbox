@@ -60,7 +60,11 @@ For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exac
 
 Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
-To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends the same event to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends ordinary events to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+
+CardKit writes require the creating app's tenant token. Send or reply with an interactive message whose JSON-encoded `content` is `{"type":"card","data":{"card_id":"..."}}`. Fetching that message shows the latest card content. Card updates require a positive sequence greater than the previous one. Stale sequences return HTTP 400 and code `300317`. A successful mutation UUID can be replayed on the same card and operation for one hour. [Feishu CardKit batch update reference](https://open.larkoffice.com/document/cardkit-v1/card/batch_update)
+
+In-process tests can call `Server.TriggerCardAction` to simulate an interaction by a chat member. Each action has a three-second deadline and goes to one active WebSocket session, or to the configured webhook if no session is active. The callback is attempted once and can return a toast and an updated card.
 
 ## Non-Goals
 
@@ -143,7 +147,7 @@ Status Legend:
 | `POST / GET / DELETE /open-apis/im/v1/messages/:message_id/reactions` | Emoji reactions | `SDK-Tested` |
 | `POST / GET /open-apis/im/v1/images` & `/files` | Multipart upload & binary download | `SDK-Tested` |
 | `GET /open-apis/im/v1/messages/:message_id/resources/:file_key` | Download message attachment resources | `SDK-Tested` |
-| `POST / PUT / PATCH /open-apis/cardkit/v1/cards*` | Streaming CardKit with monotonic `sequence` check | `Planned` |
+| `POST / PUT / PATCH / DELETE /open-apis/cardkit/v1/cards*` | Card entities, streaming text, settings, element edits, and atomic batches | `SDK-Tested` |
 
 ### Events & Callbacks
 
@@ -154,7 +158,7 @@ Status Legend:
 | `im.message.receive_v1` | p2p, group, `@bot` mentions, replies & threads | `SDK-Tested` |
 | `im.message.recalled_v1` | Triggered on message recall | `SDK-Tested` |
 | `im.chat.member.bot.added_v1` / `deleted_v1` | Bot added/removed from chat | `SDK-Tested` |
-| `card.action.trigger` | Interactive button/form callback with toast/card reply | `Planned` |
+| `card.action.trigger` | Synchronous button and form callbacks with toast and persisted card updates | `SDK-Tested` |
 
 ## Verification & Fidelity Strategy
 

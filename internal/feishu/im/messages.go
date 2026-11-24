@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/cardkit"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -93,8 +94,13 @@ func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.Ne
 		return store.NewMessage{}, false
 	}
 	encoded, mentions := h.normalizeMentions(req.MsgType, *req.Content, content)
+	var cardID string
+	if req.MsgType == "interactive" {
+		cardID = cardkit.EntityReference(content)
+	}
 	return store.NewMessage{
 		MsgType: req.MsgType, Content: encoded, UUID: req.UUID, Mentions: mentions,
+		CardID: cardID,
 	}, true
 }
 
@@ -133,7 +139,7 @@ func checkContent(w http.ResponseWriter, kind string, encoded *string) (map[stri
 			return content, true
 		}
 	case "interactive":
-		if validCard(content) {
+		if cardkit.ValidMessageCard(content) || cardkit.EntityReference(content) != "" {
 			return content, true
 		}
 	case "image":
@@ -405,11 +411,11 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 			return protocol.NewError(protocol.IMInvalidParameter, nil)
 		}
 		if patch {
-			if !sharedCard(decodeContentObject(m.Content)) || !sharedCard(content) {
+			if (m.CardID == "" && !cardkit.SharedMessageCard(decodeContentObject(m.Content))) || !cardkit.SharedMessageCard(content) {
 				return protocol.APIError{Code: 230001, Message: "Only shared message cards can be updated.", Status: http.StatusBadRequest}
 			}
 		}
-		m.MsgType, m.Content, m.Mentions = req.MsgType, encoded, mentions
+		m.MsgType, m.Content, m.Mentions, m.CardID = req.MsgType, encoded, mentions, ""
 		m.Updated, m.UpdatedAt = true, h.state.Now()
 		return nil
 	})

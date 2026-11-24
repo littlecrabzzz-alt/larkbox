@@ -310,6 +310,11 @@ func (d *Dispatcher) runJob(job deliveryJob) {
 
 func (d *Dispatcher) deliver(ctx context.Context, job deliveryJob) (Result, error) {
 	result := Result{EventID: job.id}
+	if job.kind == cardActionTrigger {
+		delivered := d.deliverCardAction(ctx, job, nil)
+		result.Deliveries = []Delivery{delivered}
+		return result, delivered.Err
+	}
 	if job.app.WebhookURL == "" {
 		result.Deliveries = appendDelivery(nil, d.deliverWebSocket(ctx, job))
 	} else {
@@ -345,7 +350,7 @@ func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Deli
 		if attempts > 0 && (!d.canRetry(ctx) || s.disconnected()) {
 			return result
 		}
-		result = d.socketAttempt(ctx, s, job, attempt)
+		result = d.socketAttempt(ctx, s, job, attempt, nil)
 		if attempts == 0 && errors.Is(result.Err, errDisconnectedBeforeWrite) {
 			// No frame reached this replica. Another live session can still
 			// receive the first delivery without using the ACK retry budget.
@@ -390,7 +395,7 @@ func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, peerDone <-chan
 	return false
 }
 
-func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job deliveryJob, attempt int) Delivery {
+func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job deliveryJob, attempt int, verify func(context.Context, []byte) error) Delivery {
 	trace := job.trace("websocket", attempt)
 	trace.Path = socketPath
 	ctx, cancel := context.WithTimeout(ctx, d.opts.AckTimeout)
@@ -416,8 +421,13 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 			audit.Headers[key] = values[0]
 		}
 		trace.ResponseBody, _ = json.Marshal(audit)
-		if !success(trace.Status) {
+		switch {
+		case !success(trace.Status):
 			result.err = fmt.Errorf("websocket acknowledgement status %d", trace.Status)
+		case ctx.Err() != nil:
+			result.err = ctx.Err()
+		case verify != nil:
+			result.err = verify(ctx, result.response.Data)
 		}
 	}
 	d.record(trace, result.err)

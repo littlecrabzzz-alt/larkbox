@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SDK-compatible WebSocket event delivery with single-use tickets, Protobuf ping/pong, and correlated client acknowledgements.
 - Schema 2.0 webhooks with URL verification, optional encryption and signing, and retries that preserve the event ID.
 - Outbound audit traces for WebSocket and webhook attempts, with official Go SDK coverage for received and recalled messages and bot membership events.
+- CardKit v1 card creation, text streaming, settings, element edits, and atomic batch updates with app ownership, monotonic sequences, and scoped UUID replay.
+- Card entity references in interactive messages and replies, with the current card reflected in message reads.
+- Synchronous `card.action.trigger` callbacks over WebSocket or signed, encrypted webhooks, with toast capture, validated card updates, and outbound audit traces.
+- Official Feishu Go SDK integration tests for CardKit REST endpoints and both callback transports.
 - Sample environment for optional live differential testing.
 
 ### Changed
