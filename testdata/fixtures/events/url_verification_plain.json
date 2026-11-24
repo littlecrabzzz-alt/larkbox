@@ -1,0 +1,8 @@
+{
+  "status": 200,
+  "body": {
+    "challenge": "fixture:nonce",
+    "token": "fixture:redacted",
+    "type": "url_verification"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "code": 232006,
+    "msg": "Your request specifies a chat_id which is invalid."
+  }
+}

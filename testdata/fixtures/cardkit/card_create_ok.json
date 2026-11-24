@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "card_id": "fixture:card_id"
+    }
+  }
+}

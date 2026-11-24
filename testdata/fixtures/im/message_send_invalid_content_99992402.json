@@ -1,0 +1,15 @@
+{
+  "status": 400,
+  "body": {
+    "code": 99992402,
+    "msg": "field validation failed",
+    "error": {
+      "field_violations": [
+        {
+          "field": "body",
+          "description": "Expected a valid JSON object."
+        }
+      ]
+    }
+  }
+}

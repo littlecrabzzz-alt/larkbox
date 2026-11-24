@@ -1,0 +1,20 @@
+{
+  "status": 200,
+  "body": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "fixture:id",
+      "event_type": "im.message.recalled_v1",
+      "create_time": "fixture:millis",
+      "token": "fixture:redacted",
+      "app_id": "fixture:id",
+      "tenant_key": "fixture:redacted"
+    },
+    "event": {
+      "chat_id": "fixture:id",
+      "message_id": "fixture:id",
+      "recall_time": "fixture:millis",
+      "recall_type": "message_owner"
+    }
+  }
+}

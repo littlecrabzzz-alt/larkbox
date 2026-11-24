@@ -177,8 +177,45 @@ To prevent mock drift, `larkbox` uses a four-layer verification pyramid:
 
 1. **Unit & State-Machine Tests**: Table-driven Go tests covering strict validation, error codes, crypto, and concurrent state mutations (`go test -race ./...`).
 2. **Official SDK Integration Tests**: End-to-end tests running official `github.com/larksuite/oapi-sdk-go/v3` (both REST and `ws.Client`) directly against an in-process `larkbox` server.
-3. **Golden Fixtures**: Sanitized request/response/event captures from real Feishu stored in `testdata/fixtures/`.
-4. **Live Differential Tests (`//go:build live`)**: Opt-in suite that executes the exact same test assertions against either local `larkbox` or a real Feishu Test Tenant (`FEISHU_LIVE=1`) to catch upstream protocol changes.
+3. **Golden Fixtures**: Normal CI checks REST and webhook contracts against synthetic sandbox reference fixtures. See the [live capture and sanitization guide](testdata/fixtures/README.md).
+4. **Live Differential Tests (`//go:build live`)**: Opt-in suite that runs the same scenarios against local `larkbox` or a real Feishu test tenant (`FEISHU_LIVE=1`), with typed contracts for response differences.
+
+Run the differential suite locally with the built-in test app and chat.
+
+```sh
+go test -tags=live ./tests/live_test/...
+```
+
+For a real Feishu run, copy `.env.example` to the Git-ignored `.env.local` at
+the repository root and fill in `FEISHU_APP_ID` and `FEISHU_APP_SECRET` for a
+self-built app with its bot enabled. Exported variables take precedence over
+file values. `FEISHU_BASE_URL` defaults to `https://open.feishu.cn`. HTTP is
+allowed only for `localhost`, `127.0.0.1`, and `::1`.
+
+Grant the app these Feishu scopes for the full suite.
+
+- `im:message` for message send, reply, detail, recall, and reactions. The
+  corresponding narrower permissions include `im:message:send_as_bot`,
+  `im:message:readonly`, `im:message:recall`, and
+  `im:message.reactions:write_only`. [Feishu scope list](https://open.larkoffice.com/document/ukTMukTMukTM/uYTM5UjL2ETO14iNxkTN/scope-list)
+- `im:message.group_msg` for bot reads of group chat history.
+  [Feishu group history permissions](https://open.feishu.cn/solutions/detail/ticket?lang=zh-CN)
+- `im:resource` for image upload and download.
+  [Feishu IM media permissions](https://open.feishu.cn/solutions/detail/ticket?lang=zh-CN)
+- `cardkit:card:write` for card creation and streaming updates.
+  [Feishu streaming card setup](https://open.feishu.cn/document/cardkit-v1/streaming-updates-openapi-overview?lang=en-US)
+
+```sh
+FEISHU_LIVE=1 go test -tags=live -count=1 -v ./tests/live_test/...
+```
+
+Set `FEISHU_TEST_CHAT_ID` to exercise the group message and reaction lifecycle
+in a dedicated ordinary group chat that includes the bot. Set `FEISHU_TEST_OPEN_ID` to enable
+the optional direct message check. The tests register cleanup for every test
+message and reaction. The suite also uploads a synthetic PNG and closes its
+streaming card entity. Set `FEISHU_LIVE=0` to force local mode if your
+`.env.local` enables Feishu. See the
+[fixture capture and sanitization guide](testdata/fixtures/README.md).
 
 ## Roadmap
 

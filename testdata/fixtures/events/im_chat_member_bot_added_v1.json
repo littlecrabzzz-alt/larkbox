@@ -1,0 +1,23 @@
+{
+  "status": 200,
+  "body": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "fixture:id",
+      "event_type": "im.chat.member.bot.added_v1",
+      "create_time": "fixture:millis",
+      "token": "fixture:redacted",
+      "app_id": "fixture:id",
+      "tenant_key": "fixture:redacted"
+    },
+    "event": {
+      "chat_id": "fixture:id",
+      "operator_id": {
+        "open_id": "fixture:id"
+      },
+      "operator_tenant_key": "fixture:redacted",
+      "external": false,
+      "name": "Fixture Chat"
+    }
+  }
+}

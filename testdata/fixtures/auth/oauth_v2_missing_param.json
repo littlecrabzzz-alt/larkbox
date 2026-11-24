@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "body": {
+    "code": 20063,
+    "error": "invalid_request",
+    "error_description": "Missing required parameter: grant_type."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "code": 300317,
+    "msg": "The sequence number for operating on the card did not increment consecutively."
+  }
+}

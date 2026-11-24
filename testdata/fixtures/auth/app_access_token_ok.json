@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "body": {
+    "code": 0,
+    "msg": "ok",
+    "app_access_token": "fixture:app_token",
+    "tenant_access_token": "fixture:tenant",
+    "expire": 7200
+  }
+}
