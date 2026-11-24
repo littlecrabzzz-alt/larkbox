@@ -354,7 +354,7 @@ func TestAuditAndFault(t *testing.T) {
 func TestAuditHeaderLimitsPreserveDownloads(t *testing.T) {
 	state := store.New(nil, 0)
 	body := "\x00binary\xff"
-	long := strings.Repeat("é", auditHeaderValueLimit)
+	long := strings.Repeat("é", store.TraceHeaderValueLimit)
 	handler := Audit(state, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != long {
 			t.Fatal("request header was modified")
@@ -374,21 +374,21 @@ func TestAuditHeaderLimitsPreserveDownloads(t *testing.T) {
 		t.Fatalf("audit altered the binary response or headers: %v", w.Header())
 	}
 	trace := state.Traces()[0]
-	if len(trace.RequestHeaders.Values("Accept")) >= 30 || trace.RequestHeaders.Get("Accept") != long[:auditHeaderValueLimit] ||
-		trace.ResponseHeaders.Get("X-Request-Id") != long[:auditHeaderValueLimit] || trace.Code != nil || trace.ResponseBody != nil {
+	if len(trace.RequestHeaders.Values("Accept")) >= 30 || trace.RequestHeaders.Get("Accept") != long[:store.TraceHeaderValueLimit] ||
+		trace.ResponseHeaders.Get("X-Request-Id") != long[:store.TraceHeaderValueLimit] || trace.Code != nil || trace.ResponseBody != nil {
 		t.Fatal("trace lost metadata or recorded unbounded headers or attachment bytes")
 	}
 	for _, headers := range []http.Header{trace.RequestHeaders, trace.ResponseHeaders} {
 		var bytes int
 		for name, values := range headers {
 			for _, value := range values {
-				if len(value) > auditHeaderValueLimit || !utf8.ValidString(value) {
+				if len(value) > store.TraceHeaderValueLimit || !utf8.ValidString(value) {
 					t.Fatal("captured header value exceeds its bounds or splits a UTF-8 rune")
 				}
 				bytes += len(name) + len(value)
 			}
 		}
-		if bytes > auditHeaderLimit {
+		if bytes > store.TraceHeaderLimit {
 			t.Fatalf("captured %d header bytes", bytes)
 		}
 	}

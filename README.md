@@ -60,6 +60,8 @@ For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exac
 
 Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
+To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends the same event to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+
 ## Non-Goals
 
 - **Pixel-perfect native Feishu rendering**. The planned Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.
@@ -147,11 +149,11 @@ Status Legend:
 
 | Event / Transport | Notes | Status |
 |---|---|---|
-| HTTP Webhook (Schema 2.0) | `url_verification`, AES-256-CBC, `X-Lark-Signature`, 3s retry | `Planned` |
-| WebSocket Long Connection | `/callback/ws/endpoint` + `/ws/v2` Protobuf frames | `Planned` |
-| `im.message.receive_v1` | p2p, group, `@bot` mentions, replies & threads | `Planned` |
-| `im.message.recalled_v1` | Triggered on message recall | `Planned` |
-| `im.chat.member.bot.added_v1` / `deleted_v1` | Bot added/removed from chat | `Planned` |
+| HTTP Webhook (Schema 2.0) | `url_verification`, AES-256-CBC, `X-Lark-Signature`, 3s retry | `SDK-Tested` |
+| WebSocket Long Connection | `/callback/ws/endpoint` + `/ws/v2` Protobuf frames | `SDK-Tested` |
+| `im.message.receive_v1` | p2p, group, `@bot` mentions, replies & threads | `SDK-Tested` |
+| `im.message.recalled_v1` | Triggered on message recall | `SDK-Tested` |
+| `im.chat.member.bot.added_v1` / `deleted_v1` | Bot added/removed from chat | `SDK-Tested` |
 | `card.action.trigger` | Interactive button/form callback with toast/card reply | `Planned` |
 
 ## Verification & Fidelity Strategy

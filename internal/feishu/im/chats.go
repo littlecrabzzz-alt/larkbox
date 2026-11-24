@@ -572,8 +572,9 @@ func (h handler) emitMembership(r *http.Request, chatID string, bot store.App, a
 	if add {
 		kind = "im.chat.member.bot.added_v1"
 	}
+	actor := caller(r)
 	h.emitter.Emit(r.Context(), Event{
-		Type: kind, AppID: bot.AppID, ChatID: chatID, ActorID: caller(r).OpenID,
+		Type: kind, AppID: bot.AppID, ChatID: chatID, ActorID: actor.OpenID, ActorAppID: actor.AppID,
 		BotOpenID: bot.BotOpenID, At: h.state.Now(),
 	})
 }

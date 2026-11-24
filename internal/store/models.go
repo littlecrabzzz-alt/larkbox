@@ -132,6 +132,8 @@ type Trace struct {
 	Code                  *int
 	Latency               time.Duration
 	AppID                 string
+	EventType             string
+	Error                 string
 	EventID               string
 	Channel               string
 	Attempt               int

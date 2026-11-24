@@ -23,13 +23,15 @@ import (
 
 // Event identifies an IM mutation for the app receiving the event.
 type Event struct {
-	Type      string
-	AppID     string
-	ChatID    string
-	MessageID string
-	ActorID   string
-	BotOpenID string
-	At        time.Time
+	Type       string
+	AppID      string
+	ChatID     string
+	MessageID  string
+	ActorID    string
+	ActorAppID string
+	RecallType string
+	BotOpenID  string
+	At         time.Time
 }
 
 // EventEmitter receives committed IM events. Implementations must support

@@ -426,21 +426,29 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 
 func (h handler) recallMessage(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
-	m, err := h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, chat store.Chat) error {
-		if !sentBy(actor, m) && (chat.ChatMode != "group" || !managesChat(actor, chat)) {
-			return noPermission
+	recallType := "message_owner"
+	m, recipients, err := h.state.RecallIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, chat store.Chat) error {
+		if !sentBy(actor, m) {
+			if chat.ChatMode != "group" || !managesChat(actor, chat) {
+				return noPermission
+			}
+			recallType = "group_manager"
+			if chat.OwnerID == actor.OpenID {
+				recallType = "group_owner"
+			}
 		}
-		m.Deleted, m.UpdatedAt = true, h.state.Now()
 		return nil
 	})
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
 	}
-	h.emitter.Emit(r.Context(), Event{
-		Type: "im.message.recalled_v1", AppID: m.AppID, ChatID: m.ChatID,
-		MessageID: m.ID, ActorID: actor.OpenID, At: m.UpdatedAt,
-	})
+	for _, appID := range recipients {
+		h.emitter.Emit(r.Context(), Event{
+			Type: "im.message.recalled_v1", AppID: appID, ChatID: m.ChatID,
+			MessageID: m.ID, ActorID: actor.OpenID, ActorAppID: actor.AppID, RecallType: recallType, At: m.UpdatedAt,
+		})
+	}
 	_ = protocol.WriteSuccess(w, nil)
 }
 
