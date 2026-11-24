@@ -24,6 +24,9 @@ var ErrOutsideChat = errors.New("caller is outside the chat")
 // ErrMessageDeleted indicates that the message has already been recalled.
 var ErrMessageDeleted = errors.New("message has been recalled")
 
+// ErrMessageUUIDConflict indicates that an app reused a live UUID for a different request.
+var ErrMessageUUIDConflict = errors.New("message UUID is already in use")
+
 // canReadChat requires the store lock.
 func (s *Store) canReadChat(actor IMActor, chat Chat, requireBot bool) bool {
 	if chat.ChatMode == "p2p" && chat.AppID != "" && chat.AppID != actor.AppID {
@@ -119,16 +122,23 @@ func (s *Store) EnsureP2PChat(actor IMActor, chat Chat) (Chat, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneChat(s.ensureP2PChat(actor, chat)), nil
+	direct, found := s.resolveP2PChat(actor, chat)
+	if !found {
+		direct.CreatedAt = s.Now()
+		s.chats.put(direct)
+	}
+	return cloneChat(direct), nil
 }
 
-func (s *Store) ensureP2PChat(actor IMActor, chat Chat) Chat {
+// resolveP2PChat requires the store lock. It computes the canonical chat ID
+// without creating a chat, so rejected sends leave no new conversation.
+func (s *Store) resolveP2PChat(actor IMActor, chat Chat) (Chat, bool) {
 	members := slices.Clone(chat.MemberIDs)
 	slices.Sort(members)
 	hash := sha256.Sum256([]byte(actor.AppID + "\x00" + members[0] + "\x00" + members[1]))
 	chat.ChatID = fmt.Sprintf("oc_%x", hash[:16])
 	if existing, ok := s.chats.items[chat.ChatID]; ok {
-		return existing
+		return existing, true
 	}
 	// ponytail: seeded direct chats are few. Index seeded pairs if seed sizes grow.
 	for _, key := range slices.Sorted(maps.Keys(s.chats.items)) {
@@ -136,25 +146,23 @@ func (s *Store) ensureP2PChat(actor IMActor, chat Chat) Chat {
 		if candidate.ChatMode == "p2p" && s.canReadChat(actor, candidate, false) &&
 			len(candidate.MemberIDs) == 2 && slices.Contains(candidate.MemberIDs, members[0]) &&
 			slices.Contains(candidate.MemberIDs, members[1]) {
-			return candidate
+			return candidate, true
 		}
 	}
 	chat.AppID = actor.AppID
-	chat.CreatedAt = s.Now()
-	s.chats.put(chat)
-	return chat
+	return chat, false
 }
 
 type messageRequest struct {
-	actor IMActor
-	chat  string
-	peer  string
-	reply string
+	appID string
+	reply bool
 	uuid  string
 }
 
 type messageDedup struct {
 	id      string
+	target  string
+	actor   IMActor
 	expires time.Time
 }
 
@@ -179,6 +187,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	var chat Chat
 	var parent Message
 	var err error
+	var createDirect bool
 	switch {
 	case req.ParentID != "":
 		parent, err = s.imMessage(actor, req.ParentID)
@@ -188,6 +197,15 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	case req.Peer != "":
 		if peer, ok := s.users.items[req.Peer]; !ok || peer.Inactive || actor.OpenID == req.Peer {
 			err = ErrOutsideChat
+		} else {
+			var found bool
+			chat, found = s.resolveP2PChat(actor, Chat{
+				ChatMode: "p2p", OwnerID: req.Peer, MemberIDs: []string{actor.OpenID, req.Peer},
+			})
+			createDirect = !found
+			if found && !s.canReadChat(actor, chat, false) {
+				err = ErrOutsideChat
+			}
 		}
 	default:
 		chat, err = s.imChat(actor, req.ChatID)
@@ -197,7 +215,11 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	}
 
 	now := s.Now()
-	key := messageRequest{actor: actor, chat: req.ChatID, peer: req.Peer, reply: req.ParentID, uuid: req.UUID}
+	key := messageRequest{appID: actor.AppID, reply: req.ParentID != "", uuid: req.UUID}
+	target := chat.ChatID
+	if key.reply {
+		target = parent.ID
+	}
 	if req.UUID != "" {
 		if !now.Before(s.nextDedupCleanup) {
 			maps.DeleteFunc(s.messageUUIDs, func(_ messageRequest, record messageDedup) bool {
@@ -206,14 +228,16 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 			s.nextDedupCleanup = now.Add(time.Minute)
 		}
 		if record, exists := s.messageUUIDs[key]; exists && now.Before(record.expires) {
-			if m, err := s.imMessage(actor, record.id); err == nil {
-				return cloneMessage(m), nil
+			if record.target != target || record.actor != actor {
+				return Message{}, ErrMessageUUIDConflict
 			}
+			m, err := s.imMessage(actor, record.id)
+			return cloneMessage(m), err
 		}
 	}
 
 	m := Message{
-		ID: protocol.NewID(protocol.MessageID), ChatID: req.ChatID, AppID: actor.AppID,
+		ID: protocol.NewID(protocol.MessageID), ChatID: chat.ChatID, AppID: actor.AppID,
 		SenderOpenID: actor.OpenID, SenderIsUser: actor.IsUser, MsgType: req.MsgType,
 		Content: req.Content, Mentions: slices.Clone(req.Mentions), CreatedAt: now, UpdatedAt: now,
 	}
@@ -238,10 +262,9 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		if m.ThreadID != "" {
 			m.ParentID = m.RootID
 		}
-	case req.Peer != "":
-		m.ChatID = s.ensureP2PChat(actor, Chat{
-			ChatMode: "p2p", OwnerID: req.Peer, MemberIDs: []string{actor.OpenID, req.Peer},
-		}).ChatID
+	case createDirect:
+		chat.CreatedAt = now
+		s.chats.put(chat)
 	case chat.GroupMessageType == "thread":
 		m.ThreadID = protocol.NewID(protocol.ThreadID)
 	}
@@ -249,7 +272,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	m.Order = s.messageOrder
 	s.messages.put(m)
 	if req.UUID != "" {
-		s.messageUUIDs[key] = messageDedup{id: m.ID, expires: now.Add(time.Hour)}
+		s.messageUUIDs[key] = messageDedup{id: m.ID, target: target, actor: actor, expires: now.Add(time.Hour)}
 	}
 	return cloneMessage(m), nil
 }

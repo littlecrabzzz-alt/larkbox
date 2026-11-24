@@ -138,6 +138,8 @@ func writeFailure(w http.ResponseWriter, err error, missing protocol.APIError) {
 		_ = protocol.WriteError(w, apiErr)
 	case errors.Is(err, store.ErrOutsideChat):
 		_ = protocol.WriteError(w, protocol.NewError(protocol.IMBotOutsideChat, nil))
+	case errors.Is(err, store.ErrMessageUUIDConflict):
+		fail(w, protocol.IMInvalidParameter, "The UUID is already bound to another request.")
 	case errors.Is(err, store.ErrMessageDeleted):
 		fail(w, 230011, "The message is recalled.")
 	default:

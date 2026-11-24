@@ -342,6 +342,19 @@ func sdkReactions(t *testing.T, client *lark.Client, chatID string) {
 		requireSDKCode(t, limit.CodeError, want)
 	}
 
+	for _, emoji := range []string{"OnIt", "2022"} {
+		add(emoji)
+	}
+	unknown, err := api.Create(t.Context(), larkim.NewCreateMessageReactionReqBuilder().MessageId(id).
+		Body(larkim.NewCreateMessageReactionReqBodyBuilder().ReactionType(
+			larkim.NewEmojiBuilder().EmojiType("UNKNOWN_EMOJI_XYZ").Build()).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, unknown.CodeError, 231001)
+	badFilter, err := api.List(t.Context(), larkim.NewListMessageReactionReqBuilder().MessageId(id).
+		ReactionType("UNKNOWN_EMOJI_XYZ").Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, badFilter.CodeError, 231001)
+
 }
 
 func sdkMedia(t *testing.T, client *lark.Client, chatID string) {

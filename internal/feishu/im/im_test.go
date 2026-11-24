@@ -167,7 +167,7 @@ func TestIMStrictMessagesAndQueries(t *testing.T) {
 		{"milliseconds in filter", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&start_time=1700000000123", demoBot, "", 99992402},
 		{"reversed time range", "GET", "/messages?container_id_type=chat&container_id=" + demoGroup + "&start_time=2&end_time=1", demoBot, "", 99992402},
 		{"bad member mode", "POST", "/chats/" + demoGroup + "/members?succeed_type=3", demoBot, `{"id_list":["alice"]}`, 99992402},
-		{"empty member list", "POST", "/chats/" + demoGroup + "/members", demoBot, `{"id_list":[]}`, 99992402},
+		{"empty member list", "POST", "/chats/" + demoGroup + "/members", demoBot, `{"id_list":[]}`, 232027},
 		{"public group name", "POST", "/chats", demoBot, `{"chat_type":"public","name":"a"}`, 99992402},
 		{"invalid owner", "POST", "/chats", demoBot, `{"owner_id":"ou_missing"}`, 99992402},
 		{"too many p2p members", "POST", "/chats?user_id_type=user_id", demoBot, `{"chat_mode":"p2p","user_id_list":["alice","bob"]}`, 99992402},
@@ -411,6 +411,22 @@ func TestIMUUIDExpiresAndValidatesTargets(t *testing.T) {
 	if other := send(foreignBot); other.ID == initial.ID {
 		t.Fatal("different apps shared a deduplication record")
 	}
+	originalChats := len(s.state.Chats().List())
+	originalMessages := len(s.state.Messages().List())
+	conflict := `{"receive_id":"ou_larkbox_bob","msg_type":"text","content":"{\"text\":\"other target\"}","uuid":"shared"}`
+	expect(t, s.request("POST", "/messages?receive_id_type=open_id", demoBot, conflict), 230001, nil)
+	expect(t, s.request("POST", "/messages?receive_id_type=chat_id", demoUser,
+		`{"receive_id":"oc_larkbox_group","msg_type":"text","content":"{\"text\":\"other sender\"}","uuid":"shared"}`), 230001, nil)
+	if len(s.state.Chats().List()) != originalChats || len(s.state.Messages().List()) != originalMessages {
+		t.Fatal("conflicting UUID reuse created a conversation or message")
+	}
+
+	// Email and chat ID identify the same seeded direct conversation.
+	alice := s.cfg.Users[0]
+	direct := s.send(t, demoBot, "email", alice.Email, "text", `{"text":"direct"}`, "direct-uuid")
+	if retry := s.send(t, demoBot, "chat_id", direct.ChatID, "text", `{"text":"direct"}`, "direct-uuid"); retry.ID != direct.ID {
+		t.Fatal("deduplication did not recognize the canonical direct chat")
+	}
 	s.clock.Add((time.Hour - time.Millisecond).Milliseconds())
 	if retry := send(demoBot); retry.ID != initial.ID {
 		t.Fatal("deduplication expired before one hour")
@@ -427,6 +443,10 @@ func TestIMUUIDExpiresAndValidatesTargets(t *testing.T) {
 	if replyRepeat.ID != replyOriginal.ID {
 		t.Fatal("repeated reply was not deduplicated")
 	}
+	otherParent := s.send(t, demoBot, "chat_id", demoGroup, "text", `{"text":"another parent"}`, "")
+	expect(t, s.request("POST", "/messages/"+otherParent.ID+"/reply", demoBot, reply), 230001, nil)
+	expect(t, s.request("POST", "/messages/"+otherParent.ID+"/reply", demoBot,
+		strings.Replace(reply, "reply-uuid", "shared", 1)), 0, nil)
 	expect(t, s.request("POST", "/messages/om_missing/reply", demoBot, reply), 230001, nil)
 	expect(t, s.request("DELETE", "/messages/"+initial.ID, demoBot, ""), 0, nil)
 	expect(t, s.request("POST", "/messages/"+initial.ID+"/reply", demoBot, reply), 230011, nil)
@@ -467,4 +487,6 @@ func TestIMReactionFilterValidation(t *testing.T) {
 		expect(t, s.request("GET", path+"?reaction_type="+query, demoBot, ""), 99992402, nil)
 	}
 	expect(t, s.request("POST", path, demoBot, `{"reaction_type":{"emoji_type":"SMILE NOW"}}`), 99992402, nil)
+	expect(t, s.request("POST", path, demoBot, `{"reaction_type":{"emoji_type":"UNKNOWN_EMOJI_XYZ"}}`), 231001, nil)
+	expect(t, s.request("GET", path+"?reaction_type=UNKNOWN_EMOJI_XYZ", demoBot, ""), 231001, nil)
 }

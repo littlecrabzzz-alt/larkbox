@@ -378,19 +378,18 @@ type memberChange struct {
 	available, unavailable    int
 }
 
-func (m memberChange) rejected(mode string) bool {
+func (m memberChange) failure(mode string) protocol.APIError {
 	if m.available == 0 {
-		return true
+		return protocol.APIError{
+			Code: 232027, Status: http.StatusBadRequest,
+			Message: "There are no valid members in the ID list specified in your request.",
+		}
 	}
-	switch mode {
-	case "0":
-		// The default skips inactive users but fails on other unavailable IDs.
-		return m.unavailable > 0
-	case "2":
-		return len(m.invalid)+len(m.missing) > 0
-	default:
-		return false
+	// The default skips inactive users but fails on other unavailable IDs.
+	if (mode == "0" && m.unavailable > 0) || (mode == "2" && len(m.invalid)+len(m.missing) > 0) {
+		return invalidChatParameter
 	}
+	return protocol.APIError{}
 }
 
 type memberTarget struct {
@@ -422,7 +421,7 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	if kind == "app_id" {
 		limit = 5
 	}
-	if len(req.IDs) == 0 || len(req.IDs) > limit {
+	if req.IDs == nil || len(req.IDs) > limit || (!add && len(req.IDs) == 0) {
 		badField(w, "id_list", "Invalid number of members.")
 		return
 	}
@@ -433,6 +432,7 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 		ids[id] = h.resolveMember(kind, id, bots)
 	}
 	var result memberChange
+	var selectionFailure protocol.APIError
 	var changedBots []store.App
 	actor, id := caller(r), r.PathValue("chat_id")
 	err := h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
@@ -447,8 +447,11 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result, changedBots = applyMembers(chat, req.IDs, ids, bots, actor, add)
-		if add && result.rejected(mode) {
-			return invalidChatParameter
+		if add {
+			selectionFailure = result.failure(mode)
+			if selectionFailure.Code != protocol.Success {
+				return selectionFailure
+			}
 		}
 		return nil
 	})
@@ -459,9 +462,8 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 		data["pending_approval_id_list"] = emptySlice(result.pending)
 	}
 	if err != nil {
-		if add && errors.Is(err, invalidChatParameter) && result.rejected(mode) && len(result.invalid)+len(result.missing) > 0 {
-			failure := invalidChatParameter
-			_ = protocol.WriteJSON(w, failure.Status, protocol.Envelope{Code: failure.Code, Msg: failure.Message, Data: data})
+		if selectionFailure.Code != protocol.Success {
+			_ = protocol.WriteJSON(w, selectionFailure.Status, protocol.Envelope{Code: selectionFailure.Code, Msg: selectionFailure.Message, Data: data})
 			return
 		}
 		writeChatFailure(w, err)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -14,6 +15,39 @@ var reactionMessageMissing = protocol.APIError{Code: 231003, Message: "The messa
 var reactionMissing = protocol.APIError{Code: 231001, Message: "The reaction does not exist.", Status: http.StatusBadRequest}
 
 var emojiType = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+
+// Feishu documents these case-sensitive values for message reactions.
+// https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+var reactionEmojis = strings.Fields(`
+	18X 2022 ANGRY APPLAUSE AWESOMEN Alarm BEAR BEER BETRAYED BLUBBER BLUSH BOMB BULL Basketball
+	BeamingFace BubbleTea CAKE CALF CANDIEDHAWS CHUCKLE CLAP CLEAVER COMFORT CRAZY CRY CUCUMBER
+	CheckMark ClownFace Coffee ColdSweat CrossMark DIZZY DONE DROOL DROWSY DULL Delighted Drumstick
+	EMBARRASSED ENOUGH ERROR EYESCLOSED EatingFood FACEPALM FINGERHEART FIRECRACKER FIREWORKS FISTBUMP
+	FORTUNE FROWN Fire FullMoonFace GIFT GLANCE GeneralBusinessTrip GeneralDoNotDisturb
+	GeneralInMeetingBusy GeneralMoonRest GeneralSun GeneralTravellingCar GeneralWorkFromHome Get GoGoGo
+	HAMMER HAUGHTY HEADSET HEART HEARTBROKEN HIGHFIVE HUG HUSKY HappyDragon Hundred INNOCENTSMILE JIAYI
+	JOYFUL JubilantRabbit KISS LAUGH LGTM LIPS LOL LOOKDOWN LOVE LUCK Lemon Loudspeaker MONEY MUSCLE
+	MeMeMe MinusOne MoonRabbit Mooncake Movie Music NOSEPICK No OBSESSED OK OKR OnIt OneSecond PARTY
+	PETRIFIED POOP PRAISE PROUD PUKE Partying Pepper Pin Pumpkin RAINBOWPUKE REDPACKET ROSE RoarForYou
+	SALUTE SCOWL SHAKE SHHH SHOCKED SHOWOFF SHY SICK SILENT SKULL SLAP SLEEP SLIGHT SMART SMILE SMIRK
+	SMOOCH SMUG SOB SPEECHLESS SPITBLOOD STRIVE SWEAT SaluteFace Shrug Sigh Snowman Soccer StatusBus
+	StatusEnjoyLife StatusFlashOfInspiration StatusInFlight StatusReading Status_PrivateMessage
+	StickyRiceBalls TEARS TEASE TERROR THANKS THINKING THUMBSUP TOASTED TONGUE TRICK TV ThanksFace
+	ThumbsDown Trophy Typing UPPERLEFT VRHeadset WAIL WAVE WHAT WHIMPER WINK WITTY WOW WRONGED XBLUSH
+	XmasHat XmasTree YAWN YEAH Yes YouAreTheBest
+`)
+
+func checkReactionEmoji(w http.ResponseWriter, field, emoji string) bool {
+	if slices.Contains(reactionEmojis, emoji) {
+		return true
+	}
+	if emojiType.MatchString(emoji) {
+		fail(w, 231001, "Reaction type is invalid.")
+	} else {
+		badField(w, field, "Expected an emoji name such as THUMBSUP.")
+	}
+	return false
+}
 
 func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -25,8 +59,7 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emoji := req.ReactionType.EmojiType
-	if !emojiType.MatchString(emoji) {
-		badField(w, "reaction_type.emoji_type", "Expected an emoji name such as THUMBSUP.")
+	if !checkReactionEmoji(w, "reaction_type.emoji_type", emoji) {
 		return
 	}
 	actor := caller(r)
@@ -100,8 +133,11 @@ func (h handler) listReactions(w http.ResponseWriter, r *http.Request) {
 	}
 	reactions := emptySlice(m.Reactions)
 	if values, present := r.URL.Query()["reaction_type"]; present {
-		if len(values) != 1 || !emojiType.MatchString(values[0]) {
+		if len(values) != 1 {
 			badField(w, "reaction_type", "Expected one emoji name such as THUMBSUP.")
+			return
+		}
+		if !checkReactionEmoji(w, "reaction_type", values[0]) {
 			return
 		}
 		reactions = slices.DeleteFunc(reactions, func(reaction store.Reaction) bool { return reaction.EmojiType != values[0] })

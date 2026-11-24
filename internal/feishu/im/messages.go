@@ -54,7 +54,7 @@ func (h handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err, missingChat)
 		return
 	}
-	success(w, h.messageData(message, "open_id"))
+	success(w, h.messageData(message, "open_id", false))
 }
 
 func (h handler) replyMessage(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +80,7 @@ func (h handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err, missingMessage)
 		return
 	}
-	success(w, h.messageData(message, "open_id"))
+	success(w, h.messageData(message, "open_id", false))
 }
 
 func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.NewMessage, bool) {
@@ -296,7 +296,7 @@ func (h handler) resolveMention(id, name string) store.Mention {
 	return store.Mention{OpenID: id, Name: name}
 }
 
-func (h handler) messageData(m store.Message, kind string) fields {
+func (h handler) messageData(m store.Message, kind string, explicitIDType bool) fields {
 	sender := fields{"id": m.AppID, "id_type": "app_id", "sender_type": "app", "tenant_key": ""}
 	if m.SenderIsUser || m.AppID == "" {
 		user, found := h.state.Users().Get(m.SenderOpenID)
@@ -311,10 +311,16 @@ func (h handler) messageData(m store.Message, kind string) fields {
 		sender["open_bot_id"], sender["sender_name"] = app.BotOpenID, app.BotName
 	}
 	mentions := make([]fields, 0, len(m.Mentions))
+	var bots map[string]store.App
+	if explicitIDType && len(m.Mentions) > 0 {
+		bots = h.botsByOpenID()
+	}
 	for _, mention := range m.Mentions {
 		id, idType, tenant := mention.OpenID, "open_id", ""
 		if user, ok := h.state.Users().Get(id); ok {
 			id, idType, tenant = userID(user, kind), kind, user.TenantKey
+		} else if bot, ok := bots[id]; ok {
+			id, idType = bot.AppID, "app_id"
 		}
 		mentions = append(mentions, fields{"key": mention.Key, "id": id, "id_type": idType, "name": mention.Name, "tenant_key": tenant})
 	}
@@ -345,7 +351,8 @@ func (h handler) getMessage(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err, missingMessage)
 		return
 	}
-	success(w, fields{"items": []fields{h.messageData(m, kind)}})
+	_, explicitIDType := r.URL.Query()["user_id_type"]
+	success(w, fields{"items": []fields{h.messageData(m, kind, explicitIDType)}})
 }
 
 func sentBy(actor store.IMActor, m *store.Message) bool {
@@ -398,7 +405,7 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 		_ = protocol.WriteSuccess(w, nil)
 		return
 	}
-	success(w, h.messageData(m, "open_id"))
+	success(w, h.messageData(m, "open_id", false))
 }
 
 func (h handler) recallMessage(w http.ResponseWriter, r *http.Request) {
@@ -484,8 +491,9 @@ func (h handler) listMessages(w http.ResponseWriter, r *http.Request) {
 		return sortKey{At: m.CreatedAt, Order: m.Order, ID: m.ID}
 	})
 	items := make([]fields, 0, len(result.Items))
+	_, explicitIDType := r.URL.Query()["user_id_type"]
 	for _, m := range result.Items {
-		items = append(items, h.messageData(m, idType))
+		items = append(items, h.messageData(m, idType, explicitIDType))
 	}
 	success(w, page[fields]{Items: items, HasMore: result.HasMore, PageToken: result.PageToken})
 }

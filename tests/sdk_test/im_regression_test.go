@@ -2,7 +2,9 @@ package sdk_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -135,21 +137,58 @@ func TestOfficialSDKIMThreadModesAndMentions(t *testing.T) {
 		Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType("text").Content(content).Build()).Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, sent.CodeError, 0)
-	got, err := api.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(value(sent.Data.MessageId)).
-		UserIdType("union_id").Build())
-	requireSDKNetwork(t, err)
-	requireSDKCode(t, got.CodeError, 0)
-	if len(got.Data.Items) != 1 {
-		t.Fatalf("unexpected mention message response: %s", got.RawBody)
-	}
-	m := got.Data.Items[0]
+	messageID := value(sent.Data.MessageId)
 	want := `{"text":"@_user_1 and @_user_2, @_user_1"}`
-	if value(sent.Data.Body.Content) != want || value(m.Body.Content) != want || len(m.Mentions) != 2 ||
-		value(m.Mentions[0].Key) != "@_user_1" || value(m.Mentions[0].Id) != alice.UnionID ||
-		value(m.Mentions[0].IdType) != "union_id" || value(m.Mentions[0].Name) != alice.Name ||
-		value(m.Mentions[1].Key) != "@_user_2" || value(m.Mentions[1].Id) != app.BotOpenID ||
-		value(m.Mentions[1].IdType) != "open_id" || value(m.Mentions[1].Name) != app.BotName {
-		t.Fatalf("body and mentions do not match: %s", got.RawBody)
+	if value(sent.Data.Body.Content) != want {
+		t.Fatalf("message send did not normalize mentions: %s", sent.RawBody)
+	}
+	assertMentions := func(items []*larkim.Message, idType, userID, botIDType, botID string) {
+		t.Helper()
+		for _, m := range items {
+			if value(m.MessageId) != messageID {
+				continue
+			}
+			if value(m.Body.Content) != want || len(m.Mentions) != 2 ||
+				value(m.Mentions[0].Key) != "@_user_1" || value(m.Mentions[0].Id) != userID ||
+				value(m.Mentions[0].IdType) != idType || value(m.Mentions[0].Name) != alice.Name ||
+				value(m.Mentions[1].Key) != "@_user_2" || value(m.Mentions[1].Id) != botID ||
+				value(m.Mentions[1].IdType) != botIDType || value(m.Mentions[1].Name) != app.BotName {
+				t.Fatalf("unexpected mention mapping for %s: %+v", idType, m.Mentions)
+			}
+			return
+		}
+		t.Fatal("response did not contain the message with mentions")
+	}
+	for _, id := range []struct {
+		param, idType, userID, botIDType, botID string
+	}{
+		{"", "open_id", alice.OpenID, "open_id", app.BotOpenID},
+		{"open_id", "open_id", alice.OpenID, "app_id", app.AppID},
+		{"union_id", "union_id", alice.UnionID, "app_id", app.AppID},
+	} {
+		req := larkim.NewGetMessageReqBuilder().MessageId(messageID)
+		if id.param != "" {
+			req.UserIdType(id.param)
+		}
+		got, err := api.Message.Get(t.Context(), req.Build())
+		requireSDKNetwork(t, err)
+		requireSDKCode(t, got.CodeError, 0)
+		assertMentions(got.Data.Items, id.idType, id.userID, id.botIDType, id.botID)
+
+		// The generated history request has no user_id_type setter.
+		query := larkcore.QueryParams{"container_id_type": {"chat"}, "container_id": {chatID}}
+		if id.param != "" {
+			query.Set("user_id_type", id.param)
+		}
+		history, err := client.Do(t.Context(), &larkcore.ApiReq{
+			HttpMethod: http.MethodGet, ApiPath: "/open-apis/im/v1/messages", QueryParams: query,
+			SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+		})
+		requireSDKNetwork(t, err)
+		var list larkim.ListMessageResp
+		requireSDKNetwork(t, json.Unmarshal(history.RawBody, &list))
+		requireSDKCode(t, list.CodeError, 0)
+		assertMentions(list.Data.Items, id.idType, id.userID, id.botIDType, id.botID)
 	}
 }
 
@@ -172,13 +211,25 @@ func TestOfficialSDKIMMemberModes(t *testing.T) {
 	chatID := cfg.Chats[0].ChatID
 	for _, mode := range []int{0, 1, 2} {
 		bad := add(chatID, "app_id", mode, "cli_disabled", "cli_unknown", "malformed")
-		requireSDKCode(t, bad.CodeError, 232001)
+		requireSDKCode(t, bad.CodeError, 232027)
 		if bad.Data == nil || !slices.Equal(bad.Data.InvalidIdList, []string{"cli_disabled", "malformed"}) ||
 			!slices.Equal(bad.Data.NotExistedIdList, []string{"cli_unknown"}) {
 			t.Fatalf("mode %d did not classify known disabled and unknown app IDs: %s", mode, bad.RawBody)
 		}
 	}
 	alice := cfg.Users[0].OpenID
+	for _, mode := range []int{0, 1, 2} {
+		mixed := add(chatID, "open_id", mode, alice, "ou_unknown", "malformed")
+		want := 232001
+		if mode == 1 {
+			want = 0
+		}
+		requireSDKCode(t, mixed.CodeError, want)
+		if mixed.Data == nil || !slices.Equal(mixed.Data.InvalidIdList, []string{"malformed"}) ||
+			!slices.Equal(mixed.Data.NotExistedIdList, []string{"ou_unknown"}) {
+			t.Fatalf("mode %d did not report invalid and unknown users in a mixed list: %s", mode, mixed.RawBody)
+		}
+	}
 	defaultMode := add(chatID, "open_id", 0, alice, "ou_inactive")
 	requireSDKCode(t, defaultMode.CodeError, 0)
 	if !slices.Equal(defaultMode.Data.InvalidIdList, []string{"ou_inactive"}) {
@@ -197,7 +248,22 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	api := client.Im.Message
 	chatID := cfg.Chats[0].ChatID
 	card := `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"original"}]}}`
+	localized := `{
+	  "schema":"1.0","config":{"update_multi":true},
+	  "i18n_elements":{
+	    "en_us":[{"tag":"column_set","columns":[{"tag":"column","width":"weighted","weight":1,"elements":[
+	      {"tag":"div","text":{"tag":"plain_text","content":"Details"}},
+	      {"tag":"note","elements":[{"tag":"plain_text","content":"Note"},{"tag":"img","img_key":"img_v3_example","alt":{"tag":"plain_text","content":"Preview"}}]},
+	      {"tag":"action","actions":[{"tag":"button","text":{"tag":"plain_text","content":"Read"},"url":"https://example.test"}]}
+	    ]}]}],
+	    "ja_jp":[{"tag":"form","name":"feedback","elements":[
+	      {"tag":"input","name":"reason","required":true},
+	      {"tag":"button","name":"send","action_type":"form_submit","text":{"tag":"lark_md","content":"Submit"}}
+	    ]}]
+	  }
+	}`
 	original := sdkSend(t, client, "chat_id", chatID, "interactive", card)
+	localizedMessage := sdkSend(t, client, "chat_id", chatID, "interactive", localized)
 	sdkSend(t, client, "chat_id", chatID, "interactive", `{"type":"template","data":{"template_id":"AAfixture"}}`)
 	id := value(original.MessageId)
 	patch := func(id, content string) *larkim.PatchMessageResp {
@@ -212,6 +278,16 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 		`{"elements":[],"header":[]}`, `{"elements":[],"config":"bad"}`,
 		`{"schema":"2.0","body":[]}`, `{"schema":"2.0","config":{"update_multi":false},"body":{"elements":[]}}`,
 		`{"type":"template","data":{"template_id":7}}`,
+		`{"i18n_elements":{}}`, `{"i18n_elements":{"en_us":[]}}`, `{"i18n_elements":{"en_us":{"tag":"hr"}}}`,
+		`{"i18n_elements":{"en_us":[{"tag":"markdown","content":42}]}}`,
+		`{"elements":[{"tag":"markdown","content":42}]}`,
+		`{"elements":[{"tag":"div","text":{"tag":"plain_text","content":true}}]}`,
+		`{"elements":[{"tag":"column_set","columns":[{"tag":"column","elements":[{"tag":"div","text":"bad"}]}]}]}`,
+		`{"elements":[{"tag":"action","actions":[{"tag":"button","text":42}]}]}`,
+		`{"elements":[{"tag":"img","img_key":null,"alt":{"tag":"plain_text","content":"Image"}}]}`,
+		`{"elements":[{"tag":"note","elements":[{"tag":"plain_text","content":[] }]}]}`,
+		`{"elements":[{"tag":"form","name":"feedback","elements":[{"tag":"input","name":"reason"}]}]}`,
+		`{"elements":[{"tag":"collapsible_panel","header":{"title":{"tag":"plain_text","content":3}}}]}`,
 	} {
 		sent, err := api.Create(t.Context(), larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").
 			Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType("interactive").Content(invalid).Build()).Build())
@@ -230,5 +306,17 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 		value(got.Data.Items[0].UpdateTime) != value(original.UpdateTime) {
 		t.Fatalf("invalid patch changed the original card: %s", got.RawBody)
 	}
+	localizedID := value(localizedMessage.MessageId)
+	requireSDKCode(t, patch(localizedID,
+		`{"config":{"update_multi":true},"i18n_elements":{"en_us":[{"tag":"markdown","content":42}]}}`).CodeError, 99992402)
+	localizedDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(localizedID).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, localizedDetail.CodeError, 0)
+	if len(localizedDetail.Data.Items) != 1 || value(localizedDetail.Data.Items[0].Body.Content) != localized ||
+		value(localizedDetail.Data.Items[0].Updated) {
+		t.Fatalf("invalid patch changed the localized card: %s", localizedDetail.RawBody)
+	}
+	requireSDKCode(t, patch(value(localizedMessage.MessageId),
+		`{"config":{"update_multi":true},"i18n_elements":{"en_us":[{"tag":"markdown","content":"Updated"}]}}`).CodeError, 0)
 	requireSDKCode(t, patch(id, `{"schema":"2.0","body":{"elements":[]}}`).CodeError, 0)
 }
