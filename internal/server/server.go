@@ -12,6 +12,7 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/auth"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/bot"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/cardkit"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -98,6 +99,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
 	bot.RegisterRoutes(feishu, state)
+	cardkit.RegisterRoutes(feishu, state)
 	im.RegisterRoutes(feishu, state, eventEmitter{dispatcher: events, next: settings.emitter})
 	for _, register := range settings.feishu {
 		register(feishu, cfg, state)
@@ -167,6 +169,11 @@ func (s *Server) Store() *store.Store { return s.store }
 
 // Events returns the built-in event dispatcher.
 func (s *Server) Events() *event.Dispatcher { return s.events }
+
+// TriggerCardAction simulates a user action on an interactive message.
+func (s *Server) TriggerCardAction(ctx context.Context, input event.CardActionTriggerInput) (event.CardActionResult, error) {
+	return s.events.TriggerCardAction(ctx, input)
+}
 
 // Handler returns the server routing tree.
 func (s *Server) Handler() http.Handler { return s.http.Handler }

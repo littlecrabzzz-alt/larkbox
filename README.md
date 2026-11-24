@@ -50,17 +50,23 @@ curl -fsS http://127.0.0.1:8080/healthz
 
 The server starts in strict mode with a virtual app, bot, users, and chats. The startup log shows the built-in local app credentials. `/healthz` is available in the foundation slice. The compatibility matrix tracks Feishu endpoint implementation.
 
-Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, and `chats` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
+Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, `chats`, and `card_templates` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
 
 - `LARKBOX_ADDR`, `LARKBOX_STRICT_MODE`
 - `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
-- `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS` (JSON arrays)
+- `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS`, `LARKBOX_CARD_TEMPLATES` (JSON arrays)
 
 For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exactly matches one of the app's configured `redirect_uris`. The demo app registers `http://127.0.0.1:8080/callback` and `http://localhost:8080/callback`. Callbacks must use HTTP or HTTPS and have no fragment. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user.
 
 Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
-To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends the same event to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends ordinary events to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+
+CardKit writes require the creating app's tenant token. Send or reply with an interactive message whose JSON-encoded `content` is `{"type":"card","data":{"card_id":"..."}}`. The owner sees the latest card in the rendered IM format. Pass `card_msg_content_type=user_card_content` on GET or history to request the underlying card JSON. Other apps in the chat see the stored message reference. Card updates require a positive sequence greater than the previous one. Stale sequences return HTTP 400 and code `300317`. Identical requests can replay a successful UUID for one hour. Reusing it with a different request on the same card and operation returns `200770`. A stream expires after 10 minutes and the entity expires after 14 days. [Feishu CardKit batch update reference](https://open.larkoffice.com/document/cardkit-v1/card/batch_update)
+
+Register local templates through `card_templates`. Each entry has a `template_id`, an optional `template_version_name`, and a `data` string containing a Card JSON 2.0 definition. Without a requested version, larkbox selects the unversioned entry or the last configured version. Registered templates use the local definition and support text streaming on Markdown elements.
+
+In-process tests can call `Server.TriggerCardAction` to simulate an interaction by a chat member. Each action has a three-second deadline and goes to one active WebSocket session, or to the configured webhook if no session is active. The callback is attempted once and can return a toast and an updated card.
 
 ## Non-Goals
 
@@ -143,7 +149,7 @@ Status Legend:
 | `POST / GET / DELETE /open-apis/im/v1/messages/:message_id/reactions` | Emoji reactions | `SDK-Tested` |
 | `POST / GET /open-apis/im/v1/images` & `/files` | Multipart upload & binary download | `SDK-Tested` |
 | `GET /open-apis/im/v1/messages/:message_id/resources/:file_key` | Download message attachment resources | `SDK-Tested` |
-| `POST / PUT / PATCH /open-apis/cardkit/v1/cards*` | Streaming CardKit with monotonic `sequence` check | `Planned` |
+| `POST / PUT / PATCH / DELETE /open-apis/cardkit/v1/cards*` | Card entities, streaming text, settings, element edits, and atomic batches | `SDK-Tested` |
 
 ### Events & Callbacks
 
@@ -154,7 +160,7 @@ Status Legend:
 | `im.message.receive_v1` | p2p, group, `@bot` mentions, replies & threads | `SDK-Tested` |
 | `im.message.recalled_v1` | Triggered on message recall | `SDK-Tested` |
 | `im.chat.member.bot.added_v1` / `deleted_v1` | Bot added/removed from chat | `SDK-Tested` |
-| `card.action.trigger` | Interactive button/form callback with toast/card reply | `Planned` |
+| `card.action.trigger` | Synchronous button and form callbacks with toast and persisted card updates | `SDK-Tested` |
 
 ## Verification & Fidelity Strategy
 

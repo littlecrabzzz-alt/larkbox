@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -41,4 +43,50 @@ func TraceHeaders(headers http.Header) http.Header {
 		}
 	}
 	return result
+}
+
+// RedactTraceJSON removes credential fields from an audit copy of a payload.
+// It preserves unrelated fields, including application data and card icon tokens.
+func RedactTraceJSON(body []byte) []byte {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return body
+	}
+	if (trimmed[0] == '{' || trimmed[0] == '[') && !json.Valid(trimmed) {
+		// A partial JSON response may contain a complete credential field.
+		return []byte("[invalid JSON omitted]")
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &root) != nil {
+		return body
+	}
+	changed := false
+	for _, key := range []string{"token", "access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token", "app_secret"} {
+		changed = redactTracePath(root, key) || changed
+	}
+	changed = redactTracePath(root, "header", "token") || changed
+	changed = redactTracePath(root, "event", "token") || changed
+	changed = redactTracePath(root, "event", "context", "preview_token") || changed
+	if !changed {
+		return body
+	}
+	redacted, _ := json.Marshal(root)
+	return redacted
+}
+
+func redactTracePath(root map[string]json.RawMessage, key string, rest ...string) bool {
+	value, exists := root[key]
+	if !exists {
+		return false
+	}
+	if len(rest) == 0 {
+		root[key] = json.RawMessage(`"[redacted]"`)
+		return true
+	}
+	var child map[string]json.RawMessage
+	if json.Unmarshal(value, &child) != nil || !redactTracePath(child, rest[0], rest[1:]...) {
+		return false
+	}
+	root[key], _ = json.Marshal(child)
+	return true
 }

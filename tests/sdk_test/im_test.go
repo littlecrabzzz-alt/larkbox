@@ -225,7 +225,7 @@ func sdkMessages(t *testing.T, client *lark.Client, cfg config.Config, chatID st
 	requireSDKCode(t, patched.CodeError, 0)
 	get := func(id string) *larkim.Message {
 		t.Helper()
-		result, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(id).UserIdType("union_id").Build())
+		result, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(id).UserIdType("union_id").CardMsgContentType("user_card_content").Build())
 		requireSDKNetwork(t, err)
 		requireSDKCode(t, result.CodeError, 0)
 		if result.Data == nil || len(result.Data.Items) != 1 || value(result.Data.Items[0].MessageId) != id {

@@ -233,11 +233,15 @@ func (d *Dispatcher) newJob(appID, kind string, at time.Time, payload any) (deli
 	if at.IsZero() {
 		at = d.state.Now()
 	}
+	createTime := millis(at)
+	if kind == cardActionTrigger {
+		createTime = strconv.FormatInt(at.UnixMicro(), 10)
+	}
 	id := protocol.NewID(protocol.EventID)
 	body, err := json.Marshal(envelope{
 		Schema: "2.0",
 		Header: eventHeader{
-			ID: id, Type: kind, CreateTime: millis(at),
+			ID: id, Type: kind, CreateTime: createTime,
 			AppID: appID, Token: app.VerificationToken, TenantKey: tenantKey(app),
 		},
 		Event: payload,
@@ -310,6 +314,11 @@ func (d *Dispatcher) runJob(job deliveryJob) {
 
 func (d *Dispatcher) deliver(ctx context.Context, job deliveryJob) (Result, error) {
 	result := Result{EventID: job.id}
+	if job.kind == cardActionTrigger {
+		delivered := d.deliverCardAction(ctx, job, nil)
+		result.Deliveries = []Delivery{delivered}
+		return result, delivered.Err
+	}
 	if job.app.WebhookURL == "" {
 		result.Deliveries = appendDelivery(nil, d.deliverWebSocket(ctx, job))
 	} else {
@@ -345,7 +354,7 @@ func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Deli
 		if attempts > 0 && (!d.canRetry(ctx) || s.disconnected()) {
 			return result
 		}
-		result = d.socketAttempt(ctx, s, job, attempt)
+		result = d.socketAttempt(ctx, s, job, attempt, nil)
 		if attempts == 0 && errors.Is(result.Err, errDisconnectedBeforeWrite) {
 			// No frame reached this replica. Another live session can still
 			// receive the first delivery without using the ACK retry budget.
@@ -390,7 +399,7 @@ func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, peerDone <-chan
 	return false
 }
 
-func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job deliveryJob, attempt int) Delivery {
+func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job deliveryJob, attempt int, verify func(context.Context, []byte) error) Delivery {
 	trace := job.trace("websocket", attempt)
 	trace.Path = socketPath
 	ctx, cancel := context.WithTimeout(ctx, d.opts.AckTimeout)
@@ -411,13 +420,19 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 		// The acknowledgement embeds headers in its JSON body as well.
 		// Store the same safe subset in both places.
 		audit := result.response
+		audit.Data = store.RedactTraceJSON(audit.Data)
 		audit.Headers = make(map[string]string)
 		for key, values := range store.TraceHeaders(headers) {
 			audit.Headers[key] = values[0]
 		}
 		trace.ResponseBody, _ = json.Marshal(audit)
-		if !success(trace.Status) {
+		switch {
+		case !success(trace.Status) || (job.kind == cardActionTrigger && trace.Status != http.StatusOK):
 			result.err = fmt.Errorf("websocket acknowledgement status %d", trace.Status)
+		case ctx.Err() != nil:
+			result.err = ctx.Err()
+		case verify != nil:
+			result.err = verify(ctx, result.response.Data)
 		}
 	}
 	d.record(trace, result.err)

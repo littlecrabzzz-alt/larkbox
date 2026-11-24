@@ -24,6 +24,9 @@ var ErrOutsideChat = errors.New("caller is outside the chat")
 // ErrMessageDeleted indicates that the message has already been recalled.
 var ErrMessageDeleted = errors.New("message has been recalled")
 
+// ErrMessageCardNotFound indicates that a message references an unknown card.
+var ErrMessageCardNotFound = errors.New("message card not found")
+
 // ErrMessageUUIDConflict indicates that an app reused a live UUID for a different request.
 var ErrMessageUUIDConflict = errors.New("message UUID is already in use")
 
@@ -175,6 +178,7 @@ type NewMessage struct {
 	UUID          string
 	MsgType       string
 	Content       string
+	CardID        string
 	Mentions      []Mention
 }
 
@@ -214,6 +218,14 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		return Message{}, err
 	}
 
+	if req.CardID != "" {
+		if _, err := s.liveCard(actor.AppID, req.CardID, s.Now()); errors.Is(err, ErrNotFound) {
+			return Message{}, ErrMessageCardNotFound
+		} else if err != nil {
+			return Message{}, err
+		}
+	}
+
 	now := s.Now()
 	key := messageRequest{appID: actor.AppID, reply: req.ParentID != "", uuid: req.UUID}
 	target := chat.ChatID
@@ -232,14 +244,14 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 				return Message{}, ErrMessageUUIDConflict
 			}
 			m, err := s.imMessage(actor, record.id)
-			return cloneMessage(m), err
+			return s.renderMessage(actor.AppID, m), err
 		}
 	}
 
 	m := Message{
 		ID: protocol.NewID(protocol.MessageID), ChatID: chat.ChatID, AppID: actor.AppID,
 		SenderOpenID: actor.OpenID, SenderIsUser: actor.IsUser, MsgType: req.MsgType,
-		Content: req.Content, Mentions: slices.Clone(req.Mentions), CreatedAt: now, UpdatedAt: now,
+		Content: req.Content, CardID: req.CardID, Mentions: slices.Clone(req.Mentions), CreatedAt: now, UpdatedAt: now,
 	}
 	switch {
 	case req.ParentID != "":
@@ -274,7 +286,7 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	if req.UUID != "" {
 		s.messageUUIDs[key] = messageDedup{id: m.ID, target: target, actor: actor, expires: now.Add(time.Hour)}
 	}
-	return cloneMessage(m), nil
+	return s.renderMessage(actor.AppID, s.messages.items[m.ID]), nil
 }
 
 // IMMessage returns a message visible to the caller.
@@ -282,7 +294,7 @@ func (s *Store) IMMessage(actor IMActor, id string) (Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m, err := s.imMessage(actor, id)
-	return cloneMessage(m), err
+	return s.renderMessage(actor.AppID, m), err
 }
 
 // IMResourceMessage also requires the app bot to be a member for user tokens
@@ -359,7 +371,7 @@ func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, 
 		return Message{}, err
 	}
 	s.messages.put(m)
-	return cloneMessage(m), nil
+	return cloneMessage(s.messages.items[m.ID]), nil
 }
 
 // indexMessage requires the store lock.
@@ -409,7 +421,7 @@ func (s *Store) IMHistory(actor IMActor, containerType, id string) ([]Message, e
 		} else if _, err := s.imChat(actor, m.ChatID); err != nil {
 			return nil, err
 		}
-		result = append(result, cloneMessage(m))
+		result = append(result, s.renderMessage(actor.AppID, m))
 	}
 	return result, nil
 }

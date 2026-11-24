@@ -1,16 +1,19 @@
-package im
+// Package cardkit implements CardKit v1 and validates interactive card content.
+package cardkit
 
 import (
 	"encoding/json"
 	"math"
+	"regexp"
 	"slices"
+	"strings"
 )
 
-func validCard(card map[string]any) bool {
+// ValidMessageCard validates inline cards and template references in IM messages.
+func ValidMessageCard(card map[string]any) bool {
 	if kind, exists := card["type"]; exists {
 		data, ok := card["data"].(map[string]any)
-		return kind == "template" && ok && nonemptyString(data, "template_id") &&
-			optionalString(data, "template_version_name") && optionalObject(data, "template_variable")
+		return kind == "template" && ok && validTemplate(data)
 	}
 	if !optionalCardCheck(card, "header", validCardHeader) || !optionalObject(card, "config") {
 		return false
@@ -190,10 +193,28 @@ func validCardPicker(node map[string]any) bool {
 		optionalCardType[string](node, "name", "width", "margin", "type")
 }
 
+var elementIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,19}$`)
+
+func validHeaderTags(value any) bool {
+	return cardObjects(value, false, validHeaderTag)
+}
+
+func validHeaderTag(node map[string]any) bool {
+	if node["tag"] != "text_tag" || !optionalString(node, "color") {
+		return false
+	}
+	return optionalCardCheck(node, "text", func(value any) bool {
+		text, ok := value.(map[string]any)
+		return ok && text["tag"] == "plain_text" && validCardTextContent(text)
+	})
+}
+
 func validCardHeader(value any) bool {
 	header, ok := value.(map[string]any)
 	return ok && optionalCardCheck(header, "title", validCardText) &&
-		optionalCardCheck(header, "subtitle", validCardText) && optionalObject(header, "icon")
+		optionalCardCheck(header, "subtitle", validCardText) && optionalObject(header, "icon") &&
+		optionalCardCheck(header, "text_tag_list", validHeaderTags) &&
+		optionalCardCheck(header, "i18n_text_tag_list", func(value any) bool { return validCardLocales(value, validHeaderTags) })
 }
 
 func validCardBehavior(behavior map[string]any) bool {
@@ -217,6 +238,8 @@ func validCardComponent(node map[string]any) bool {
 	switch node["tag"] {
 	case "markdown", "plain_text", "lark_md":
 		return validCardTextContent(node)
+	case "text_tag":
+		return validHeaderTag(node)
 	case "div":
 		_, hasText := node["text"]
 		_, hasFields := node["fields"]
@@ -349,8 +372,9 @@ func hasCardSubmit(value any) bool {
 	return false
 }
 
-func sharedCard(card map[string]any) bool {
-	if !validCard(card) {
+// SharedMessageCard reports whether a card permits shared IM updates.
+func SharedMessageCard(card map[string]any) bool {
+	if !ValidMessageCard(card) {
 		return false
 	}
 	// Template references carry no config. The published template defines sharing.
@@ -359,4 +383,30 @@ func sharedCard(card map[string]any) bool {
 	}
 	config, _ := card["config"].(map[string]any)
 	return config["update_multi"] == true
+}
+
+func validTemplate(data map[string]any) bool {
+	return nonemptyString(data, "template_id") &&
+		optionalString(data, "template_version_name") && optionalObject(data, "template_variable")
+}
+
+func nonemptyString(obj map[string]any, key string) bool {
+	value, _ := obj[key].(string)
+	return strings.TrimSpace(value) != ""
+}
+
+func optionalString(obj map[string]any, key string) bool {
+	return optionalCardType[string](obj, key)
+}
+
+// EntityReference extracts a nonempty CardKit ID from an IM card reference.
+func EntityReference(card map[string]any) string {
+	if card["type"] != "card" {
+		return ""
+	}
+	data, _ := card["data"].(map[string]any)
+	if !nonemptyString(data, "card_id") {
+		return ""
+	}
+	return data["card_id"].(string)
 }

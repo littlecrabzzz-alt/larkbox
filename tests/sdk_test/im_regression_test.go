@@ -320,7 +320,7 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	requireSDKCode(t, patch(id, unshared).CodeError, 230001)
 	notShared := sdkSend(t, client, "chat_id", chatID, "interactive", unshared)
 	requireSDKCode(t, patch(value(notShared.MessageId), card).CodeError, 230001)
-	got, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(id).Build())
+	got, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(id).CardMsgContentType("user_card_content").Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, got.CodeError, 0)
 	if len(got.Data.Items) != 1 || value(got.Data.Items[0].Body.Content) != card || value(got.Data.Items[0].Updated) ||
@@ -330,7 +330,7 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	localizedID := value(localizedMessage.MessageId)
 	requireSDKCode(t, patch(localizedID,
 		`{"config":{"update_multi":true},"i18n_elements":{"en_us":[{"tag":"markdown","content":42}]}}`).CodeError, 99992402)
-	localizedDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(localizedID).Build())
+	localizedDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(localizedID).CardMsgContentType("user_card_content").Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, localizedDetail.CodeError, 0)
 	if len(localizedDetail.Data.Items) != 1 || value(localizedDetail.Data.Items[0].Body.Content) != localized ||
@@ -344,7 +344,7 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	titleMessage := sdkSend(t, client, "chat_id", chatID, "interactive", titleOnly)
 	titleID := value(titleMessage.MessageId)
 	requireSDKCode(t, patch(titleID, newTitle).CodeError, 0)
-	titleDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(titleID).Build())
+	titleDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(titleID).CardMsgContentType("user_card_content").Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, titleDetail.CodeError, 0)
 	if len(titleDetail.Data.Items) != 1 || value(titleDetail.Data.Items[0].Body.Content) != newTitle ||
@@ -359,7 +359,7 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 	inputID := value(inputMessage.MessageId)
 	replacement := nestedInput(`"input_type":"multiline_text","auto_resize":true,"max_length":1,"rows":1,"max_rows":2.5`)
 	requireSDKCode(t, patch(inputID, replacement).CodeError, 0)
-	inputDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(inputID).Build())
+	inputDetail, err := api.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(inputID).CardMsgContentType("user_card_content").Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, inputDetail.CodeError, 0)
 	if len(inputDetail.Data.Items) != 1 || value(inputDetail.Data.Items[0].Body.Content) != replacement {

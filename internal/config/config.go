@@ -104,14 +104,22 @@ type TokenTTLs struct {
 	Code    int64 `json:"oauth_code" yaml:"oauth_code"`
 }
 
+// CardTemplate associates a template version with local Card JSON 2.0.
+type CardTemplate struct {
+	TemplateID  string `json:"template_id" yaml:"template_id"`
+	VersionName string `json:"template_version_name,omitempty" yaml:"template_version_name,omitempty"`
+	Data        string `json:"data" yaml:"data"`
+}
+
 // Config describes the HTTP server, token defaults, and initial state.
 type Config struct {
-	Addr       string    `json:"addr" yaml:"addr"`
-	StrictMode bool      `json:"strict_mode" yaml:"strict_mode"`
-	TokenTTLs  TokenTTLs `json:"token_ttls" yaml:"token_ttls"`
-	Apps       []App     `json:"apps" yaml:"apps"`
-	Users      []User    `json:"users" yaml:"users"`
-	Chats      []Chat    `json:"chats" yaml:"chats"`
+	Addr          string         `json:"addr" yaml:"addr"`
+	StrictMode    bool           `json:"strict_mode" yaml:"strict_mode"`
+	TokenTTLs     TokenTTLs      `json:"token_ttls" yaml:"token_ttls"`
+	Apps          []App          `json:"apps" yaml:"apps"`
+	Users         []User         `json:"users" yaml:"users"`
+	Chats         []Chat         `json:"chats" yaml:"chats"`
+	CardTemplates []CardTemplate `json:"card_templates,omitempty" yaml:"card_templates,omitempty"`
 }
 
 // DefaultApp returns the public fixture credentials for the built-in bot.
@@ -176,7 +184,7 @@ func readFile(path string, cfg *Config) error {
 	}
 	for name, value := range fields {
 		switch strings.ToLower(name) {
-		case "apps", "users", "chats":
+		case "apps", "users", "chats", "card_templates":
 			if value == nil {
 				return fmt.Errorf("%s must be a seed list; use [] to clear it", name)
 			}
@@ -245,7 +253,10 @@ func applyEnv(cfg *Config) error {
 	if err := applySeedEnv("LARKBOX_USERS", &cfg.Users); err != nil {
 		return err
 	}
-	return applySeedEnv("LARKBOX_CHATS", &cfg.Chats)
+	if err := applySeedEnv("LARKBOX_CHATS", &cfg.Chats); err != nil {
+		return err
+	}
+	return applySeedEnv("LARKBOX_CARD_TEMPLATES", &cfg.CardTemplates)
 }
 
 func applySeedEnv[T any](name string, dest *[]T) error {
@@ -298,6 +309,20 @@ func (cfg Config) Validate() error {
 }
 
 func (cfg Config) validateSeeds() error {
+	seenTemplates := make(map[[2]string]bool, len(cfg.CardTemplates))
+	for _, template := range cfg.CardTemplates {
+		key := [2]string{template.TemplateID, template.VersionName}
+		var doc struct {
+			Schema string `json:"schema"`
+		}
+		if strings.TrimSpace(template.TemplateID) == "" || json.Unmarshal([]byte(template.Data), &doc) != nil || doc.Schema != "2.0" {
+			return errors.New("card_templates entries require template_id and card JSON 2.0 data")
+		}
+		if seenTemplates[key] {
+			return fmt.Errorf("duplicate card template %q version %q", template.TemplateID, template.VersionName)
+		}
+		seenTemplates[key] = true
+	}
 	if err := validateKeys("apps", cfg.Apps, func(app App) string { return app.AppID }); err != nil {
 		return err
 	}

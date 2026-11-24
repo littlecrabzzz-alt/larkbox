@@ -141,5 +141,5 @@ func (d *Dispatcher) EnqueueBotMembership(appID, chatID, operatorID, operatorApp
 // DispatchCardAction delivers a card callback and returns receiver responses
 // for the caller to interpret.
 func (d *Dispatcher) DispatchCardAction(ctx context.Context, appID string, action any) (Result, error) {
-	return d.Dispatch(ctx, appID, "card.action.trigger", action)
+	return d.Dispatch(ctx, appID, cardActionTrigger, action)
 }
