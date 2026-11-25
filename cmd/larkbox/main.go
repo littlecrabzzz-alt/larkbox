@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,6 +30,7 @@ func run() error {
 	path := flag.String("config", "", "path to a YAML or JSON configuration file")
 	strict := flag.Bool("strict", defaults.StrictMode, "enable strict Feishu protocol validation")
 	version := flag.Bool("version", false, "print the version and exit")
+	noUI := flag.Bool("no-ui", false, "disable the embedded Web Inspector")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -55,16 +57,27 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, cfg)
+	return serve(ctx, cfg, *noUI)
 }
 
-func serve(ctx context.Context, cfg config.Config) error {
+func serve(ctx context.Context, cfg config.Config, noUI bool) error {
 	listener, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Addr, err)
 	}
-	srv := server.New(cfg)
+	var opts []server.Option
+	if noUI {
+		opts = append(opts, server.WithoutWebUI())
+	}
+	srv := server.New(cfg, opts...)
 	log.Printf("larkbox %s listening on %s (strict mode: %t)", server.Version, listener.Addr(), cfg.StrictMode)
+	if !noUI {
+		address := listener.Addr().String()
+		if host, port, err := net.SplitHostPort(address); err == nil && net.ParseIP(host).IsUnspecified() {
+			address = net.JoinHostPort("127.0.0.1", port)
+		}
+		log.Printf("Web UI: %s", (&url.URL{Scheme: "http", Host: address, Path: "/"}).String())
+	}
 	fixture := config.DefaultApp()
 	if app, ok := srv.Store().Apps().Get(fixture.AppID); ok && app.AppSecret == fixture.AppSecret {
 		log.Printf("Local app credentials: app_id=%s app_secret=%s", app.AppID, app.AppSecret)

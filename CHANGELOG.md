@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Embedded Web Inspector with a chat playground, interactive card previews and callbacks, CardKit streaming state, protocol traces, and sandbox fault tools. Use `--no-ui` to disable the inspector.
 - Initial repository setup, open-source templates, CI workflow, and governance documentation.
 - Project architecture specification and initial Architecture Decision Record (ADR-0001).
 - Pure-Go CLI, YAML/JSON configuration with local seed data, and a health endpoint with graceful shutdown.
