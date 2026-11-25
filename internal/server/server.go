@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
+	"github.com/littlecrabzzz-alt/larkbox/internal/webui"
 )
 
 // Version identifies the current development build.
@@ -45,6 +47,12 @@ type options struct {
 	fault        middleware.FaultHook
 	emitter      im.EventEmitter
 	eventOptions event.Options
+	noUI         bool
+}
+
+// WithoutWebUI disables the embedded inspector.
+func WithoutWebUI() Option {
+	return func(opts *options) { opts.noUI = true }
 }
 
 // WithFeishuRoutes registers routes under /open-apis/. Annotate outer-wrapped
@@ -137,11 +145,26 @@ func New(cfg config.Config, opts ...Option) *Server {
 
 	return &Server{
 		http: &http.Server{
-			Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
+			Addr: cfg.Addr, Handler: withWebUI(mux, settings.noUI), ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		},
 		store: state, events: events, faults: faults,
 	}
+}
+
+func withWebUI(routes http.Handler, disabled bool) http.Handler {
+	if disabled {
+		return routes
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		switch prefix {
+		case "open-apis", "_sandbox", "callback", "ws", "healthz":
+			routes.ServeHTTP(w, r)
+		default:
+			webui.ServeHTTP(w, r)
+		}
+	})
 }
 
 // An empty ServeMux pattern means either 404 or 405. Translate the former

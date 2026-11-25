@@ -459,3 +459,49 @@ func TestWrappedBearerExtensionFaultPrecedence(t *testing.T) {
 	call("GET", path, "", "t-extension", 400, "99991663")
 	call("GET", "/_sandbox/faults", "", "", 200, `"faults":[]`)
 }
+
+func TestEmbeddedInspectorRouteIsolation(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		option []Option
+		ui     int
+	}{
+		{"enabled", nil, http.StatusOK},
+		{"disabled", []Option{WithoutWebUI()}, http.StatusNotFound},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			srv := New(config.Default(), mode.option...)
+			for _, tc := range []struct {
+				method, path   string
+				status         int
+				mediaType, has string
+			}{
+				{http.MethodGet, "/", mode.ui, "", ""},
+				{http.MethodGet, "/traces", mode.ui, "", ""},
+				{http.MethodGet, "/cards", mode.ui, "", ""},
+				{http.MethodGet, "/faults", mode.ui, "", ""},
+				{http.MethodGet, "/open-apis/nonexistent", http.StatusNotFound, "application/json", `"code":99991201`},
+				{http.MethodGet, "/_sandbox/nonexistent", http.StatusNotFound, "application/json", "unknown sandbox endpoint"},
+				{http.MethodGet, "/_sandbox/state", http.StatusOK, "application/json", `"chats":`},
+				{http.MethodGet, "/healthz", http.StatusOK, "application/json", `"status":"ok"`},
+				{http.MethodPost, "/healthz", http.StatusMethodNotAllowed, "text/plain", ""},
+				{http.MethodGet, "/callback/other", http.StatusNotFound, "text/plain", ""},
+				{http.MethodGet, "/callback/ws/endpoint", http.StatusMethodNotAllowed, "text/plain", ""},
+				{http.MethodGet, "/ws/other", http.StatusNotFound, "text/plain", ""},
+				{http.MethodPost, "/ws/v2", http.StatusMethodNotAllowed, "text/plain", ""},
+			} {
+				w := httptest.NewRecorder()
+				srv.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+				kind, content := tc.mediaType, tc.has
+				if kind == "" && tc.status == http.StatusOK {
+					kind, content = "text/html", "larkbox Web Inspector"
+				}
+				if w.Code != tc.status || !strings.HasPrefix(w.Header().Get("Content-Type"), kind) ||
+					!strings.Contains(w.Body.String(), content) {
+					t.Errorf("%s %s: got %d %v %s, want %d %s containing %q",
+						tc.method, tc.path, w.Code, w.Header(), w.Body, tc.status, kind, content)
+				}
+			}
+		})
+	}
+}

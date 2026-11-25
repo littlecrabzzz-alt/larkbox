@@ -77,9 +77,24 @@ control plane on loopback or an isolated test network. See the
 [control plane contract](docs/adr/0002-sandbox-control-plane.md) for request
 fields, trace filters, and fault options.
 
+### Embedded Web UI
+
+Run `larkbox` (or `go run ./cmd/larkbox` from this repository) and open
+[http://127.0.0.1:8080/](http://127.0.0.1:8080/). The inspector lets you
+send messages as virtual users, interact with cards, inspect CardKit state
+and protocol traces, and manage sandbox fault rules. Start with `--no-ui`
+to disable the inspector while keeping the HTTP APIs available.
+
+`make build` and `go install github.com/littlecrabzzz-alt/larkbox/cmd/larkbox@latest`
+use the committed production assets and require only Go. For frontend
+development, install dependencies with `make ui-install`, then run
+`pnpm --dir web run dev` alongside larkbox on port 8080. Run `make ui-test`
+and `make ui-build` after frontend changes and commit the regenerated
+`internal/webui/dist/` with the source.
+
 ## Non-Goals
 
-- **Pixel-perfect native Feishu rendering**. The planned Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.
+- **Pixel-perfect native Feishu rendering**. The Web UI focuses on structured card previews, interactive controls, and raw JSON inspection.
 - **Production messaging**. The sandbox is designed for local development, debugging, and CI testing.
 
 ## Deferred / Later Phases
