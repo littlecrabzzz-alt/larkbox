@@ -469,12 +469,13 @@ func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Deli
 }
 
 func (d *Dispatcher) socketDelivery(ctx context.Context, s *session, job deliveryJob) Delivery {
-	return d.socketDeliveryFrom(ctx, s, job, 1)
+	return d.socketDeliveryFrom(ctx, s, job, 1, 0)
 }
 
-func (d *Dispatcher) socketDeliveryFrom(ctx context.Context, s *session, job deliveryJob, start int) (result Delivery) {
-	defer func() { d.finishRetry(ctx, job, "websocket", result.Err) }()
-	attempts := start - 1
+func (d *Dispatcher) socketDeliveryFrom(ctx context.Context, s *session, job deliveryJob, start, used int) (result Delivery) {
+	eligible := true
+	defer func() { d.finishRetry(ctx, job, "websocket", eligible) }()
+	attempts := used
 	for attempt := start; ; attempt++ {
 		if attempts > 0 && (!d.canRetry(ctx) || s.disconnected()) {
 			if result.Err == nil {
@@ -496,7 +497,11 @@ func (d *Dispatcher) socketDeliveryFrom(ctx context.Context, s *session, job del
 		}
 		attempts++
 		// Once a write may have reached a peer, keep retries on that replica.
-		if result.Err == nil || attempts >= d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, job, "websocket", attempts, result.completedAt, s.done) {
+		if result.Err == nil || attempts >= d.opts.WebSocketMaxAttempts {
+			eligible = result.Err != nil && ctx.Err() != nil && result.Status == 0
+			return result
+		}
+		if ctx.Err() != nil || !d.waitRetry(ctx, job, "websocket", attempt, attempts, result.completedAt, s.done) {
 			return result
 		}
 	}
@@ -514,9 +519,9 @@ func (d *Dispatcher) canRetry(ctx context.Context) bool {
 	}
 }
 
-func (d *Dispatcher) waitRetry(ctx context.Context, job deliveryJob, channel string, attempt int, completedAt time.Time, peerDone <-chan struct{}) bool {
-	due := completedAt.Add(d.opts.RetryBackoff(attempt))
-	d.scheduleRetry(ctx, job, channel, attempt, due)
+func (d *Dispatcher) waitRetry(ctx context.Context, job deliveryJob, channel string, attempt, used int, completedAt time.Time, peerDone <-chan struct{}) bool {
+	due := completedAt.Add(d.opts.RetryBackoff(used))
+	d.scheduleRetry(ctx, job, channel, attempt, used, due)
 	return d.waitUntilRetry(ctx, due, peerDone)
 }
 

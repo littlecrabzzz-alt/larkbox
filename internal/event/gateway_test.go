@@ -925,9 +925,25 @@ func TestSocketRetryRestoresOnReconnectedPeer(t *testing.T) {
 		RetryBackoff: func(int) time.Duration { return time.Minute },
 	}, clock.Now)
 	host := strings.TrimPrefix(testGateway(t, d).URL, "http://")
-	peer := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	initialPeer := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
 	waitForSessions(t, d, app.AppID, 1)
+	d.mu.Lock()
+	selected := d.ws.apps[app.AppID].sessions[0]
+	d.mu.Unlock()
+	peer := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 2)
+	selected.writer.Lock()
+	release := sync.OnceFunc(selected.writer.Unlock)
+	defer release()
 	d.Enqueue(t.Context(), app.AppID, "im.message.receive_v1", at, map[string]string{"text": "pending"})
+	waitForPendingACK(t, selected)
+	requireNoError(t, initialPeer.Close())
+	select {
+	case <-selected.done:
+	case <-time.After(time.Second):
+		t.Fatal("initial replica did not disconnect")
+	}
+	release()
 	first := readDataFrame(t, peer)
 	writeAck(t, peer, first, wsproto.Response{StatusCode: 500})
 	deadline := time.Now().Add(time.Second)
@@ -945,7 +961,8 @@ func TestSocketRetryRestoresOnReconnectedPeer(t *testing.T) {
 		pending = retries
 		return nil
 	}))
-	if len(pending) != 1 || pending[0].Channel != "websocket" || pending[0].Attempt != 2 || !pending[0].Due.Equal(at.Add(time.Minute)) {
+	if len(pending) != 1 || pending[0].Channel != "websocket" || pending[0].Attempt != 3 ||
+		pending[0].AttemptsUsed != 1 || !pending[0].Due.Equal(at.Add(time.Minute)) {
 		t.Fatalf("graceful checkpoint lost the pending WebSocket attempt: %+v", pending)
 	}
 
@@ -967,8 +984,8 @@ func TestSocketRetryRestoresOnReconnectedPeer(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	trace := restored.state.Traces()
-	if len(trace) != 1 || trace[0].Attempt != 2 || trace[0].Status != 200 || trace[0].EventID != pending[0].EventID {
-		t.Fatalf("restored WebSocket delivery did not acknowledge at attempt 2: %+v", trace)
+	if len(trace) != 1 || trace[0].Attempt != 3 || trace[0].Status != 200 || trace[0].EventID != pending[0].EventID {
+		t.Fatalf("restored WebSocket delivery did not acknowledge at attempt 3: %+v", trace)
 	}
 	requireNoError(t, restored.ExportCheckpoint(func(retries []PendingRetry) error {
 		if len(retries) != 0 {

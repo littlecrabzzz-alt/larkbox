@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,58 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
+
+func TestSnapshotImportSerializesWithControlState(t *testing.T) {
+	old := config.Default()
+	old.SandboxToken = "snapshot-boundary-fixture"
+	target := New(old)
+	updated := config.Default()
+	updated.Apps[0].BotName = "Replacement bot"
+	updated.Chats[0].Name = "Replacement chat"
+	source := New(updated)
+	replacement, err := source.snapshotBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer := "Bearer " + old.SandboxToken
+	target.controlMu.RLock()
+	unlock := sync.OnceFunc(target.controlMu.RUnlock)
+	defer unlock()
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		finished <- deploymentRequest(target, http.MethodPost, "/_sandbox/snapshot", bearer, string(replacement))
+	}()
+	deadline := time.Now().Add(time.Second)
+	for target.snapshotMu.TryLock() {
+		target.snapshotMu.Unlock()
+		select {
+		case <-finished:
+			t.Fatal("snapshot import passed through the held control-plane boundary")
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("snapshot import did not reach the state replacement point")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if app, _ := target.Store().Apps().Get(old.Apps[0].AppID); app.BotName != old.Apps[0].BotName {
+		t.Fatal("import replaced the store while a control-plane read was in progress")
+	}
+	unlock()
+	select {
+	case response := <-finished:
+		if response.Code != http.StatusOK {
+			t.Fatalf("import returned %d", response.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("import did not finish after the control plane released its read lock")
+	}
+	state := deploymentRequest(target, http.MethodGet, "/_sandbox/state", bearer, "")
+	if state.Code != http.StatusOK || !strings.Contains(state.Body.String(), "Replacement bot") ||
+		!strings.Contains(state.Body.String(), "Replacement chat") {
+		t.Fatalf("state did not expose the complete imported fixture: %s", state.Body)
+	}
+}
 
 func TestSnapshotRoundTripAndRetryRecovery(t *testing.T) {
 	at := time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC)
@@ -73,6 +126,18 @@ func TestSnapshotRoundTripAndRetryRecovery(t *testing.T) {
 	if len(initial) != 1 || initial[0].EventID == "" || initial[0].Attempt != 1 {
 		t.Fatalf("failed callback missing before shutdown: %+v", initial)
 	}
+	var replacementAttempts atomic.Int64
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		replacementAttempts.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer replacement.Close()
+	modified := app
+	modified.WebhookURL = replacement.URL
+	modified.EncryptKey = "reseeded-fixture-encryption"
+	if err := state.UpsertSeed(config.Config{Apps: []config.App{modified}}); err != nil {
+		t.Fatal(err)
+	}
 	shutdownSnapshotServer(t, first)
 
 	info, err := os.Stat(cfg.StateFile)
@@ -116,6 +181,9 @@ func TestSnapshotRoundTripAndRetryRecovery(t *testing.T) {
 	delivered := second.Store().QueryTraces(store.TraceFilter{RequestID: requestID})
 	if len(delivered) != 1 || delivered[0].Attempt != 2 || delivered[0].EventID != initial[0].EventID || delivered[0].Status != http.StatusNoContent {
 		t.Fatalf("retry identity or attempt lost across restart: %+v", delivered)
+	}
+	if attempts.Load() != 2 || replacementAttempts.Load() != 0 {
+		t.Fatal("restored retry moved to the reseeded receiver")
 	}
 
 	path := "/_sandbox/snapshot"

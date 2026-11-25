@@ -42,6 +42,7 @@ type Server struct {
 	clock      *simclock.Manual
 	stateFile  string
 	snapshotMu sync.Mutex
+	controlMu  sync.RWMutex
 }
 
 // RegisterRoutes attaches handlers to one route group. Patterns include the
@@ -175,7 +176,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	mux.Handle("/open-apis/", api)
 	mux.Handle("/oauth/", api)
 	mux.Handle("/page/cli", api)
-	control := sandbox.New(cfg, Version, state, events, faults, clock)
+	control := sandbox.New(cfg, Version, state, events, faults, clock, &runtime.controlMu)
 	operator := operatorRoutes(cfg, events, limits)
 	if cfg.SandboxToken != "" {
 		runtime.registerSnapshotRoutes(operator)

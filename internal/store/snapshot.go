@@ -16,7 +16,7 @@ import (
 type Snapshot struct{ image storeImage }
 
 type storeImage struct {
-	Apps                map[string]App
+	Apps                map[string]appImage
 	Users               map[string]User
 	UserOrder           []User
 	Departments         map[string]config.Department
@@ -29,7 +29,7 @@ type storeImage struct {
 	Messages            map[string]messageImage
 	MessageReplays      []messageReplayImage
 	Media               map[string]Media
-	Cards               map[string]Card
+	Cards               map[string]cardImage
 	CardReplays         []cardReplayImage
 	CardTemplates       []config.CardTemplate
 	LatestTemplates     map[string]string
@@ -52,6 +52,11 @@ type storeImage struct {
 	Mail                map[string]MailMessage
 }
 
+type appImage struct {
+	App
+	EventTypes []string `json:"event_types"`
+}
+
 type chatImage struct {
 	Chat
 	AppID, CreatorID string
@@ -63,9 +68,15 @@ type chatImage struct {
 
 type messageImage struct {
 	Message
-	ForwardedIDs   []string
-	ForwardedCount int
-	InvalidSources []string
+	ForwardedIDs      []string
+	ForwardedCount    int
+	InvalidSources    []string
+	DiagnosticSecrets []string `json:"diagnostic_secrets,omitempty"`
+}
+
+type cardImage struct {
+	Card
+	DiagnosticSecrets []string `json:"diagnostic_secrets,omitempty"`
 }
 
 type approvalReplayImage struct {
@@ -106,11 +117,12 @@ func (s *Store) ExportSnapshot() (json.RawMessage, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	image := storeImage{
-		Apps: s.apps.items, Users: s.users.items, UserOrder: s.userSeedOrder,
+		Apps: make(map[string]appImage, len(s.apps.items)), Users: s.users.items, UserOrder: s.userSeedOrder,
 		Departments: s.departments.items, ApprovalDefinitions: s.approvalDefinitions.items,
 		ApprovalInstances: s.approvalInstances, ApprovalSubscribers: s.approvalSubscribers,
 		Chats: make(map[string]chatImage, len(s.chats.items)), DisbandedChats: s.disbandedChats,
-		Messages: make(map[string]messageImage, len(s.messages.items)), Media: s.media.items, Cards: s.cards.items,
+		Messages: make(map[string]messageImage, len(s.messages.items)), Media: s.media.items,
+		Cards:           make(map[string]cardImage, len(s.cards.items)),
 		LatestTemplates: s.latestTemplates, MessageOrder: s.messageOrder, Revision: s.revision,
 		Tokens: s.tokens, Authorizations: slices.Collect(maps.Values(s.authorizations)),
 		DeviceFlows: s.deviceFlows, DeviceUserCodes: s.deviceUserCodes,
@@ -118,11 +130,17 @@ func (s *Store) ExportSnapshot() (json.RawMessage, error) {
 		Spreadsheets: make(map[string]sheetImage, len(s.content.sheets)), Bases: make(map[string]baseImage, len(s.content.bases)),
 		Calendar: s.work.events, Tasks: s.work.tasks, Minutes: s.work.minutes, Drafts: s.work.drafts, Mail: s.work.mail,
 	}
+	for id, app := range s.apps.items {
+		image.Apps[id] = appImage{App: app, EventTypes: app.EventTypes}
+	}
 	for id, chat := range s.chats.items {
 		image.Chats[id] = chatImage{chat, chat.AppID, chat.CreatorID, chat.BotManagers, chat.CreatedAt, chat.MemberOrder, chat.NextMemberOrder}
 	}
 	for id, message := range s.messages.items {
-		image.Messages[id] = messageImage{message, message.forwardedIDs, message.forwardedCount, message.invalidSources}
+		image.Messages[id] = messageImage{message, message.forwardedIDs, message.forwardedCount, message.invalidSources, message.DiagnosticRedactor.secrets}
+	}
+	for id, card := range s.cards.items {
+		image.Cards[id] = cardImage{Card: card, DiagnosticSecrets: card.DiagnosticRedactor.secrets}
 	}
 	for k, replay := range s.approvalRequests {
 		image.ApprovalReplays = append(image.ApprovalReplays, approvalReplayImage{k.appID, k.tenantKey, k.uuid, replay.code, replay.input})
@@ -157,11 +175,11 @@ func DecodeSnapshot(raw json.RawMessage) (*Snapshot, error) {
 	dec.DisallowUnknownFields()
 	if dec.Decode(&image) != nil || !errors.Is(dec.Decode(new(json.RawMessage)), io.EOF) ||
 		image.Apps == nil || image.Users == nil || image.Chats == nil || image.Messages == nil || image.Tokens == nil ||
-		!validKeys(image.Apps, func(app App) string { return app.AppID }) ||
+		!validKeys(image.Apps, func(app appImage) string { return app.AppID }) ||
 		!validKeys(image.Users, func(user User) string { return user.OpenID }) ||
 		!validKeys(image.Chats, func(chat chatImage) string { return chat.ChatID }) ||
 		!validKeys(image.Messages, func(message messageImage) string { return message.ID }) ||
-		!validKeys(image.Cards, func(card Card) string { return card.ID }) ||
+		!validKeys(image.Cards, func(card cardImage) string { return card.ID }) ||
 		!validKeys(image.Media, func(media Media) string { return media.Key }) ||
 		!validKeys(image.Tokens, func(token Token) string { return token.Value }) {
 		return nil, errors.New("invalid snapshot store image")
@@ -204,7 +222,11 @@ func (s *Store) RestoreSnapshot(snapshot *Snapshot) {
 	s.reset(config.Config{})
 	s.revision, s.messageOrder = image.Revision, image.MessageOrder
 	s.userSeedOrder = image.UserOrder
-	replaceMap(&s.apps.items, image.Apps)
+	for id, entry := range image.Apps {
+		app := entry.App
+		app.EventTypes = entry.EventTypes
+		s.apps.items[id] = app
+	}
 	replaceMap(&s.users.items, image.Users)
 	replaceMap(&s.departments.items, image.Departments)
 	replaceMap(&s.approvalDefinitions.items, image.ApprovalDefinitions)
@@ -212,7 +234,6 @@ func (s *Store) RestoreSnapshot(snapshot *Snapshot) {
 	replaceMap(&s.approvalSubscribers, image.ApprovalSubscribers)
 	replaceMap(&s.disbandedChats, image.DisbandedChats)
 	replaceMap(&s.media.items, image.Media)
-	replaceMap(&s.cards.items, image.Cards)
 	replaceMap(&s.tokens, image.Tokens)
 	replaceMap(&s.deviceFlows, image.DeviceFlows)
 	replaceMap(&s.deviceUserCodes, image.DeviceUserCodes)
@@ -234,12 +255,13 @@ func (s *Store) RestoreSnapshot(snapshot *Snapshot) {
 	for id, entry := range image.Messages {
 		message := entry.Message
 		message.forwardedIDs, message.forwardedCount, message.invalidSources = entry.ForwardedIDs, entry.ForwardedCount, entry.InvalidSources
-		message.DiagnosticRedactor = AppRedactor(s.apps.items[message.AppID])
+		message.DiagnosticRedactor = NewRedactor(entry.DiagnosticSecrets...)
 		s.messages.items[id] = message
 		s.indexMessage(Message{}, message)
 	}
-	for id, card := range s.cards.items {
-		card.DiagnosticRedactor = AppRedactor(s.apps.items[card.AppID])
+	for id, entry := range image.Cards {
+		card := entry.Card
+		card.DiagnosticRedactor = NewRedactor(entry.DiagnosticSecrets...)
 		if bytes.Equal(card.TemplateData, []byte("null")) {
 			card.TemplateData = nil
 		}

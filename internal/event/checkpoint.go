@@ -6,15 +6,22 @@ import (
 	"errors"
 	"time"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
 // PendingRetry represents the next at-least-once delivery of an event.
 type PendingRetry struct {
 	AppID, TenantKey, EventID, EventType, RequestID, Channel string
-	Copy, Attempt                                            int
+	Copy, Attempt, AttemptsUsed                              int
+	Receiver                                                 RetryReceiver
 	Due                                                      time.Time
 	Body                                                     json.RawMessage
+}
+
+// RetryReceiver retains the configuration used by the original attempt.
+type RetryReceiver struct {
+	WebhookURL, EncryptKey, VerificationToken, AppSecret string
 }
 
 type retryKey struct {
@@ -31,8 +38,14 @@ func ValidatePending(retries []PendingRetry) error {
 		key := retry.key()
 		if retry.AppID == "" || retry.EventID == "" || retry.EventType == "" || retry.Due.IsZero() ||
 			(retry.Channel != "webhook" && retry.Channel != "websocket") ||
-			retry.Copy < 0 || retry.Attempt < 2 || len(retry.Body) > maxFrame || !json.Valid(retry.Body) || seen[key] {
+			retry.Copy < 0 || retry.AttemptsUsed < 1 || retry.Attempt <= retry.AttemptsUsed ||
+			len(retry.Body) > maxFrame || !json.Valid(retry.Body) || seen[key] {
 			return errors.New("invalid pending event retry")
+		}
+		if retry.Channel == "webhook" {
+			if _, err := config.ParseRedirectURI(retry.Receiver.WebhookURL); err != nil {
+				return errors.New("invalid webhook retry destination")
+			}
 		}
 		seen[key] = true
 	}
@@ -50,9 +63,11 @@ func (d *Dispatcher) ExportCheckpoint(capture func([]PendingRetry) error) error 
 	return capture(retries)
 }
 
-func (d *Dispatcher) scheduleRetry(ctx context.Context, job deliveryJob, channel string, failed int, due time.Time) {
-	entry := PendingRetry{AppID: job.app.AppID, TenantKey: job.app.TenantKey, EventID: job.id, EventType: job.kind,
-		RequestID: job.requestID, Channel: channel, Copy: job.copy, Attempt: failed + 1, Due: due, Body: job.body}
+func (d *Dispatcher) scheduleRetry(ctx context.Context, job deliveryJob, channel string, attempt, used int, due time.Time) {
+	app := job.app
+	entry := PendingRetry{AppID: app.AppID, TenantKey: app.TenantKey, EventID: job.id, EventType: job.kind,
+		RequestID: job.requestID, Channel: channel, Copy: job.copy, Attempt: attempt + 1, AttemptsUsed: used, Due: due, Body: job.body,
+		Receiver: RetryReceiver{WebhookURL: app.WebhookURL, EncryptKey: app.EncryptKey, VerificationToken: app.VerificationToken, AppSecret: app.AppSecret}}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if scope, ok := ctx.Value(admissionKey{}).(admission); ok && scope.reset == d.resetCtx {
@@ -60,8 +75,8 @@ func (d *Dispatcher) scheduleRetry(ctx context.Context, job deliveryJob, channel
 	}
 }
 
-func (d *Dispatcher) finishRetry(ctx context.Context, job deliveryJob, channel string, err error) {
-	if err != nil {
+func (d *Dispatcher) finishRetry(ctx context.Context, job deliveryJob, channel string, eligible bool) {
+	if eligible {
 		select {
 		case <-d.retriesStopped:
 			// Keep the last eligible attempt for a graceful checkpoint.
@@ -89,10 +104,11 @@ func (d *Dispatcher) RestoreCheckpoint(restore func(), retries []PendingRetry) {
 // resumeRetry requires the dispatcher lock and the restored store.
 func (d *Dispatcher) resumeRetry(retry PendingRetry) {
 	app, ok := d.state.Apps().Get(retry.AppID)
-	if !ok || app.TenantKey != retry.TenantKey || d.closed ||
-		(retry.Channel == "webhook" && app.WebhookURL == "") {
+	if !ok || app.TenantKey != retry.TenantKey || d.closed {
 		return
 	}
+	saved := retry.Receiver
+	app.WebhookURL, app.EncryptKey, app.VerificationToken, app.AppSecret = saved.WebhookURL, saved.EncryptKey, saved.VerificationToken, saved.AppSecret
 	epoch := d.state.TraceEpoch()
 	job := deliveryJob{app: app, id: retry.EventID, kind: retry.EventType, requestID: retry.RequestID,
 		body: retry.Body, epoch: epoch, copy: retry.Copy, redactor: store.AppRedactor(app)}
@@ -111,12 +127,12 @@ func (d *Dispatcher) runRestoredRetry(ctx context.Context, job deliveryJob, retr
 		d.mu.Unlock()
 	}()
 	if !d.waitUntilRetry(ctx, retry.Due, nil) {
-		d.finishRetry(ctx, job, retry.Channel, context.Canceled)
+		d.finishRetry(ctx, job, retry.Channel, true)
 		return
 	}
 	if retry.Channel == "webhook" {
 		if err := job.prepareWebhook(); err != nil {
-			d.finishRetry(ctx, job, retry.Channel, err)
+			d.finishRetry(ctx, job, retry.Channel, false)
 			d.record(job, job.trace(retry.Channel, retry.Attempt), err)
 			return
 		}
@@ -124,11 +140,11 @@ func (d *Dispatcher) runRestoredRetry(ctx context.Context, job deliveryJob, retr
 		return
 	}
 	if peer := d.waitForRestoredPeer(ctx, job.app.AppID); peer != nil {
-		d.socketDeliveryFrom(ctx, peer, job, retry.Attempt)
+		d.socketDeliveryFrom(ctx, peer, job, retry.Attempt, retry.AttemptsUsed)
 		return
 	}
 	err := errors.New("no reconnected websocket receiver")
-	d.finishRetry(ctx, job, retry.Channel, err)
+	d.finishRetry(ctx, job, retry.Channel, true)
 	d.record(job, job.trace(retry.Channel, retry.Attempt), err)
 }
 

@@ -91,7 +91,8 @@ func (d *Dispatcher) webhookDelivery(ctx context.Context, job deliveryJob) Deliv
 }
 
 func (d *Dispatcher) webhookDeliveryFrom(ctx context.Context, job deliveryJob, start int) (result Delivery) {
-	defer func() { d.finishRetry(ctx, job, "webhook", result.Err) }()
+	eligible := true
+	defer func() { d.finishRetry(ctx, job, "webhook", eligible) }()
 	for i := start; i <= max(start, d.opts.WebhookMaxAttempts); i++ {
 		if i > 1 && !d.canRetry(ctx) {
 			if result.Err == nil {
@@ -100,7 +101,11 @@ func (d *Dispatcher) webhookDeliveryFrom(ctx context.Context, job deliveryJob, s
 			break
 		}
 		result = d.webhookAttempt(ctx, job, i, d.opts.WebhookTimeout, nil)
-		if result.Err == nil || i >= d.opts.WebhookMaxAttempts || !d.waitRetry(ctx, job, "webhook", i, result.completedAt, nil) {
+		if result.Err == nil || i >= d.opts.WebhookMaxAttempts {
+			eligible = result.Err != nil && ctx.Err() != nil && result.Status == 0
+			break
+		}
+		if ctx.Err() != nil || !d.waitRetry(ctx, job, "webhook", i, i, result.completedAt, nil) {
 			break
 		}
 	}

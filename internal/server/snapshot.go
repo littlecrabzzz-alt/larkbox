@@ -36,6 +36,8 @@ type decodedCheckpoint struct {
 }
 
 func (s *Server) snapshotBytes() ([]byte, error) {
+	s.controlMu.RLock()
+	defer s.controlMu.RUnlock()
 	var snapshot []byte
 	err := s.events.ExportCheckpoint(func(retries []event.PendingRetry) error {
 		state, err := s.store.ExportSnapshot()
@@ -83,6 +85,8 @@ func (s *Server) decodeCheckpoint(reader io.Reader) (decodedCheckpoint, error) {
 }
 
 func (s *Server) applyCheckpoint(snapshot decodedCheckpoint) {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
 	s.events.RestoreCheckpoint(func() {
 		s.faults.Reset()
 		if s.clock != nil {
