@@ -1,6 +1,7 @@
 package sandbox_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,6 +27,24 @@ func TestPreviewValidatesCardWithoutCreatingEntity(t *testing.T) {
 	]}}}`, http.StatusBadRequest)
 	assertContains(t, multiOutsideForm, "Multiple image selection requires a form.")
 	assertContains(t, call(t, srv, http.MethodGet, "/_sandbox/cards", "", http.StatusOK), `"cards":[]`)
+}
+
+func TestPreviewRequiresTablesAndFormsAtCardRoot(t *testing.T) {
+	srv := sandboxServer(t, config.Default())
+	const (
+		path  = "/_sandbox/cards/validate"
+		card  = `{"card":{"schema":"2.0","body":{"elements":[%s]}}}`
+		panel = `{"tag":"collapsible_panel","header":{"title":{"tag":"plain_text","content":"Details"}},"elements":[%s]}`
+		table = `{"tag":"table","columns":[{"name":"state","data_type":"text"}],"rows":[{"state":"Ready"}]}`
+		form  = `{"tag":"form","name":"review","elements":[{"tag":"button","name":"save","form_action_type":"submit","text":{"tag":"plain_text","content":"Save"}}]}`
+	)
+	for tag, component := range map[string]string{"table": table, "form": form} {
+		t.Run(tag, func(t *testing.T) {
+			call(t, srv, http.MethodPost, path, fmt.Sprintf(card, component), http.StatusOK)
+			body := call(t, srv, http.MethodPost, path, fmt.Sprintf(card, fmt.Sprintf(panel, component)), http.StatusBadRequest)
+			assertContains(t, body, tag+" must be a top-level card component")
+		})
+	}
 }
 
 func TestCardImagePreviewSniffsUploadedBytes(t *testing.T) {

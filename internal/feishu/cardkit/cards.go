@@ -530,7 +530,7 @@ func validateEditedCard(doc map[string]any) error {
 	if config, _ := doc["config"].(map[string]any); config["update_multi"] == false {
 		return errUnsharedCard
 	}
-	if field, issue := imagePickerIssue(doc); field != "" {
+	if field, issue := componentIssue(doc); field != "" {
 		return invalid(field, issue)
 	}
 	if !validEntityCard(doc) || !validCardSettings(doc) {

@@ -15,7 +15,7 @@ import (
 
 // ValidMessageCard validates inline cards and template references in IM messages.
 func ValidMessageCard(card map[string]any) bool {
-	if field, _ := imagePickerIssue(card); field != "" {
+	if field, _ := componentIssue(card); field != "" {
 		return false
 	}
 	return validMessageCardShape(card)
@@ -76,7 +76,7 @@ func ValidatePreviewJSON(encoded string) error {
 	if !validCardSettings(doc) {
 		return errors.New("correct the card config or card_link fields")
 	}
-	if field, issue := imagePickerIssue(doc); field != "" {
+	if field, issue := componentIssue(doc); field != "" {
 		return fmt.Errorf("%s — %s", field, issue)
 	}
 	if doc["schema"] == "2.0" {
@@ -105,15 +105,19 @@ func ValidatePreviewJSON(encoded string) error {
 	return nil
 }
 
-func imagePickerIssue(card map[string]any) (field, issue string) {
+func componentIssue(card map[string]any) (field, issue string) {
 	walk(card, func(slot elementSlot, node map[string]any) bool {
-		if node["tag"] != "select_img" {
-			return false
-		}
-		if node["multi_select"] == true && !slot.inForm {
-			field, issue = "multi_select", "Multiple image selection requires a form."
-		} else if slot.inForm && !nonemptyString(node, "name") {
-			field, issue = "name", "An image picker inside a form requires a name."
+		switch tag := node["tag"]; tag {
+		case "form", "table":
+			if slot.parent["tag"] != nil {
+				field, issue = "tag", fmt.Sprintf("A %s must be a top-level card component.", tag)
+			}
+		case "select_img":
+			if node["multi_select"] == true && !slot.inForm {
+				field, issue = "multi_select", "Multiple image selection requires a form."
+			} else if slot.inForm && !nonemptyString(node, "name") {
+				field, issue = "name", "An image picker inside a form requires a name."
+			}
 		}
 		return field != ""
 	})
