@@ -27,6 +27,7 @@ const (
 // Auth identifies the app and optional user authenticated by a Bearer token.
 type Auth struct {
 	AppID      string
+	TenantKey  string
 	UserOpenID string
 	Kind       store.TokenKind
 	Scope      string
@@ -122,7 +123,7 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	case !accepts(required, token.Kind):
 		return Auth{}, credentialError(token.Kind, unsupportedCredential)
 	}
-	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind, Scope: token.Scope}, protocol.APIError{}
+	return Auth{AppID: token.AppID, TenantKey: token.TenantKey, UserOpenID: token.UserOpenID, Kind: token.Kind, Scope: token.Scope}, protocol.APIError{}
 }
 
 func bearerToken(headers []string) (string, bool) {

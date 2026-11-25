@@ -2,6 +2,7 @@ package sdk_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -121,6 +122,88 @@ func TestSheetRangeUpdateIsAtomic(t *testing.T) {
 	answer = request(http.MethodGet, values+"/A2:B2", "", http.StatusOK)
 	if !bytes.Contains(answer, []byte(`"values":[["committed",24]]`)) {
 		t.Fatalf("valid write did not round-trip: %s", answer)
+	}
+}
+
+func TestContentFollowsTenantAndActiveMembership(t *testing.T) {
+	cfg := sdkTestConfig()
+	srv, web := sdkEventServer(t, cfg, event.Options{})
+	app, user := cfg.Apps[0], cfg.Users[0]
+	install := func(value string, kind store.TokenKind, openID string) {
+		t.Helper()
+		requireSDKNetwork(t, srv.Store().PutToken(store.Token{
+			Value: value, Kind: kind, AppID: app.AppID, UserOpenID: openID,
+			Scope: "docx:document:create docx:document:readonly", ExpiresAt: time.Now().Add(time.Minute),
+		}))
+	}
+	const docs = "/open-apis/docx/v1/documents"
+	create := func(bearer string) string {
+		t.Helper()
+		result := sandboxDecode[struct {
+			Data struct {
+				Document struct {
+					ID string `json:"document_id"`
+				} `json:"document"`
+			} `json:"data"`
+		}](t, contentCall(t, web, http.MethodPost, docs, bearer, "application/json", strings.NewReader(`{"title":"Test"}`), http.StatusOK))
+		return docs + "/" + result.Data.Document.ID
+	}
+	install("t-content-a", store.TenantToken, "")
+	oldDoc := create("t-content-a")
+	install("u-content-active", store.UserToken, user.OpenID)
+	privateDoc := create("u-content-active")
+	user.Inactive = true
+	sandboxRequest(t, web, http.MethodPost, "seed", map[string]any{"users": []any{user}}, http.StatusOK)
+	contentCall(t, web, http.MethodGet, privateDoc, "u-content-active", "", nil, http.StatusBadRequest)
+	user.Inactive, user.TenantKey = false, "tenant-content-b"
+	user.DepartmentOpenIDs = nil
+	sandboxRequest(t, web, http.MethodPost, "seed", map[string]any{"users": []any{user}}, http.StatusOK)
+	contentCall(t, web, http.MethodGet, privateDoc, "u-content-active", "", nil, http.StatusBadRequest)
+
+	previous := app
+	app.TenantKey = "tenant-content-b"
+	sandboxRequest(t, web, http.MethodPost, "seed", map[string]any{"apps": []any{app}}, http.StatusOK)
+	if err := srv.Store().PutAppTokens(previous, store.Token{Value: "t-stale", Kind: store.TenantToken, AppID: app.AppID}); !errors.Is(err, store.ErrTokenOwner) {
+		t.Fatalf("stale app credential issuance returned %v", err)
+	}
+	install("t-content-b", store.TenantToken, "")
+	newDoc := create("t-content-b")
+	contentCall(t, web, http.MethodGet, oldDoc, "t-content-b", "", nil, http.StatusNotFound)
+	contentCall(t, web, http.MethodGet, newDoc, "t-content-a", "", nil, http.StatusBadRequest)
+	contentCall(t, web, http.MethodGet, newDoc, "t-content-b", "", nil, http.StatusOK)
+}
+
+func TestBitableSearchQueryPagination(t *testing.T) {
+	cfg := sdkTestConfig()
+	srv, web := sdkEventServer(t, cfg, event.Options{})
+	const bearer = "t-bitable-search"
+	requireSDKNetwork(t, srv.Store().PutToken(store.Token{
+		Value: bearer, Kind: store.TenantToken, AppID: cfg.Apps[0].AppID, ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	owner := store.ResourceOwner{AppID: cfg.Apps[0].AppID, TenantKey: cfg.Apps[0].TenantKey}
+	base := srv.Store().CreateBase(owner, "Pagination", "UTC")
+	search := "/open-apis/bitable/v1/apps/" + base.ID + "/tables/" + base.TableID + "/records"
+	for _, value := range []string{"one", "two", "three"} {
+		contentCall(t, web, http.MethodPost, search, bearer, "application/json", strings.NewReader(`{"fields":{"Name":"`+value+`"}}`), http.StatusOK)
+	}
+	type records struct {
+		Items     []store.BaseRecord `json:"items"`
+		HasMore   bool               `json:"has_more"`
+		PageToken string             `json:"page_token"`
+	}
+	page := func(query string) records {
+		t.Helper()
+		return sandboxDecode[struct {
+			Data records `json:"data"`
+		}](t, contentCall(t, web, http.MethodPost, search+"/search?"+query, bearer, "application/json", strings.NewReader("{}"), http.StatusOK)).Data
+	}
+	first := page("page_size=2")
+	if len(first.Items) != 2 || !first.HasMore || first.PageToken == "" {
+		t.Fatalf("first page = %+v", first)
+	}
+	second := page("page_size=2&page_token=" + first.PageToken)
+	if len(second.Items) != 1 || second.HasMore || second.PageToken != "" || second.Items[0].ID == first.Items[0].ID || second.Items[0].ID == first.Items[1].ID {
+		t.Fatalf("second page = %+v", second)
 	}
 }
 

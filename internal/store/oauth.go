@@ -27,11 +27,13 @@ type Authorization struct {
 func (s *Store) SaveAuthorizationCode(code Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if code.Kind != OAuthCode || code.UserOpenID == "" || !s.tokenOwnersExist(code) || s.users.items[code.UserOpenID].Inactive {
+	user := s.users.items[code.UserOpenID]
+	if code.Kind != OAuthCode || code.UserOpenID == "" || !s.tokenOwnersExist(code) || user.Inactive ||
+		s.apps.items[code.AppID].TenantKey != code.TenantKey {
 		return ErrTokenOwner
 	}
 	code.AuthorizationID = s.recordAuthorization(code.AppID, code.UserOpenID, code.Scope, s.Now())
-	s.tokens[code.Value] = code
+	s.putToken(code)
 	return nil
 }
 
@@ -176,7 +178,7 @@ func (s *Store) saveOAuthTokens(tokens *[2]Token, authorizationID string) error 
 	}
 	for i := range replacements {
 		replacements[i].AuthorizationID = authorizationID
-		s.tokens[replacements[i].Value] = replacements[i]
+		s.putToken(replacements[i])
 	}
 	return nil
 }

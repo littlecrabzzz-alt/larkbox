@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -74,19 +75,19 @@ func (h handler) createDocx(w http.ResponseWriter, r *http.Request) {
 
 func (h handler) saveDocument(w http.ResponseWriter, r *http.Request, title, body, format string) {
 	created, err := store.Commit(r.Context(), h.state, func() (store.Document, error) {
-		return h.state.CreateDocument(h.owner(r), title, body, format), nil
+		return h.state.CreateDocument(middleware.ResourceOwner(r), title, body, format), nil
 	})
 	if err != nil {
 		stateError(w, err)
 		return
 	}
 	data := documentData(created)
-	data["url"] = resourceURL(r, "/open-apis/docx/v1/documents/"+created.ID)
+	data["url"] = resourceURL(r, "/docx/"+created.ID)
 	reply(w, fields{"document": data})
 }
 
 func (h handler) document(w http.ResponseWriter, r *http.Request) (store.Document, bool) {
-	doc, ok := h.state.Document(h.owner(r), r.PathValue("document_id"))
+	doc, ok := h.state.Document(middleware.ResourceOwner(r), r.PathValue("document_id"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 	}

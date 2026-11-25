@@ -6,9 +6,26 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
-// ResourceOwner separates app resources from resources created by a user.
+// ResourceOwner identifies the tenant, app, and optional user of a resource.
 type ResourceOwner struct {
-	AppID, UserOpenID string
+	TenantKey, AppID, UserOpenID string
+}
+
+// ResourceOwner resolves an app identity and checks its optional user's current membership.
+func (s *Store) ResourceOwner(appID, userOpenID string) (ResourceOwner, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	app, ok := s.apps.items[appID]
+	if !ok {
+		return ResourceOwner{}, false
+	}
+	if userOpenID != "" {
+		user, ok := s.users.items[userOpenID]
+		if !ok || user.Inactive || user.TenantKey != app.TenantKey {
+			return ResourceOwner{}, false
+		}
+	}
+	return ResourceOwner{TenantKey: app.TenantKey, AppID: appID, UserOpenID: userOpenID}, true
 }
 
 // Document stores the title and editable content of one document.
@@ -124,19 +141,22 @@ func (s *Store) CreateWikiNode(owner ResourceOwner, spaceID, parentID, title str
 	return node, nil
 }
 
-// WikiNode resolves a node token or its original document token.
+// WikiNode resolves a node token or its original document token. An empty
+// kind accepts either representation.
 func (s *Store) WikiNode(owner ResourceOwner, id, kind string) (WikiNode, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if kind == "wiki" {
+	if kind == "" || kind == "wiki" {
 		node, found := s.content.nodes[id]
-		if !found || s.content.spaces[node.SpaceID].Owner != owner {
+		if found && s.content.spaces[node.SpaceID].Owner == owner {
+			return node, true
+		}
+		if kind == "wiki" {
 			return WikiNode{}, false
 		}
-		return node, true
 	}
 	for _, node := range s.content.nodes {
-		if node.ObjectType == kind && node.ObjectID == id && s.content.spaces[node.SpaceID].Owner == owner {
+		if (kind == "" || node.ObjectType == kind) && node.ObjectID == id && s.content.spaces[node.SpaceID].Owner == owner {
 			return node, true
 		}
 	}

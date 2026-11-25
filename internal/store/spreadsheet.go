@@ -47,26 +47,55 @@ func (s *Store) Spreadsheet(owner ResourceOwner, id string) (Spreadsheet, bool) 
 	return book, true
 }
 
-// ReadSheetRanges captures all selected cells at one workbook revision.
-func (s *Store) ReadSheetRanges(owner ResourceOwner, id, selector string, ranges []SheetRange) ([][][]json.RawMessage, int64, error) {
+// SheetRead is a range result captured at one workbook revision.
+type SheetRead struct {
+	Ranges    [][][]json.RawMessage
+	Revision  int64
+	Truncated bool
+}
+
+// ReadSheetRanges captures rows at one revision. A positive budget limits
+// the encoded cell and value payload before cells are copied out of the store.
+func (s *Store) ReadSheetRanges(owner ResourceOwner, id, selector string, ranges []SheetRange, budget int) (SheetRead, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	book, ok := s.content.sheets[id]
 	if !ok || book.Owner != owner || !book.matchesSelector(selector) {
-		return nil, 0, ErrNotFound
+		return SheetRead{}, ErrNotFound
 	}
-	result := make([][][]json.RawMessage, 0, len(ranges))
+	result := SheetRead{Ranges: make([][][]json.RawMessage, 0, len(ranges)), Revision: book.Revision}
+	limited := budget > 0
 	for _, sel := range ranges {
-		cells := make([][]json.RawMessage, sel.Rows)
-		for row := range cells {
-			cells[row] = make([]json.RawMessage, sel.Columns)
-			for column := range cells[row] {
-				cells[row][column] = slices.Clone(book.cells[[2]int{sel.Row + row, sel.Column + column}])
-			}
+		const rangeOverhead = 128
+		if limited && budget < rangeOverhead {
+			result.Truncated = true
+			return result, nil
 		}
-		result = append(result, cells)
+		budget -= rangeOverhead
+		rows := make([][]json.RawMessage, 0, sel.Rows)
+		for row := 0; row < sel.Rows; row++ {
+			if limited {
+				// A cell can appear in the raw cell matrix and in its value projection.
+				cost := 6
+				for column := 0; column < sel.Columns && cost <= budget; column++ {
+					cost += 2*max(4, len(book.cells[[2]int{sel.Row + row, sel.Column + column}])) + 2
+				}
+				if cost > budget {
+					result.Ranges = append(result.Ranges, rows)
+					result.Truncated = true
+					return result, nil
+				}
+				budget -= cost
+			}
+			line := make([]json.RawMessage, sel.Columns)
+			for column := range line {
+				line[column] = slices.Clone(book.cells[[2]int{sel.Row + row, sel.Column + column}])
+			}
+			rows = append(rows, line)
+		}
+		result.Ranges = append(result.Ranges, rows)
 	}
-	return result, book.Revision, nil
+	return result, nil
 }
 
 // WriteSheetRange changes the full rectangle in one commit.

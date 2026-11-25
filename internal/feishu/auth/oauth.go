@@ -94,6 +94,7 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 
 	grant := store.Token{
 		Value: protocol.NewID(protocol.OAuthCode), Kind: store.OAuthCode, AppID: appID, UserOpenID: user.OpenID,
+		TenantKey: app.TenantKey,
 		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Code)), Scope: query.Get("scope"),
 		RedirectURI: redirectURI, CodeChallenge: challenge, CodeChallengeMethod: method,
 	}

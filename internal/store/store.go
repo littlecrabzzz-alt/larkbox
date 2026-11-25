@@ -240,13 +240,29 @@ func (s *Store) PutToken(token Token) error {
 func (s *Store) PutTokens(tokens ...Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.putTokens(tokens)
+}
+
+// PutAppTokens issues credentials only while the authenticated app snapshot is current.
+func (s *Store) PutAppTokens(app App, tokens ...Token) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.apps.items[app.AppID]
+	if !ok || current.TenantKey != app.TenantKey || current.AppSecret != app.AppSecret ||
+		slices.ContainsFunc(tokens, func(token Token) bool { return token.AppID != app.AppID }) {
+		return ErrTokenOwner
+	}
+	return s.putTokens(tokens)
+}
+
+func (s *Store) putTokens(tokens []Token) error {
 	for _, token := range tokens {
 		if !s.tokenOwnersExist(token) {
 			return ErrTokenOwner
 		}
 	}
 	for _, token := range tokens {
-		s.tokens[token.Value] = token
+		s.putToken(token)
 	}
 	return nil
 }
@@ -282,7 +298,7 @@ func (s *Store) checkTokenBinding(value, appID, userOpenID string, now time.Time
 	switch {
 	case !ok:
 		return Token{}, ErrNotFound
-	case !s.tokenOwnersExist(token):
+	case !s.tokenOwnersExist(token), token.TenantKey != s.apps.items[token.AppID].TenantKey:
 		return Token{Kind: token.Kind}, ErrTokenOwner
 	case appID != "" && token.AppID != appID, userOpenID != "" && token.UserOpenID != userOpenID:
 		return Token{}, ErrTokenBinding
@@ -295,6 +311,13 @@ func (s *Store) checkTokenBinding(value, appID, userOpenID string, now time.Time
 	default:
 		return token, nil
 	}
+}
+
+// putToken binds a newly issued credential to the app's current tenant.
+// The caller holds the store lock.
+func (s *Store) putToken(token Token) {
+	token.TenantKey = s.apps.items[token.AppID].TenantKey
+	s.tokens[token.Value] = token
 }
 
 // tokenOwnersExist requires the store lock.

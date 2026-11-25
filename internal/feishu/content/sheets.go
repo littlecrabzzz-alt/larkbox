@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -52,7 +53,7 @@ func parseSheetRange(raw string) (string, store.SheetRange, bool) {
 
 func spreadsheetData(r *http.Request, book store.Spreadsheet) fields {
 	return fields{"spreadsheet_token": book.ID, "title": book.Title,
-		"url": resourceURL(r, "/open-apis/sheets/v3/spreadsheets/"+book.ID)}
+		"url": resourceURL(r, "/sheets/"+book.ID)}
 }
 
 func (h handler) createSpreadsheet(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,7 @@ func (h handler) createSpreadsheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	book, err := store.Commit(r.Context(), h.state, func() (store.Spreadsheet, error) {
-		return h.state.CreateSpreadsheet(h.owner(r), cmp.Or(strings.TrimSpace(input.Title), "Untitled spreadsheet")), nil
+		return h.state.CreateSpreadsheet(middleware.ResourceOwner(r), cmp.Or(strings.TrimSpace(input.Title), "Untitled spreadsheet")), nil
 	})
 	if err != nil {
 		stateError(w, err)
@@ -78,7 +79,7 @@ func (h handler) createSpreadsheet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) spreadsheet(w http.ResponseWriter, r *http.Request) (store.Spreadsheet, bool) {
-	book, ok := h.state.Spreadsheet(h.owner(r), r.PathValue("spreadsheet_token"))
+	book, ok := h.state.Spreadsheet(middleware.ResourceOwner(r), r.PathValue("spreadsheet_token"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 	}
@@ -106,6 +107,7 @@ type sheetToolInput struct {
 	Ranges    []string            `json:"ranges"`
 	Cells     [][]json.RawMessage `json:"cells"`
 	Overwrite *bool               `json:"allow_overwrite"`
+	MaxChars  int                 `json:"max_chars"`
 }
 
 func readSheetToolInput(w http.ResponseWriter, r *http.Request, expected string) (sheetToolInput, bool) {
@@ -178,20 +180,23 @@ func (h handler) readSheetTool(w http.ResponseWriter, r *http.Request) {
 		}
 		ranges = append(ranges, area)
 	}
-	if len(ranges) == 0 {
+	if len(ranges) == 0 || input.MaxChars < 0 {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	cells, revision, err := h.state.ReadSheetRanges(h.owner(r), book.ID, book.SheetID, ranges)
+	const defaultLimit, maximumLimit = 500000, 20000000
+	budget := min(cmp.Or(input.MaxChars, defaultLimit), maximumLimit)
+	snapshot, err := h.state.ReadSheetRanges(middleware.ResourceOwner(r), book.ID, book.SheetID, ranges, budget)
 	if err != nil {
 		stateError(w, err)
 		return
 	}
-	result := make([]fields, 0, len(cells))
-	for i, matrix := range cells {
+	result := make([]fields, 0, len(snapshot.Ranges))
+	for i, matrix := range snapshot.Ranges {
 		result = append(result, fields{"range": input.Ranges[i], "cells": matrix, "values": sheetValues(matrix)})
 	}
-	toolOutput(w, fields{"sheet_id": book.SheetID, "sheet_name": store.DefaultSheet, "revision": revision, "ranges": result})
+	toolOutput(w, fields{"sheet_id": book.SheetID, "sheet_name": store.DefaultSheet,
+		"revision": snapshot.Revision, "ranges": result, "truncated": snapshot.Truncated})
 }
 
 func matchesSheet(book store.Spreadsheet, selectors ...string) bool {
@@ -232,7 +237,7 @@ func sheetValues(cells [][]json.RawMessage) [][]json.RawMessage {
 
 func (h handler) writeCells(w http.ResponseWriter, r *http.Request, book store.Spreadsheet, area store.SheetRange, cells [][]json.RawMessage, overwrite bool) (int64, bool) {
 	revision, err := store.Commit(r.Context(), h.state, func() (int64, error) {
-		return h.state.WriteSheetRange(h.owner(r), book.ID, book.SheetID, area, cells, overwrite)
+		return h.state.WriteSheetRange(middleware.ResourceOwner(r), book.ID, book.SheetID, area, cells, overwrite)
 	})
 	if errors.Is(err, store.ErrAlreadyExists) {
 		_ = protocol.WriteError(w, protocol.APIError{Code: protocol.InvalidParameter, Message: "target range contains data", Status: http.StatusBadRequest})
@@ -253,13 +258,13 @@ func (h handler) readSheetValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("spreadsheet_token")
-	items, revision, err := h.state.ReadSheetRanges(h.owner(r), id, selector, []store.SheetRange{area})
+	snapshot, err := h.state.ReadSheetRanges(middleware.ResourceOwner(r), id, selector, []store.SheetRange{area}, 0)
 	if err != nil {
 		stateError(w, err)
 		return
 	}
-	reply(w, fields{"spreadsheetToken": id, "revision": revision,
-		"valueRange": fields{"range": text, "majorDimension": "ROWS", "values": sheetValues(items[0])}})
+	reply(w, fields{"spreadsheetToken": id, "revision": snapshot.Revision,
+		"valueRange": fields{"range": text, "majorDimension": "ROWS", "values": sheetValues(snapshot.Ranges[0])}})
 }
 
 func (h handler) writeSheetValues(w http.ResponseWriter, r *http.Request) {

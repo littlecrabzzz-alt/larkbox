@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -48,7 +49,7 @@ func (h handler) uploadDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	stored, err := store.Commit(r.Context(), h.state, func() (store.DriveFile, error) {
 		return h.state.UploadDriveFile(store.DriveFile{
-			ID: r.FormValue("file_token"), Owner: h.owner(r), Name: name, Parent: cmp.Or(r.FormValue("parent_node"), store.DriveRoot),
+			ID: r.FormValue("file_token"), Owner: middleware.ResourceOwner(r), Name: name, Parent: cmp.Or(r.FormValue("parent_node"), store.DriveRoot),
 			ContentType: http.DetectContentType(body), Data: body,
 		})
 	})
@@ -60,7 +61,7 @@ func (h handler) uploadDrive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) downloadDrive(w http.ResponseWriter, r *http.Request) {
-	entry, ok := h.state.DriveFile(h.owner(r), r.PathValue("file_token"), true)
+	entry, ok := h.state.DriveFile(middleware.ResourceOwner(r), r.PathValue("file_token"), true)
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return
@@ -73,7 +74,7 @@ func (h handler) downloadDrive(w http.ResponseWriter, r *http.Request) {
 
 func (h handler) queryDriveToken(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	owner := h.owner(r)
+	owner := middleware.ResourceOwner(r)
 	if file, ok := h.state.DriveFile(owner, token, false); ok {
 		reply(w, fields{"obj_token": file.ID, "obj_type": "file", "is_wiki_token": false})
 		return
@@ -95,7 +96,7 @@ func (h handler) driveExportPermission(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	_, allowed := h.state.DriveFile(h.owner(r), r.PathValue("file_token"), false)
+	_, allowed := h.state.DriveFile(middleware.ResourceOwner(r), r.PathValue("file_token"), false)
 	reply(w, fields{"auth_result": allowed})
 }
 
@@ -115,7 +116,7 @@ func (h handler) driveMetadata(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	owner := h.owner(r)
+	owner := middleware.ResourceOwner(r)
 	metas, misses := make([]fields, 0), make([]fields, 0)
 	for _, request := range input.Requests {
 		entry, found := h.state.DriveFile(owner, request.Token, false)

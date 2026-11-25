@@ -200,7 +200,7 @@ func (h handler) tenantCredentialGrant(w http.ResponseWriter, r *http.Request, f
 		Value: protocol.NewID(protocol.TenantToken), Kind: store.TenantToken, AppID: app.AppID,
 		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Tenant)), Scope: scope,
 	}
-	if err := h.state.Mutate(r.Context(), func() error { return h.state.PutToken(credential) }); err != nil {
+	if err := h.state.Mutate(r.Context(), func() error { return h.state.PutAppTokens(app, credential) }); err != nil {
 		if !middleware.WriteResetConflict(w, err) {
 			writeOAuthError(w, oauthAppNotFound)
 		}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -26,7 +27,7 @@ func (h handler) createWikiSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	space, err := store.Commit(r.Context(), h.state, func() (store.WikiSpace, error) {
-		return h.state.CreateWikiSpace(h.owner(r), input.Name, input.Description), nil
+		return h.state.CreateWikiSpace(middleware.ResourceOwner(r), input.Name, input.Description), nil
 	})
 	if err != nil {
 		stateError(w, err)
@@ -36,7 +37,7 @@ func (h handler) createWikiSpace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) readWikiSpace(w http.ResponseWriter, r *http.Request) {
-	space, ok := h.state.WikiSpace(h.owner(r), r.PathValue("space_id"))
+	space, ok := h.state.WikiSpace(middleware.ResourceOwner(r), r.PathValue("space_id"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return
@@ -59,7 +60,7 @@ func (h handler) createWikiNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node, err := store.Commit(r.Context(), h.state, func() (store.WikiNode, error) {
-		return h.state.CreateWikiNode(h.owner(r), r.PathValue("space_id"), input.Parent, cmp.Or(input.Title, "Untitled document"))
+		return h.state.CreateWikiNode(middleware.ResourceOwner(r), r.PathValue("space_id"), input.Parent, cmp.Or(input.Title, "Untitled document"))
 	})
 	if err != nil {
 		stateError(w, err)
@@ -70,12 +71,15 @@ func (h handler) createWikiNode(w http.ResponseWriter, r *http.Request) {
 
 func (h handler) readWikiNode(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	key, kind := query.Get("token"), cmp.Or(query.Get("obj_type"), "wiki")
-	if key == "" || (kind != "wiki" && kind != "docx") {
+	key, kind := query.Get("token"), query.Get("obj_type")
+	if kind == "" && strings.HasSuffix(r.URL.Path, "/get_node") {
+		kind = "wiki"
+	}
+	if key == "" || (kind != "" && kind != "wiki" && kind != "docx") {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	node, ok := h.state.WikiNode(h.owner(r), key, kind)
+	node, ok := h.state.WikiNode(middleware.ResourceOwner(r), key, kind)
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return

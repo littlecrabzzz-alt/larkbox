@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -34,7 +35,7 @@ func (h handler) createBase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base, err := store.Commit(r.Context(), h.state, func() (store.Base, error) {
-		return h.state.CreateBase(h.owner(r), input.Name, cmp.Or(input.Zone, "Asia/Shanghai")), nil
+		return h.state.CreateBase(middleware.ResourceOwner(r), input.Name, cmp.Or(input.Zone, "Asia/Shanghai")), nil
 	})
 	if err != nil {
 		stateError(w, err)
@@ -51,7 +52,7 @@ func baseData(r *http.Request, base store.Base) fields {
 }
 
 func (h handler) base(w http.ResponseWriter, r *http.Request) (store.Base, bool) {
-	base, ok := h.state.Base(h.owner(r), r.PathValue("base_token"))
+	base, ok := h.state.Base(middleware.ResourceOwner(r), r.PathValue("base_token"))
 	if tableID := r.PathValue("table_id"); tableID != "" && base.TableID != tableID {
 		ok = false
 	}
@@ -159,7 +160,7 @@ func (h handler) createRecords(w http.ResponseWriter, r *http.Request, rows []ma
 		rows[i] = normalized
 	}
 	records, err := store.Commit(r.Context(), h.state, func() ([]store.BaseRecord, error) {
-		return h.state.CreateBaseRecords(h.owner(r), base.ID, base.TableID, rows)
+		return h.state.CreateBaseRecords(middleware.ResourceOwner(r), base.ID, base.TableID, rows)
 	})
 	if err != nil {
 		stateError(w, err)
@@ -185,7 +186,7 @@ func (h handler) updateBaseRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	changed, err := store.Commit(r.Context(), h.state, func() (store.BaseRecord, error) {
-		return h.state.UpdateBaseRecord(h.owner(r), base.ID, base.TableID, r.PathValue("record_id"), normalized)
+		return h.state.UpdateBaseRecord(middleware.ResourceOwner(r), base.ID, base.TableID, r.PathValue("record_id"), normalized)
 	})
 	if err != nil {
 		stateError(w, err)
@@ -211,21 +212,31 @@ type recordQuery struct {
 }
 
 func (h handler) listBaseRecords(w http.ResponseWriter, r *http.Request) {
+	h.queryBaseRecordsFromURL(w, r, recordQuery{Limit: 20})
+}
+
+func (h handler) queryBaseRecordsFromURL(w http.ResponseWriter, r *http.Request, input recordQuery) {
 	query := r.URL.Query()
-	offset, offsetErr := strconv.Atoi(cmp.Or(query.Get("offset"), query.Get("page_token"), "0"))
-	limit, limitErr := strconv.Atoi(cmp.Or(query.Get("limit"), query.Get("page_size"), "20"))
+	offset, offsetErr := strconv.Atoi(cmp.Or(query.Get("offset"), query.Get("page_token"), strconv.Itoa(input.Offset)))
+	limit, limitErr := strconv.Atoi(cmp.Or(query.Get("limit"), query.Get("page_size"), strconv.Itoa(input.Limit)))
 	if offsetErr != nil || limitErr != nil {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	h.queryBaseRecords(w, r, recordQuery{Offset: offset, Limit: limit})
+	input.Offset, input.Limit = offset, limit
+	h.queryBaseRecords(w, r, input)
 }
 
 func (h handler) searchBaseRecords(w http.ResponseWriter, r *http.Request) {
 	var input recordQuery
-	if read(w, r, &input) {
-		h.queryBaseRecords(w, r, input)
+	if !read(w, r, &input) {
+		return
 	}
+	if bitableAPI(r) {
+		h.queryBaseRecordsFromURL(w, r, input)
+		return
+	}
+	h.queryBaseRecords(w, r, input)
 }
 
 func (h handler) queryBaseRecords(w http.ResponseWriter, r *http.Request, query recordQuery) {
@@ -247,7 +258,7 @@ func (h handler) queryBaseRecords(w http.ResponseWriter, r *http.Request, query 
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	records, ok := h.state.BaseRecords(h.owner(r), base.ID, base.TableID)
+	records, ok := h.state.BaseRecords(middleware.ResourceOwner(r), base.ID, base.TableID)
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return

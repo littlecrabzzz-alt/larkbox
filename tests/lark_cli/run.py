@@ -150,7 +150,7 @@ def verify_content(command, directory):
     marker = "CLI sandbox content"
     doc = call("docs", "+create", "--api-version", "v2", "--title", "Probe document",
                "--doc-format", "markdown", "--content", marker)["document"]
-    fetched = call("docs", "+fetch", "--api-version", "v2", "--doc", doc["document_id"],
+    fetched = call("docs", "+fetch", "--api-version", "v2", "--doc", doc["url"],
                    "--doc-format", "markdown", "--format", "json")["document"]
     assert fetched["title"] == "Probe document" and fetched["content"] == marker, fetched
 
@@ -158,6 +158,8 @@ def verify_content(command, directory):
     node = call("wiki", "+node-create", "--space-id", space["space_id"], "--obj-type", "docx", "--title", marker)
     resolved = call("wiki", "+node-get", "--node-token", node["node_token"], "--space-id", space["space_id"], "--format", "json")
     assert resolved["obj_token"] == node["obj_token"] and resolved["title"] == marker, resolved
+    by_document = call("wiki", "+node-get", "--node-token", node["obj_token"], "--format", "json")
+    assert by_document["node_token"] == node["node_token"], by_document
     command("wiki", "+node-get", "--node-token", "wik00000000000000000000000000000000", "--as", "user", success=False)
 
     fixture = b"Larkbox Drive probe\x00\xff\x10"
@@ -171,8 +173,10 @@ def verify_content(command, directory):
     values = [["Task", "Count"], [marker, 23]]
     matrix = [[{"value": value} for value in row] for row in values]
     call("sheets", "+cells-set", *selector, "--cells", json.dumps(matrix), "--format", "json")
-    read = call("sheets", "+cells-get", *selector, "--format", "json")
+    read = call("sheets", "+cells-get", "--url", workbook["url"], *selector[2:], "--format", "json")
     assert read["ranges"][0]["values"] == values, read
+    clipped = call("sheets", "+cells-get", *selector, "--format", "json", "--max-chars", "10")
+    assert clipped["truncated"] and not clipped["ranges"], clipped
 
     base = call("base", "+base-create", "--name", "Probe base")["base"]
     selector = ("--base-token", base["base_token"])

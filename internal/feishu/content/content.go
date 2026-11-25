@@ -22,15 +22,8 @@ type handler struct{ state *store.Store }
 // RegisterRoutes mounts the content APIs on the Open API listener.
 func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 	h := handler{state}
-	bearer := middleware.Bearer(state, middleware.TenantOrUser, cfg.StrictMode)
 	register := func(path string, action http.HandlerFunc, scopes ...string) {
-		mux.Handle(path, bearer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity, _ := middleware.AuthFromContext(r.Context())
-			if cfg.StrictMode && (identity.Kind == store.UserToken || identity.Scope != "") && !middleware.RequireOneScope(w, identity, scopes...) {
-				return
-			}
-			action(w, r)
-		})))
+		mux.Handle(path, middleware.OwnedResource(state, middleware.TenantOrUser, cfg.StrictMode, action, scopes...))
 	}
 	register("POST /open-apis/docs_ai/v1/documents", h.createDocument, "docx:document:create", "docx:document")
 	register("POST /open-apis/docs_ai/v1/documents/{document_id}/fetch", h.fetchDocument, "docx:document:readonly", "docx:document")
@@ -76,16 +69,6 @@ func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 		register("PATCH "+records+"/{record_id}", h.updateBaseRecord, writeScopes("base:record:update")...)
 	}
 	register("PUT /open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}", h.updateBaseRecord, "base:record:update", "bitable:app")
-}
-
-func (h handler) owner(r *http.Request) store.ResourceOwner {
-	if actor, ok := middleware.AuthFromContext(r.Context()); ok {
-		return store.ResourceOwner{AppID: actor.AppID, UserOpenID: actor.UserOpenID}
-	}
-	if apps := h.state.Apps().List(); len(apps) > 0 {
-		return store.ResourceOwner{AppID: apps[0].AppID}
-	}
-	return store.ResourceOwner{}
 }
 
 func reply(w http.ResponseWriter, data any) {
