@@ -157,7 +157,8 @@ func TestAudit(t *testing.T) {
 		trace.Status != http.StatusCreated || trace.Code == nil || *trace.Code != 0 || trace.Latency <= 0 {
 		t.Errorf("unexpected trace: %+v", trace)
 	}
-	if trace.RequestHeaders.Get("Content-Type") != "application/json" || len(trace.RequestHeaders) != 1 || len(trace.ResponseHeaders) != 1 {
+	if trace.RequestHeaders.Get("Content-Type") != "application/json" || len(trace.RequestHeaders) != 1 || len(trace.ResponseHeaders) != 2 ||
+		trace.RequestID == "" || trace.RequestID != trace.ResponseHeaders.Get("X-Request-Id") || trace.RequestID != w.Header().Get("X-Request-Id") {
 		t.Errorf("headers leaked or were lost: %v, %v", trace.RequestHeaders, trace.ResponseHeaders)
 	}
 	if string(trace.RequestBody) != `{"app_id":"cli_test","app_secret":"[REDACTED]","nested":{"code":"[REDACTED]"}}` ||

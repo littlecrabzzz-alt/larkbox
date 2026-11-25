@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
@@ -24,11 +25,19 @@ const auditBodyLimit = store.TraceBodyLimit
 // It omits credential headers, redacts JSON credentials, and skips body
 // formats that cannot be safely redacted, such as multipart forms.
 func Audit(state *store.Store, next http.Handler) http.Handler {
+	return AuditWithLogger(state, next, nil)
+}
+
+// AuditWithLogger also emits bounded request metadata to a structured logger.
+func AuditWithLogger(state *store.Store, next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, epoch := state.Admit(r.Context())
 		started := time.Now()
+		requestID := protocol.NewID("req_")
+		w.Header().Set("X-Request-Id", requestID)
+		ctx = store.WithRequestID(ctx, requestID)
 		trace := store.Trace{
-			Direction: store.Inbound, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
+			Direction: store.Inbound, RequestID: requestID, StartedAt: started, Method: r.Method, Path: r.URL.EscapedPath(),
 			RequestHeaders: store.TraceHeaders(r.Header),
 		}
 		var traceApp atomic.Pointer[string]
@@ -71,6 +80,14 @@ func Audit(state *store.Store, next http.Handler) http.Handler {
 			}
 		}
 		state.AppendTraceAt(epoch, trace, store.Redactor{})
+		if logger != nil {
+			appID := ""
+			if app, ok := state.Apps().Get(trace.AppID); ok {
+				appID = store.AppRedactor(app).Replace(trace.AppID)
+			}
+			logger.InfoContext(ctx, "open_api_request", "request_id", requestID, "route", r.Pattern,
+				"status", trace.Status, "code", trace.Code, "app_id", appID, "latency_ms", trace.Latency.Milliseconds())
+		}
 	})
 }
 

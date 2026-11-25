@@ -223,6 +223,58 @@ development, install dependencies with `make ui-install`, then run
 and `make ui-build` after frontend changes and commit the regenerated
 `internal/webui/dist/` with the source.
 
+### Shared test deployments
+
+Run the service in Compose and wait for its container health check.
+
+```sh
+docker compose up --build --wait
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Compose publishes the HTTP port on loopback. Set `LARKBOX_PORT` to select a
+host port, or attach application containers to the Compose network and use
+`http://larkbox:8080`. Version tags on `main` publish Linux amd64 and arm64
+images to `ghcr.io/littlecrabzzz-alt/larkbox`. On an isolated test network,
+set the same operator token in the service and the clients that need its
+control plane.
+
+```sh
+export LARKBOX_SANDBOX_TOKEN="$(openssl rand -hex 24)"
+docker compose up --build --wait
+larkbox sandbox state
+larkbox sandbox metrics
+```
+
+With a token configured, `/_sandbox/` accepts its Bearer credential. Open the
+inspector with username `sandbox` and the token as the password. Feishu API
+clients continue to authenticate with their usual Feishu-shaped credentials.
+For operator access outside the host, use an isolated test network and
+terminate HTTPS at your ingress.
+
+Set `LARKBOX_RATE_LIMITS='{"profile":"realistic"}'` to give each app a fixed
+window of 50 requests per second and 10,000 successful calls per UTC month.
+Supply `qps`, `daily_quota`, or `monthly_quota` for explicit budgets, with
+zero disabling that budget. The default profile is `unlimited`. Failed calls
+count toward frequency limits. HTTP or Feishu error responses release their
+quota reservation. Authenticated Open API calls share their app's budgets.
+The manual clock drives the second, day, and month boundaries, and sandbox
+reset restores the budgets. A rejection includes HTTP 429, the Feishu error
+code, `Retry-After`, and the `X-Ogw-Ratelimit-*` headers.
+[Feishu rate limits](https://open.feishu.cn/document/server-docs/api-call-guide/frequency-control) · [Feishu API quota](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/platform-notices)
+
+Read `GET /_sandbox/metrics` for Prometheus counts of pending asynchronous
+deliveries, retry waiters, attempts, failures, retries, and limited calls.
+Set `LARKBOX_PPROF=true` with an operator token to enable Go profiles at
+`/_sandbox/debug/pprof/`. Set `LARKBOX_JSON_LOGS=true` for metadata-only JSON
+logs from the binary. The image enables them by default. The `X-Request-Id`
+response header correlates Open API requests with their outbound event
+attempts. Use `larkbox sandbox traces --request-id <id>` to inspect them.
+
+The file equivalents are `sandbox_token`, `pprof`, `json_logs`, and
+`rate_limits`. The operator token also works with the built-in CLI over the
+remote URL provided by `--url` or `LARKBOX_URL`.
+
 ### Conversation events
 
 Set an app's `event_types` in its config or seed entry to subscribe to a

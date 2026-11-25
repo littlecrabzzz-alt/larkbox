@@ -20,7 +20,7 @@ func (c *control) traces(w http.ResponseWriter, r *http.Request) {
 	}
 	for key, values := range query {
 		switch key {
-		case "direction", "app_id", "method", "path_prefix", "event_type", "event_id", "channel", "limit":
+		case "direction", "request_id", "app_id", "method", "path_prefix", "event_type", "event_id", "channel", "limit":
 			if len(values) == 1 {
 				continue
 			}
@@ -29,7 +29,8 @@ func (c *control) traces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter := store.TraceFilter{
-		AppID: query.Get("app_id"), Method: strings.ToUpper(query.Get("method")), PathPrefix: query.Get("path_prefix"),
+		RequestID: query.Get("request_id"),
+		AppID:     query.Get("app_id"), Method: strings.ToUpper(query.Get("method")), PathPrefix: query.Get("path_prefix"),
 		EventType: query.Get("event_type"), EventID: query.Get("event_id"), Channel: query.Get("channel"), Limit: maxLimit,
 	}
 	switch query.Get("direction") {
@@ -56,7 +57,7 @@ func (c *control) traces(w http.ResponseWriter, r *http.Request) {
 	result := make([]data, 0, len(traces))
 	for _, trace := range traces {
 		result = append(result, data{
-			"direction": trace.Direction, "started_at": trace.StartedAt, "latency_ms": trace.Latency.Milliseconds(),
+			"direction": trace.Direction, "request_id": trace.RequestID, "started_at": trace.StartedAt, "latency_ms": trace.Latency.Milliseconds(),
 			"app_id": trace.AppID, "method": trace.Method, "path": trace.Path, "status_code": trace.Status, "code": trace.Code,
 			"request_headers": trace.RequestHeaders, "request_body": traceBody(trace.RequestBody),
 			"request_body_truncated": trace.RequestBodyTruncated, "response_headers": trace.ResponseHeaders,

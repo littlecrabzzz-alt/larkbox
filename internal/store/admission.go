@@ -6,10 +6,22 @@ import (
 )
 
 type admissionKey struct{}
+type requestIDKey struct{}
 
 type admission struct {
 	store *Store
 	reset uint64
+}
+
+// WithRequestID associates a generated correlation ID with a request.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey{}, id)
+}
+
+// RequestID returns the correlation ID inherited from the incoming request.
+func RequestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
 }
 
 // ErrReset indicates that a request was admitted before the current reset.
@@ -31,6 +43,13 @@ func (s *Store) Current(ctx context.Context) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return scope.store == s && scope.reset == s.resetEpoch
+}
+
+// ResetEpoch identifies the current runtime state generation.
+func (s *Store) ResetEpoch() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resetEpoch
 }
 
 // Commit fences a store mutation against reset. Callers perform request I/O

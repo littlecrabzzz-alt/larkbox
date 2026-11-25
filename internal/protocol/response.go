@@ -23,6 +23,7 @@ const (
 	IMBotOutsideChat   Code = 230002   // The bot is not a member of the chat.
 	ResourceNotFound   Code = 99991201 // Unknown Open API resource.
 	RateLimited        Code = 99991400 // Request frequency limit triggered.
+	QuotaExceeded      Code = 99991403 // Monthly API call quota exceeded.
 	InvalidToken       Code = 99991661 // Missing Bearer credential or wrong scheme.
 	ExpiredTenantToken Code = 99991663 // Tenant credential is expired or unsupported.
 	InvalidAppToken    Code = 99991664 // App credential is invalid.
@@ -94,6 +95,7 @@ var codes = map[Code]codeInfo{
 	IMBotOutsideChat:   {http.StatusBadRequest, "The bot can not be outside the group."},
 	ResourceNotFound:   {http.StatusNotFound, "resource not find"},
 	RateLimited:        {http.StatusTooManyRequests, "request trigger frequency limit"},
+	QuotaExceeded:      {http.StatusTooManyRequests, "This month's API call quota has been exceeded"},
 	InvalidToken:       {http.StatusBadRequest, "Missing access token for authorization. Please make a request with token attached."},
 	ExpiredTenantToken: {http.StatusBadRequest, "Invalid access token for authorization. Please make a request with token attached."},
 	InvalidAppToken:    {http.StatusBadRequest, "invalid app token"},

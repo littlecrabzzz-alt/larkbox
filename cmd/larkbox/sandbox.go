@@ -25,6 +25,7 @@ type sandboxCommand struct {
 
 var sandboxCommands = []sandboxCommand{
 	{"state", http.MethodGet, "state", false},
+	{"metrics", http.MethodGet, "metrics", false},
 	{"openapi", http.MethodGet, "openapi.json", false},
 	{"seed", http.MethodPost, "seed", true},
 	{"reset", http.MethodPost, "reset", false},
@@ -77,7 +78,7 @@ func runSandbox(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	query := url.Values{}
 	if cmd.name == "traces" {
-		for _, key := range []string{"direction", "app_id", "method", "path_prefix", "event_type", "event_id", "channel", "limit"} {
+		for _, key := range []string{"direction", "request_id", "app_id", "method", "path_prefix", "event_type", "event_id", "channel", "limit"} {
 			flags.Func(strings.ReplaceAll(key, "_", "-"), "filter traces by "+key, func(value string) error {
 				query.Set(key, value)
 				return nil
@@ -113,6 +114,9 @@ func runSandbox(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if secret := os.Getenv("LARKBOX_SANDBOX_TOKEN"); secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	client := http.Client{Timeout: *timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
