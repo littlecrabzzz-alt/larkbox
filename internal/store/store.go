@@ -123,6 +123,7 @@ type Store struct {
 	approvalInstances   map[string]ApprovalInstance
 	approvalRequests    map[approvalRequest]approvalReplay
 	approvalSubscribers map[string]map[string]bool
+	content             contentState
 	chats               Collection[Chat]
 	disbandedChats      map[string]struct{}
 	messages            Collection[Message]
@@ -171,6 +172,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.approvalInstances = make(map[string]ApprovalInstance)
 	s.approvalRequests = make(map[approvalRequest]approvalReplay)
 	s.approvalSubscribers = make(map[string]map[string]bool)
+	s.content = newContent()
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.disbandedChats = make(map[string]struct{})
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
@@ -443,6 +445,7 @@ func (s *Store) reset(seed config.Config) {
 	clear(s.approvalInstances)
 	clear(s.approvalRequests)
 	clear(s.approvalSubscribers)
+	s.content = newContent()
 	s.userSeedOrder = slices.Clone(seed.Users)
 	clear(s.chats.items)
 	clear(s.disbandedChats)
