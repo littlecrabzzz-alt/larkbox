@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -29,7 +30,7 @@ import (
 )
 
 // Version identifies the current development build.
-const Version = "0.1.0-dev"
+var Version = "0.1.0-dev"
 
 // Server is both an HTTP handler and a gracefully stoppable HTTP server.
 type Server struct {
@@ -52,6 +53,7 @@ type options struct {
 	fault        middleware.FaultHook
 	emitter      im.EventEmitter
 	eventOptions event.Options
+	logger       *slog.Logger
 	noUI         bool
 }
 
@@ -84,6 +86,11 @@ func WithEventEmitter(emitter im.EventEmitter) Option {
 // WithEventOptions configures the built-in event dispatcher.
 func WithEventOptions(opts event.Options) Option {
 	return func(settings *options) { settings.eventOptions = opts }
+}
+
+// WithLogger records request and delivery metadata to logger.
+func WithLogger(logger *slog.Logger) Option {
+	return func(opts *options) { opts.logger = logger }
 }
 
 type eventEmitter struct {
@@ -125,7 +132,11 @@ func New(cfg config.Config, opts ...Option) *Server {
 	faults := fault.New(nil)
 	settings.eventOptions.Faults = faults
 	settings.eventOptions.ManualClock = clock
+	if settings.logger != nil {
+		settings.eventOptions.Logger = settings.logger
+	}
 	events := event.New(state, settings.eventOptions)
+	limits := middleware.NewRateLimiter(cfg.RateLimits)
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
@@ -154,22 +165,29 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	api := middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu))))
+	api := middleware.AuditWithLogger(state, limits.Wrap(state, feishu,
+		middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu)))), settings.logger)
 	mux.Handle("/open-apis/", api)
 	mux.Handle("/oauth/", api)
 	mux.Handle("/page/cli", api)
 	control := sandbox.New(cfg, Version, state, events, faults, clock)
-	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	operator := operatorRoutes(cfg, events, limits)
+	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := operator.Handler(r); pattern != "" {
+			operator.ServeHTTP(w, r)
+			return
+		}
 		if _, pattern := extensions.Handler(r); pattern != "" {
 			extensions.ServeHTTP(w, r)
 			return
 		}
 		control.ServeHTTP(w, r)
-	}))
+	})
+	mux.Handle("/_sandbox/", protectControl(cfg.SandboxToken, correlatedControl(controlPlane)))
 
 	return &Server{
 		http: &http.Server{
-			Addr: cfg.Addr, Handler: withWebUI(mux, settings.noUI), ReadHeaderTimeout: 5 * time.Second,
+			Addr: cfg.Addr, Handler: withWebUI(mux, settings.noUI, cfg.SandboxToken), ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		},
 		store: state, events: events, faults: faults,
@@ -193,10 +211,11 @@ func configuredDelivery(settings config.EventDelivery) event.Options {
 	return opts
 }
 
-func withWebUI(routes http.Handler, disabled bool) http.Handler {
+func withWebUI(routes http.Handler, disabled bool, secret string) http.Handler {
 	if disabled {
 		return routes
 	}
+	inspector := protectControl(secret, http.HandlerFunc(webui.ServeHTTP))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/page/cli" {
 			routes.ServeHTTP(w, r)
@@ -207,7 +226,7 @@ func withWebUI(routes http.Handler, disabled bool) http.Handler {
 		case "open-apis", "oauth", "_sandbox", "callback", "ws", "healthz":
 			routes.ServeHTTP(w, r)
 		default:
-			webui.ServeHTTP(w, r)
+			inspector.ServeHTTP(w, r)
 		}
 	})
 }

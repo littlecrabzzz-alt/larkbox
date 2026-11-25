@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -80,20 +81,26 @@ func serve(ctx context.Context, cfg config.Config, noUI bool, readyFile string) 
 	if noUI {
 		opts = append(opts, server.WithoutWebUI())
 	}
+	var logger *slog.Logger
+	if cfg.JSONLogs {
+		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+		opts = append(opts, server.WithLogger(logger))
+	}
 	srv := server.New(cfg, opts...)
 	if readyFile != "" {
 		if err := writeReadyFile(readyFile, listener.Addr().String()); err != nil {
 			return fmt.Errorf("write ready file: %w", err)
 		}
 	}
-	log.Printf("larkbox %s listening on %s (strict mode: %t)", server.Version, listener.Addr(), cfg.StrictMode)
-	if !noUI {
-		address := clientAddress(listener.Addr().String())
-		log.Printf("Web UI: %s", (&url.URL{Scheme: "http", Host: address, Path: "/"}).String())
-	}
-	fixture := config.DefaultApp()
-	if app, ok := srv.Store().Apps().Get(fixture.AppID); ok && app.AppSecret == fixture.AppSecret {
-		log.Printf("Local app credentials: app_id=%s app_secret=%s", app.AppID, app.AppSecret)
+	if logger != nil {
+		logger.Info("server_ready", "version", server.Version, "address", listener.Addr().String(),
+			"strict_mode", cfg.StrictMode, "sandbox_auth", cfg.SandboxToken != "", "inspector", !noUI)
+	} else {
+		log.Printf("larkbox %s listening on %s (strict mode: %t)", server.Version, listener.Addr(), cfg.StrictMode)
+		if !noUI {
+			address := clientAddress(listener.Addr().String())
+			log.Printf("Web UI: %s", (&url.URL{Scheme: "http", Host: address, Path: "/"}).String())
+		}
 	}
 
 	done := make(chan error, 1)

@@ -41,7 +41,7 @@ func (d *Dispatcher) VerifyWebhookAt(ctx context.Context, appID, override string
 	body, _ := json.Marshal(map[string]string{
 		"challenge": challenge, "token": app.VerificationToken, "type": "url_verification",
 	})
-	job := deliveryJob{app: app, kind: "url_verification", body: body, epoch: epoch, redactor: store.AppRedactor(app)}
+	job := deliveryJob{app: app, kind: "url_verification", requestID: store.RequestID(ctx), body: body, epoch: epoch, redactor: store.AppRedactor(app)}
 	if err := job.prepareWebhook(); err != nil {
 		return Delivery{Err: err}
 	}

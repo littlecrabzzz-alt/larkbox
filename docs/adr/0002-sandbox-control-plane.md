@@ -26,6 +26,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /clock` | Returns the current UTC `now` and whether manual time is configured. |
 | `POST /clock/advance` | Requires `{"by":"15s"}` or another positive Go duration. Returns the clock state and wakes due retries. Returns 409 in wall-clock mode. |
 | `GET /state` | Returns strict mode, build version, sanitized apps, users, departments, approval definitions, Minutes fixtures, chats, card summaries, active faults, and WebSocket sessions. |
+| `GET /metrics` | Returns Prometheus gauges for queued deliveries and retry waits and counters for delivery attempts, failures, retries, and rate-limit rejections. |
+| `GET /debug/pprof/{profile}` | Returns an enabled runtime profile to an authenticated operator. |
 | `POST /seed` | Accepts `apps`, `users`, `departments`, `approval_definitions`, `minutes`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates references before committing. |
 | `POST /reset` | Empty body or `{}` restores the configured startup seed. An optional `{"seed":{...}}` replaces the state for this reset, with omitted lists treated as empty. Both forms clear runtime entities, credentials, traces, faults, and WebSocket tickets and disconnect existing sessions. |
 | `GET /chats` | Returns `{"chats":[...]}` with member IDs and settings. |
@@ -132,6 +134,17 @@ Reset cancels retry waits and restores the configured start time.
 
 ### Audit and fault rules
 
+Shared deployments may configure a sandbox operator token to protect the
+control plane, its extensions, and the inspector. Operators send a Bearer
+token or use HTTP Basic with username `sandbox` and the token as password.
+Browser mutations require a same-origin request. Profiling requires the
+operator token and an explicit `pprof` setting.
+
+Open API exchanges carry a generated `X-Request-Id`. Outbound event traces
+inherit that request ID and record their event ID. The binary can log request
+and event metadata as JSON. Log records omit bodies, headers, callback URLs,
+and protocol credential values.
+
 `GET /traces` returns `{"traces":[...]}`, ordered oldest to newest by start
 time. Filters are combined and include `direction` (`all`, `inbound`, or
 `outbound`), `app_id`, `method`, `path_prefix`, `event_type`, `event_id`,
@@ -185,8 +198,8 @@ the audit ring.
 ### Local boundary and data exposure
 
 Use a loopback binding or an isolated test network with trusted clients.
-The control plane is unauthenticated and inherits the listener address.
-It can change all fixture state and send webhook requests to configured or
+The control plane inherits the listener address. Configure an operator token
+for a shared listener. It can change all fixture state and send webhook requests to configured or
 overridden HTTP(S) destinations, so the listener belongs inside the local
 development or CI trust boundary. The embedded UI can use same-origin
 requests against the control plane.

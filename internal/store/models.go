@@ -139,6 +139,7 @@ const (
 // Trace captures an API exchange or a single outbound delivery attempt.
 type Trace struct {
 	Direction             TraceDirection
+	RequestID             string
 	StartedAt             time.Time
 	Method                string
 	Path                  string

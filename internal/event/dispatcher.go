@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -38,6 +40,7 @@ type Options struct {
 	TicketTTL    time.Duration
 	Faults       *fault.Engine
 	ManualClock  *simclock.Manual
+	Logger       *slog.Logger
 }
 
 // Delivery contains the outcome for one receiver. Data is the HTTP response
@@ -85,6 +88,7 @@ type deliveryJob struct {
 	app       store.App
 	id        string
 	kind      string
+	requestID string
 	body      []byte
 	wireBody  []byte
 	epoch     uint64
@@ -107,14 +111,31 @@ type Dispatcher struct {
 	retriesStopped chan struct{}
 	stopRetries    sync.Once
 
-	mu          sync.Mutex
-	closed      bool
-	resetCtx    context.Context
-	resetCancel context.CancelFunc
-	generation  uint64
-	pending     int
-	active      sync.WaitGroup
-	ws          gateway
+	mu           sync.Mutex
+	closed       bool
+	resetCtx     context.Context
+	resetCancel  context.CancelFunc
+	generation   uint64
+	pending      int
+	active       sync.WaitGroup
+	ws           gateway
+	retryWaiters atomic.Int64
+	retries      atomic.Uint64
+	attempts     atomic.Uint64
+	failures     atomic.Uint64
+}
+
+// Metrics contains current queue sizes and cumulative delivery counters.
+type Metrics struct {
+	Pending, RetryWaiters       int64
+	Retries, Attempts, Failures uint64
+}
+
+// Metrics returns the dispatcher's current observations for an operator.
+func (d *Dispatcher) Metrics() Metrics {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return Metrics{int64(d.pending), d.retryWaiters.Load(), d.retries.Load(), d.attempts.Load(), d.failures.Load()}
 }
 
 // New creates a dispatcher. Call Shutdown to drain deliveries and close sockets.
@@ -313,7 +334,7 @@ func (d *Dispatcher) newJob(ctx context.Context, appID, kind string, at time.Tim
 	if len(body) > maxFrame {
 		return deliveryJob{epoch: epoch}, errors.New("event payload exceeds size limit")
 	}
-	return deliveryJob{app: app, id: id, kind: kind, body: body, epoch: epoch, redactor: store.AppRedactor(app)}, nil
+	return deliveryJob{app: app, id: id, kind: kind, requestID: store.RequestID(ctx), body: body, epoch: epoch, redactor: store.AppRedactor(app)}, nil
 }
 
 func tenantKey(app store.App) string {
@@ -364,6 +385,7 @@ func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.T
 		return
 	}
 	ctx := context.WithValue(d.resetCtx, admissionKey{}, admission{d.resetCtx, d.state.TraceEpoch()})
+	ctx = store.WithRequestID(ctx, store.RequestID(from))
 	job, err := d.newJob(ctx, appID, kind, at, payload)
 	if err != nil {
 		d.mu.Unlock()
@@ -482,10 +504,17 @@ func (d *Dispatcher) canRetry(ctx context.Context) bool {
 	}
 }
 
-func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt time.Time, peerDone <-chan struct{}) bool {
+func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt time.Time, peerDone <-chan struct{}) (ready bool) {
 	if !d.canRetry(ctx) {
 		return false
 	}
+	d.retryWaiters.Add(1)
+	defer func() {
+		if ready {
+			d.retries.Add(1)
+		}
+		d.retryWaiters.Add(-1)
+	}()
 	delay := d.opts.RetryBackoff(attempt)
 	if clock := d.opts.ManualClock; clock != nil {
 		due := completedAt.Add(delay)
@@ -564,7 +593,7 @@ func (job deliveryJob) trace(channel string, attempt int) store.Trace {
 		started = job.delayedAt
 	}
 	return store.Trace{
-		Direction: store.Outbound, AppID: job.app.AppID, EventID: job.id, EventType: job.kind,
+		Direction: store.Outbound, RequestID: job.requestID, AppID: job.app.AppID, EventID: job.id, EventType: job.kind,
 		Channel: channel, Attempt: attempt, Copy: job.copy, RequestBody: job.body, StartedAt: started,
 	}
 }
@@ -575,7 +604,19 @@ func (d *Dispatcher) record(job deliveryJob, trace store.Trace, err error) {
 	if err != nil {
 		trace.Error = err.Error()
 	}
+	if trace.Attempt > 0 {
+		d.attempts.Add(1)
+		if err != nil || !success(trace.Status) {
+			d.failures.Add(1)
+		}
+	}
 	d.state.AppendTraceAt(job.epoch, trace, job.redactor)
+	if logger := d.opts.Logger; logger != nil {
+		logger.Info("event_delivery", "request_id", trace.RequestID, "event_id", trace.EventID,
+			"app_id", job.redactor.Replace(trace.AppID), "event_type", job.redactor.Replace(trace.EventType),
+			"channel", trace.Channel, "attempt", trace.Attempt, "status", trace.Status,
+			"failed", err != nil || !success(trace.Status), "latency_ms", trace.Latency.Milliseconds())
+	}
 }
 
 func success(status int) bool { return status >= 200 && status < 300 }

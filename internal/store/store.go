@@ -542,6 +542,7 @@ func (s *Store) AppendTraceAt(epoch uint64, trace Trace, redactor Redactor) {
 // A positive Limit returns the most recent matching traces.
 type TraceFilter struct {
 	Direction  TraceDirection
+	RequestID  string
 	EventType  string
 	EventID    string
 	Channel    string
@@ -564,6 +565,7 @@ func (s *Store) QueryTraces(filter TraceFilter) []Trace {
 	for i := range len(s.traces) {
 		trace := s.traces[(s.tracePos+i)%len(s.traces)]
 		if (filter.Direction != "" && trace.Direction != filter.Direction) ||
+			(filter.RequestID != "" && trace.RequestID != filter.RequestID) ||
 			(filter.EventType != "" && trace.EventType != filter.EventType) ||
 			(filter.EventID != "" && trace.EventID != filter.EventID) ||
 			(filter.Channel != "" && trace.Channel != filter.Channel) ||

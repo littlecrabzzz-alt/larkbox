@@ -123,6 +123,10 @@ type CardTemplate struct {
 type Config struct {
 	Addr                string               `json:"addr" yaml:"addr"`
 	StrictMode          bool                 `json:"strict_mode" yaml:"strict_mode"`
+	SandboxToken        string               `json:"sandbox_token,omitempty" yaml:"sandbox_token,omitempty"`
+	Pprof               bool                 `json:"pprof,omitempty" yaml:"pprof,omitempty"`
+	JSONLogs            bool                 `json:"json_logs,omitempty" yaml:"json_logs,omitempty"`
+	RateLimits          RateLimits           `json:"rate_limits,omitempty" yaml:"rate_limits,omitempty"`
 	EventDelivery       EventDelivery        `json:"event_delivery,omitempty" yaml:"event_delivery,omitempty"`
 	ClockStart          *time.Time           `json:"clock_start,omitempty" yaml:"clock_start,omitempty"`
 	TokenTTLs           TokenTTLs            `json:"token_ttls" yaml:"token_ttls"`
@@ -285,7 +289,10 @@ func applyEnv(cfg *Config) error {
 	if err := applySeedEnv("LARKBOX_CARD_TEMPLATES", &cfg.CardTemplates); err != nil {
 		return err
 	}
-	return cfg.applyEventEnv()
+	if err := cfg.applyEventEnv(); err != nil {
+		return err
+	}
+	return cfg.applyDeploymentEnv()
 }
 
 func applySeedEnv[T any](name string, dest *[]T) error {
@@ -335,6 +342,9 @@ func (cfg Config) Validate() error {
 		}
 	}
 	if err := cfg.EventDelivery.validate(); err != nil {
+		return err
+	}
+	if err := cfg.validateDeployment(); err != nil {
 		return err
 	}
 	if cfg.ClockStart != nil && !simclock.ValidTime(*cfg.ClockStart) {

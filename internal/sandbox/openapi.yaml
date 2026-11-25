@@ -2,10 +2,39 @@ openapi: 3.1.0
 info:
   title: Larkbox sandbox control plane
   version: 1.0.0
-  description: Controls for trusted local and test-network clients.
+  description: Controls for local and test-network clients. Shared deployments can require a sandbox operator token.
 servers:
   - url: /
+security:
+  - {}
+  - sandboxBearer: []
+  - sandboxBasic: []
 paths:
+  /_sandbox/metrics:
+    get:
+      operationId: metrics
+      summary: Read Prometheus counters and gauges
+      responses:
+        "200":
+          description: Delivery and rate-limit metrics
+          content: {text/plain: {schema: {type: string}}}
+        "401": {description: Sandbox operator authentication required}
+  /_sandbox/debug/pprof/{profile}:
+    get:
+      operationId: profile
+      summary: Download an enabled Go runtime profile
+      security:
+        - sandboxBearer: []
+        - sandboxBasic: []
+      parameters:
+        - {in: path, name: profile, required: true, schema: {type: string, enum: [allocs, block, goroutine, heap, mutex, threadcreate, profile]}}
+        - {in: query, name: seconds, schema: {type: integer, minimum: 1, maximum: 30}}
+      responses:
+        "200":
+          description: Runtime profile
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        "401": {description: Sandbox operator authentication required}
+        "404": {description: Profiling disabled or profile unavailable}
   /_sandbox/openapi.json:
     get:
       operationId: getOpenAPI
@@ -394,6 +423,7 @@ paths:
       summary: Inspect matching inbound or outbound exchanges
       parameters:
         - {in: query, name: direction, schema: {type: string, enum: [all, inbound, outbound]}}
+        - {in: query, name: request_id, schema: {type: string}}
         - {in: query, name: app_id, schema: {type: string}}
         - {in: query, name: method, schema: {type: string}}
         - {in: query, name: path_prefix, schema: {type: string}}
@@ -532,6 +562,9 @@ paths:
         "404": *error
         "409": *error
 components:
+  securitySchemes:
+    sandboxBearer: {type: http, scheme: bearer}
+    sandboxBasic: {type: http, scheme: basic, description: Use sandbox as the username and the operator token as the password.}
   responses:
     Error:
       description: Sandbox error
@@ -845,6 +878,7 @@ components:
       type: object
       properties:
         direction: {type: string, enum: [inbound, outbound]}
+        request_id: *string
         started_at: *timestamp
         latency_ms: *integer
         app_id: *string
