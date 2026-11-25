@@ -165,6 +165,7 @@ uses the app's `contact_scope`. A user token uses the signed-in user's
 `contact_scope`. Each scope may select department subtrees by
 `department_open_ids` and individual contacts by `user_open_ids`. Omit
 the scope for full tenant visibility or use `{}` for no additional contacts.
+User search in strict mode requires the `contact:user:search` OAuth scope.
 The demo users can find each other in the seeded Engineering department.
 
 Seed an approval definition with `approval_code`, `name`, and

@@ -28,6 +28,7 @@ type Auth struct {
 	AppID      string
 	UserOpenID string
 	Kind       store.TokenKind
+	Scope      string
 }
 
 type authKey struct{}
@@ -103,7 +104,7 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	case !accepts(required, token.Kind):
 		return Auth{}, credentialError(token.Kind, unsupportedCredential)
 	}
-	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind}, protocol.APIError{}
+	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind, Scope: token.Scope}, protocol.APIError{}
 }
 
 func bearerToken(headers []string) (string, bool) {

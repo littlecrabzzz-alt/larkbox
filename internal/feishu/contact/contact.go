@@ -18,11 +18,14 @@ import (
 
 type fields = map[string]any
 
-type handler struct{ state *store.Store }
+type handler struct {
+	state  *store.Store
+	strict bool
+}
 
 // RegisterRoutes serves the Contact v3 directory and recipient lookups.
 func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
-	h := handler{state}
+	h := handler{state: state, strict: cfg.StrictMode}
 	register := func(pattern string, required middleware.RequiredToken, action http.HandlerFunc) {
 		mux.Handle(pattern, middleware.Bearer(state, required, cfg.StrictMode)(action))
 	}

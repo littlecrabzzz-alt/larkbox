@@ -121,7 +121,7 @@ type Store struct {
 	departments         Collection[config.Department]
 	approvalDefinitions Collection[config.ApprovalDefinition]
 	approvalInstances   map[string]ApprovalInstance
-	approvalRequests    map[approvalRequest]string
+	approvalRequests    map[approvalRequest]approvalReplay
 	approvalSubscribers map[string]map[string]bool
 	chats               Collection[Chat]
 	disbandedChats      map[string]struct{}
@@ -169,7 +169,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.departments = newCollection(&s.mu, func(dept config.Department) string { return dept.OpenID }, nil)
 	s.approvalDefinitions = newCollection(&s.mu, func(entry config.ApprovalDefinition) string { return entry.Code }, nil)
 	s.approvalInstances = make(map[string]ApprovalInstance)
-	s.approvalRequests = make(map[approvalRequest]string)
+	s.approvalRequests = make(map[approvalRequest]approvalReplay)
 	s.approvalSubscribers = make(map[string]map[string]bool)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.disbandedChats = make(map[string]struct{})

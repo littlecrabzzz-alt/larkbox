@@ -32,7 +32,12 @@ const (
 )
 
 type approvalRequest struct {
-	appID, uuid string
+	appID, tenantKey, uuid string
+}
+
+type approvalReplay struct {
+	input ApprovalStart
+	code  string
 }
 
 // ApprovalInstance is the current state for one submitted approval.
@@ -88,6 +93,17 @@ func (s *Store) SubscribeApproval(appID, code string, enabled bool) error {
 func (s *Store) StartApproval(appID string, input ApprovalStart) (ApprovalChange, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	app, found := s.apps.items[appID]
+	if !found {
+		return ApprovalChange{}, ErrApprovalDefinition
+	}
+	key := approvalRequest{appID, app.TenantKey, input.UUID}
+	if replay, exists := s.approvalRequests[key]; input.UUID != "" && exists {
+		if replay.input != input {
+			return ApprovalChange{}, ErrAlreadyExists
+		}
+		return ApprovalChange{Instance: cloneApproval(s.approvalInstances[replay.code])}, nil
+	}
 	definition, err := s.approvalDefinition(appID, input.DefinitionCode)
 	if err != nil {
 		return ApprovalChange{}, err
@@ -119,15 +135,6 @@ func (s *Store) StartApproval(appID string, input ApprovalStart) (ApprovalChange
 	if input.DepartmentID != "" && department == "" {
 		return ApprovalChange{}, ErrApprovalDepartment
 	}
-	key := approvalRequest{appID, input.UUID}
-	if code, exists := s.approvalRequests[key]; input.UUID != "" && exists {
-		instance := s.approvalInstances[code]
-		if instance.DefinitionCode != input.DefinitionCode || instance.Submitter.OpenID != submitter.OpenID ||
-			instance.Form != input.Form || instance.DepartmentID != department {
-			return ApprovalChange{}, ErrAlreadyExists
-		}
-		return ApprovalChange{Instance: cloneApproval(instance)}, nil
-	}
 	instance := ApprovalInstance{
 		Code: approvalCode(), TaskID: protocol.NewID(protocol.CardID), Status: ApprovalPending, StartedAt: s.Now(),
 		DefinitionCode: definition.Code, DefinitionName: definition.Name, TenantKey: definition.TenantKey,
@@ -135,7 +142,7 @@ func (s *Store) StartApproval(appID string, input ApprovalStart) (ApprovalChange
 	}
 	s.approvalInstances[instance.Code] = instance
 	if input.UUID != "" {
-		s.approvalRequests[key] = instance.Code
+		s.approvalRequests[key] = approvalReplay{input: input, code: instance.Code}
 	}
 	return s.approvalChange(instance), nil
 }

@@ -3,6 +3,7 @@ package sdk_test
 import (
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 func TestOfficialSDKDirectory(t *testing.T) {
 	cfg := sdkTestConfig()
 	app, alice, bob := &cfg.Apps[0], &cfg.Users[0], &cfg.Users[1]
+	app.RedirectURIs = append(app.RedirectURIs, callbackURL)
 	engineering := cfg.Departments[0]
 	support := config.Department{OpenID: "od-support", ID: "support", Name: "Support", ParentOpenID: engineering.OpenID}
 	executive := config.Department{OpenID: "od-executive", ID: "executive", Name: "Executive"}
@@ -91,17 +93,37 @@ func TestOfficialSDKDirectory(t *testing.T) {
 	if !basic.Success() || basic.Data == nil || len(basic.Data.Users) != 1 || value(basic.Data.Users[0].UserId) != private.OpenID {
 		t.Fatalf("scoped basic lookup returned %s", basic.RawBody)
 	}
-	query, err := http.NewRequestWithContext(ctx, http.MethodPost, web.URL+"/open-apis/contact/v3/users/search",
-		strings.NewReader(`{"query":"Bob"}`))
-	requireSDKNetwork(t, err)
-	query.Header.Set("Authorization", "Bearer "+userCredential)
-	query.Header.Set("Content-Type", "application/json")
-	response, err := web.Client().Do(query)
-	requireSDKNetwork(t, err)
-	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(response.Body)
-	requireSDKNetwork(t, err)
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"items":[]`) {
-		t.Fatalf("search ignored the caller's scope: %s", body)
+	grant := func(scope string) string {
+		params := url.Values{"client_id": {app.AppID}, "redirect_uri": {callbackURL}, "open_id": {alice.OpenID}, "scope": {scope}}
+		header, _ := accountRequest(t, web, "/open-apis/authen/v1/authorize?"+params.Encode(), nil, nil, http.StatusFound)
+		redirect, err := url.Parse(header.Get("Location"))
+		requireSDKNetwork(t, err)
+		_, raw := accountRequest(t, web, "/oauth/v3/token", url.Values{
+			"grant_type": {"authorization_code"}, "client_id": {app.AppID}, "client_secret": {app.AppSecret},
+			"code": {redirect.Query().Get("code")}, "redirect_uri": {callbackURL},
+		}, nil, http.StatusOK)
+		return value(sandboxDecode[oauthWire](t, raw).AccessToken)
+	}
+	search := func(credential string, status int) string {
+		t.Helper()
+		query, err := http.NewRequestWithContext(ctx, http.MethodPost, web.URL+"/open-apis/contact/v3/users/search", strings.NewReader(`{"query":"Bob"}`))
+		requireSDKNetwork(t, err)
+		query.Header.Set("Authorization", "Bearer "+credential)
+		query.Header.Set("Content-Type", "application/json")
+		response, err := web.Client().Do(query)
+		requireSDKNetwork(t, err)
+		defer func() { _ = response.Body.Close() }()
+		body, err := io.ReadAll(response.Body)
+		requireSDKNetwork(t, err)
+		if response.StatusCode != status {
+			t.Fatalf("search returned HTTP %d, expected %d: %s", response.StatusCode, status, body)
+		}
+		return string(body)
+	}
+	if denied := search(grant("im:message"), http.StatusBadRequest); !strings.Contains(denied, `"code":99991672`) || !strings.Contains(denied, `"subject":"contact:user:search"`) {
+		t.Fatalf("scope denial omitted the missing permission: %s", denied)
+	}
+	if allowed := search(grant("contact:user:search"), http.StatusOK); !strings.Contains(allowed, `"items":[]`) {
+		t.Fatalf("search ignored the caller's directory visibility: %s", allowed)
 	}
 }

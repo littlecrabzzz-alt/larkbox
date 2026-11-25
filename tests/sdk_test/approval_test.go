@@ -100,8 +100,11 @@ func TestOfficialSDKApprovalLifecycle(t *testing.T) {
 	if value(pending.Form) != form || value(pending.EndTime) != "0" || len(pending.TaskList) != 1 || value(pending.TaskList[0].OpenId) != bob.OpenID {
 		t.Fatalf("incorrect pending approval: %+v", pending)
 	}
+	moved := alice
+	moved.DepartmentOpenIDs = nil
+	sandboxRequest(t, web, http.MethodPost, "seed", map[string]any{"users": []config.User{moved}}, http.StatusOK)
 	if duplicate := create("approved-fixture"); duplicate != approved {
-		t.Fatal("repeated UUID created another approval instance")
+		t.Fatal("a fixture change broke replay of the submitted approval request")
 	}
 	forbidden, err := client.Approval.Task.Approve(ctx, larkapproval.NewApproveTaskReqBuilder().UserIdType("open_id").
 		TaskApprove(larkapproval.NewTaskApproveBuilder().ApprovalCode(definition.Code).InstanceCode(approved).TaskId(value(pending.TaskList[0].Id)).UserId(alice.OpenID).Build()).Build())

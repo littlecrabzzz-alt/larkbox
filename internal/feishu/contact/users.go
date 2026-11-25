@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -159,6 +161,16 @@ type searchFilter struct {
 }
 
 func (h handler) searchUsers(w http.ResponseWriter, r *http.Request) {
+	const requiredScope = "contact:user:search"
+	identity, _ := middleware.AuthFromContext(r.Context())
+	if h.strict && !slices.Contains(strings.Split(identity.Scope, " "), requiredScope) {
+		err := protocol.NewError(protocol.InsufficientScope, &protocol.ErrorDetails{
+			PermissionViolations: []protocol.PermissionViolation{{Type: "scope", Subject: requiredScope}},
+		})
+		err.Status = http.StatusBadRequest
+		_ = protocol.WriteError(w, err)
+		return
+	}
 	view, ok := h.directory(w, r)
 	if !ok {
 		return
