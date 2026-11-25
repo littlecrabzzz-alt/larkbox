@@ -88,6 +88,9 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 	}
 	if upsert {
 		for _, app := range cfg.Apps {
+			if previous, exists := s.apps.items[app.AppID]; exists && previous.TenantKey != app.TenantKey {
+				s.clearTenantCredentials(app.AppID)
+			}
 			s.apps.put(app)
 		}
 		for _, user := range cfg.Users {
@@ -108,6 +111,28 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 		s.registerTemplates(cfg.CardTemplates)
 	}
 	return nil
+}
+
+func (s *Store) clearTenantCredentials(appID string) {
+	for value, credential := range s.tokens {
+		if credential.AppID == appID {
+			credential.Revoked = true
+			s.tokens[value] = credential
+		}
+	}
+	for key := range s.authorizations {
+		if key.appID == appID {
+			delete(s.authorizations, key)
+		}
+	}
+	for code, flow := range s.deviceFlows {
+		if flow.AppID == appID {
+			delete(s.deviceFlows, code)
+			if s.deviceUserCodes[flow.UserCode] == code {
+				delete(s.deviceUserCodes, flow.UserCode)
+			}
+		}
+	}
 }
 
 func uniqueUsers(users map[string]User, members map[string]bool) error {

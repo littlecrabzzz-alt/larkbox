@@ -35,6 +35,7 @@ type Token struct {
 	Value               string
 	Kind                TokenKind
 	AppID               string
+	TenantKey           string
 	UserOpenID          string
 	ExpiresAt           time.Time
 	Revoked             bool

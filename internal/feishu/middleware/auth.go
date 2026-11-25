@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -26,6 +27,7 @@ const (
 // Auth identifies the app and optional user authenticated by a Bearer token.
 type Auth struct {
 	AppID      string
+	TenantKey  string
 	UserOpenID string
 	Kind       store.TokenKind
 	Scope      string
@@ -40,6 +42,23 @@ var bearerValue = regexp.MustCompile(`^[A-Za-z0-9._~+/-]+=*$`)
 func AuthFromContext(ctx context.Context) (Auth, bool) {
 	auth, ok := ctx.Value(authKey{}).(Auth)
 	return auth, ok
+}
+
+// RequireOneScope accepts any listed permission granted to the credential.
+// It writes the Open API scope error when no requested permission is present.
+func RequireOneScope(w http.ResponseWriter, identity Auth, required ...string) bool {
+	granted := strings.Split(identity.Scope, " ")
+	if len(required) == 0 || slices.ContainsFunc(required, func(scope string) bool { return slices.Contains(granted, scope) }) {
+		return true
+	}
+	permissions := make([]protocol.PermissionViolation, 0, len(required))
+	for _, scope := range required {
+		permissions = append(permissions, protocol.PermissionViolation{Type: "scope", Subject: scope})
+	}
+	err := protocol.NewError(protocol.InsufficientScope, &protocol.ErrorDetails{PermissionViolations: permissions})
+	err.Status = http.StatusBadRequest
+	_ = protocol.WriteError(w, err)
+	return false
 }
 
 // Bearer authenticates a route with the specified Feishu token kind. In
@@ -104,7 +123,7 @@ func authenticate(state *store.Store, required RequiredToken, headers []string) 
 	case !accepts(required, token.Kind):
 		return Auth{}, credentialError(token.Kind, unsupportedCredential)
 	}
-	return Auth{AppID: token.AppID, UserOpenID: token.UserOpenID, Kind: token.Kind, Scope: token.Scope}, protocol.APIError{}
+	return Auth{AppID: token.AppID, TenantKey: token.TenantKey, UserOpenID: token.UserOpenID, Kind: token.Kind, Scope: token.Scope}, protocol.APIError{}
 }
 
 func bearerToken(headers []string) (string, bool) {

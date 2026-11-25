@@ -12,6 +12,14 @@ requests, resolves Bob's open ID by name and email, sends a message from
 Alice, and logs out. It asserts the consent list and stored message via
 `/_sandbox`.
 
+The same test creates and fetches a document, resolves a Wiki node, uploads
+and downloads an identical Drive file, writes and reads a spreadsheet range,
+and searches Base records. It obtains IDs and table fields through the CLI
+before subsequent operations. In flag mode, Base record search needs an
+explicit `--search-field` from `+field-list`. The scopes for that workflow are
+listed in [run.py](run.py). The probe checks both inline JSON and the default
+NDJSON export to a local file.
+
 ## Try the browser flow
 
 On Linux, build both binaries and start the sandbox in one terminal.
