@@ -15,7 +15,15 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 ALICE = "ou_larkbox_alice"
 BOB = "ou_larkbox_bob"
-SCOPE = "contact:user:search im:message im:message.send_as_user"
+SCOPES = (
+    "base:app:create", "base:field:read", "base:record:create", "base:record:read",
+    "base:table:create", "base:table:delete", "base:table:read", "base:table:update",
+    "contact:user:search", "docs:permission.member:auth", "docx:document:create", "docx:document:readonly",
+    "drive:drive.metadata:readonly", "drive:file:download", "drive:file:upload",
+    "im:message", "im:message.send_as_user", "sheets:spreadsheet:create",
+    "sheets:spreadsheet:read", "sheets:spreadsheet:write_only", "wiki:node:create",
+    "wiki:node:read", "wiki:node:retrieve", "wiki:space:read", "wiki:space:write_only",
+)
 DEMO_APP = "cli_larkbox"
 HTTP = build_opener(ProxyHandler({}))
 
@@ -106,11 +114,11 @@ def verify(args, directory):
 
         command("config", "set", "dpop", "disabled")
         for decision in ("deny", "approve"):
-            issued = json.loads(command("auth", "login", "--scope", SCOPE, "--no-wait", "--json"))
+            issued = json.loads(command("auth", "login", "--scope", " ".join(SCOPES), "--no-wait", "--json"))
             decide(origin, issued["verification_url"], "Authorize a sandbox app", decision)
             command("auth", "login", "--device-code", issued["device_code"], "--json", success=decision == "approve")
             grants = get_json(origin, grants_path)["items"]
-            expected = [(ALICE, SCOPE + " offline_access")] if decision == "approve" else []
+            expected = [(ALICE, " ".join(sorted((*SCOPES, "offline_access"))))] if decision == "approve" else []
             assert [(entry["open_id"], entry["scope"]) for entry in grants] == expected, grants
         assert get_json(origin, f"apps/{DEMO_APP}/grants")["items"] == []
 
@@ -126,10 +134,59 @@ def verify(args, directory):
         assert len(messages) == 1 and messages[0]["message_id"] == sent["data"]["message_id"], messages
         assert messages[0]["sender"]["id"] == ALICE and json.loads(messages[0]["content"])["text"] == marker, messages
 
+        verify_content(command, directory)
         assert json.loads(command("auth", "logout", "--json"))["loggedOut"]
         assert get_json(origin, grants_path)["items"] == []
         version = command("--version").strip()
-    print(f"PASS {version} app registration, denial, login, recipient search, user message and logout")
+    print(f"PASS {version} registration, login, directory, IM, Docs, Wiki, Drive, Sheets, Base and logout")
+
+
+def verify_content(command, directory):
+    def call(*argv):
+        result = json.loads(command(*argv, "--as", "user"))
+        assert result["ok"], result
+        return result["data"]
+
+    marker = "CLI sandbox content"
+    doc = call("docs", "+create", "--api-version", "v2", "--title", "Probe document",
+               "--doc-format", "markdown", "--content", marker)["document"]
+    fetched = call("docs", "+fetch", "--api-version", "v2", "--doc", doc["document_id"],
+                   "--doc-format", "markdown", "--format", "json")["document"]
+    assert fetched["title"] == "Probe document" and fetched["content"] == marker, fetched
+
+    space = call("wiki", "+space-create", "--name", "CLI probe space")
+    node = call("wiki", "+node-create", "--space-id", space["space_id"], "--obj-type", "docx", "--title", marker)
+    resolved = call("wiki", "+node-get", "--node-token", node["node_token"], "--space-id", space["space_id"], "--format", "json")
+    assert resolved["obj_token"] == node["obj_token"] and resolved["title"] == marker, resolved
+    command("wiki", "+node-get", "--node-token", "wik00000000000000000000000000000000", "--as", "user", success=False)
+
+    fixture = b"Larkbox Drive probe\x00\xff\x10"
+    (directory / "upload.bin").write_bytes(fixture)
+    uploaded = call("drive", "+upload", "--file", "./upload.bin")
+    call("drive", "+download", "--file-token", uploaded["file_token"], "--output", "./downloaded.bin")
+    assert (directory / "downloaded.bin").read_bytes() == fixture
+
+    workbook = call("sheets", "+workbook-create", "--title", "Probe workbook", "--format", "json")["spreadsheet"]
+    selector = ("--spreadsheet-token", workbook["spreadsheet_token"], "--sheet-name", "Sheet1", "--range", "A1:B2")
+    values = [["Task", "Count"], [marker, 23]]
+    matrix = [[{"value": value} for value in row] for row in values]
+    call("sheets", "+cells-set", *selector, "--cells", json.dumps(matrix), "--format", "json")
+    read = call("sheets", "+cells-get", *selector, "--format", "json")
+    assert read["ranges"][0]["values"] == values, read
+
+    base = call("base", "+base-create", "--name", "Probe base")["base"]
+    selector = ("--base-token", base["base_token"])
+    table = call("base", "+table-list", *selector)["tables"][0]
+    selector += ("--table-id", table["table_id"])
+    schema = call("base", "+field-list", *selector)
+    name_field = next(field["field_id"] for field in schema["fields"] if field["field_name"] == "Name")
+    call("base", "+record-batch-create", *selector, "--json", json.dumps({"create_records": [{"Name": marker}, {"Name": "Another record"}]}))
+    search = ("base", "+record-search", *selector, "--keyword", "sandbox content", "--search-field", name_field)
+    found = call(*search, "--format", "json")
+    assert found["fields"] == ["Name"] and found["data"] == [[marker]], found
+    command(*search, "--output", "./records.ndjson", "--as", "user")
+    exported = [json.loads(line) for line in (directory / "records.ndjson").read_text().splitlines()]
+    assert [item["Name"] for item in exported] == [marker], exported
 
 
 def main():

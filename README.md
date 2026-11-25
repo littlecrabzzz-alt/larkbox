@@ -154,9 +154,20 @@ for trusted local and test-network clients.
 ### Official CLI onboarding
 
 Run `make test-cli` with Docker to test application registration, user denial
-and approval, recipient search, messaging, and logout with official `lark-cli` v1.0.100. The
+and approval, recipient search, messaging, content workflows, and logout with
+official `lark-cli` v1.0.100. The
 [CLI test guide](tests/lark_cli/README.md) covers the loopback adapter, browser
 confirmation, and scripted device decisions.
+
+### Content and storage
+
+The content APIs store resources under the requesting app or user identity.
+Use the returned resource IDs in subsequent calls and supply the matching
+OAuth permissions. A new workbook provides `Sheet1` for A1 range reads and
+writes. A new Base provides `Table1` with a text field named `Name` for
+record creation and keyword search. Drive accepts single-request uploads
+up to 20 MiB in the virtual root. Wiki resolves a document node by its
+node token or its underlying document token.
 
 ### Directory and approval fixtures
 
@@ -328,6 +339,16 @@ Status Legend:
 | `GET /open-apis/contact/v3/users/find_by_department`, `GET /departments/{department_id}/children`, `GET /scopes` | Page through department members, child departments, and app visibility | `SDK-Tested` |
 | `POST /open-apis/approval/v4/instances`, `GET /instances/{instance_id}`, `POST /instances/cancel` | Create, read, and withdraw instances | `SDK-Tested` |
 | `POST /open-apis/approval/v4/tasks/approve`, `POST /tasks/reject` | Transition a pending approval through its assigned approver | `SDK-Tested` |
+
+### Content and storage
+
+| Endpoint family | Notes | Status |
+|---|---|---|
+| `/open-apis/docs_ai/v1/documents`, `/open-apis/docx/v1/documents` | Create and retrieve documents with whole-document Markdown or XML | `CLI-Tested` |
+| `/open-apis/wiki/v2/spaces` | Create spaces and document nodes, then resolve nodes | `CLI-Tested` |
+| `/open-apis/drive/v1/files`, `/open-apis/drive/v1/metas/batch_query` | Upload, download, and look up Drive files | `CLI-Tested` |
+| `/open-apis/sheets/v3/spreadsheets`, `/open-apis/sheet_ai/v2/spreadsheets`, `/open-apis/sheets/v2/spreadsheets` | Create workbooks and read or write cell values | `CLI-Tested` |
+| `/open-apis/base/v3/bases`, `/open-apis/bitable/v1/apps` | Base metadata, table and field lookup, and record writes and queries | `CLI-Tested` for Base v3 |
 
 ### Events & Callbacks
 

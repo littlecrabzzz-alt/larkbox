@@ -27,6 +27,7 @@ type WikiSpace struct {
 // WikiNode links a space entry to its document or file.
 type WikiNode struct {
 	ID, SpaceID, ParentID, ObjectID, ObjectType, Kind, Title string
+	HasChild                                                 bool
 }
 
 // DriveFile stores uploaded bytes and their Drive metadata.
@@ -109,9 +110,12 @@ func (s *Store) CreateWikiNode(owner ResourceOwner, spaceID, parentID, title str
 		return WikiNode{}, ErrNotFound
 	}
 	if parentID != "" {
-		if parent, ok := s.content.nodes[parentID]; !ok || parent.SpaceID != spaceID {
+		parent, ok := s.content.nodes[parentID]
+		if !ok || parent.SpaceID != spaceID {
 			return WikiNode{}, ErrNotFound
 		}
+		parent.HasChild = true
+		s.content.nodes[parentID] = parent
 	}
 	doc := s.createDocument(owner, title, "", "markdown")
 	node := WikiNode{ID: protocol.NewID("wik"), SpaceID: spaceID, ParentID: parentID,

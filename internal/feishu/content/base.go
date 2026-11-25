@@ -77,11 +77,12 @@ func (h handler) listBaseTables(w http.ResponseWriter, r *http.Request) {
 func (h handler) listBaseFields(w http.ResponseWriter, r *http.Request) {
 	if base, ok := h.base(w, r); ok {
 		kind := any("text")
+		key := "fields"
 		if bitableAPI(r) {
-			kind = 1
+			kind, key = 1, "items"
 		}
 		entry := fields{"field_id": base.FieldID, "field_name": "Name", "name": "Name", "type": kind, "is_primary": true}
-		reply(w, fields{"items": []fields{entry}, "total": 1, "has_more": false, "page_token": ""})
+		reply(w, fields{key: []fields{entry}, "total": 1, "has_more": false, "page_token": ""})
 	}
 }
 
@@ -233,10 +234,14 @@ func (h handler) queryBaseRecords(w http.ResponseWriter, r *http.Request, query 
 		return
 	}
 	if query.Limit == 0 {
-		query.Limit = 20
+		query.Limit = 10
+	}
+	maximum := 2000
+	if bitableAPI(r) {
+		maximum = 500
 	}
 	valid := func(field string) bool { return field == "Name" || field == base.FieldID }
-	if query.Offset < 0 || query.Limit < 1 || query.Limit > 500 ||
+	if query.Offset < 0 || query.Limit < 1 || query.Limit > maximum ||
 		slices.ContainsFunc(query.Select, func(field string) bool { return !valid(field) }) ||
 		slices.ContainsFunc(query.Search, func(field string) bool { return !valid(field) }) {
 		fail(w, protocol.InvalidParameter)
@@ -257,9 +262,22 @@ func (h handler) queryBaseRecords(w http.ResponseWriter, r *http.Request, query 
 	}
 	start := min(query.Offset, len(records))
 	end := min(start+query.Limit, len(records))
+	page := records[start:end]
+	if !bitableAPI(r) {
+		ids, values := make([]string, 0, len(page)), make([][]json.RawMessage, 0, len(page))
+		for _, row := range page {
+			ids = append(ids, row.ID)
+			values = append(values, []json.RawMessage{row.Fields["Name"]})
+		}
+		reply(w, fields{
+			"timezone": base.Zone, "fields": []string{"Name"}, "field_id_list": []string{base.FieldID}, "field_type_list": []string{"text"},
+			"record_id_list": ids, "data": values, "total": len(records), "has_more": end < len(records),
+		})
+		return
+	}
 	next := ""
 	if end < len(records) {
 		next = strconv.Itoa(end)
 	}
-	reply(w, fields{"items": records[start:end], "total": len(records), "has_more": next != "", "page_token": next})
+	reply(w, fields{"items": page, "total": len(records), "has_more": next != "", "page_token": next})
 }

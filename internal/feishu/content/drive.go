@@ -71,6 +71,34 @@ func (h handler) downloadDrive(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(entry.Data)
 }
 
+func (h handler) queryDriveToken(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	owner := h.owner(r)
+	if file, ok := h.state.DriveFile(owner, token, false); ok {
+		reply(w, fields{"obj_token": file.ID, "obj_type": "file", "is_wiki_token": false})
+		return
+	}
+	if node, ok := h.state.WikiNode(owner, token, "wiki"); ok {
+		reply(w, fields{"obj_token": node.ObjectID, "obj_type": node.ObjectType, "is_wiki_token": true})
+		return
+	}
+	if doc, ok := h.state.Document(owner, token); ok {
+		reply(w, fields{"obj_token": doc.ID, "obj_type": "docx", "is_wiki_token": false})
+		return
+	}
+	fail(w, protocol.ResourceNotFound)
+}
+
+func (h handler) driveExportPermission(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("type") != "file" || query.Get("action") != "export" {
+		fail(w, protocol.InvalidParameter)
+		return
+	}
+	_, allowed := h.state.DriveFile(h.owner(r), r.PathValue("file_token"), false)
+	reply(w, fields{"auth_result": allowed})
+}
+
 func (h handler) driveMetadata(w http.ResponseWriter, r *http.Request) {
 	type selector struct {
 		Token string `json:"doc_token"`

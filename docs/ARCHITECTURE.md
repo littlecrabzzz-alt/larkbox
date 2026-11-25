@@ -19,6 +19,7 @@ internal/
     bot/              bot/v3/info
     im/               chats, members, messages, reply/thread, reactions, images & files
     cardkit/          cardkit/v1 streaming card APIs
+    content/          Docs, Wiki, Drive, Sheets, and Base resources
   event/              Unified event router (HTTP Webhook Schema 2.0 + WebSocket long-connection gateway)
   sandbox/            /_sandbox/* control plane HTTP APIs
   server/             Router wiring, graceful shutdown, and embedded static UI serving
@@ -45,6 +46,7 @@ All entities are scoped cleanly to support concurrent testing across multiple ch
 - **Messages**: `message_id` (`om_...`), `chat_id`, `root_id`, `parent_id`, `thread_id`, `msg_type`, raw JSON-string `content`, `mentions`, `deleted` (recalled), `updated`, timestamps, reactions list.
 - **Cards (CardKit)**: `card_id`, owning app, card JSON or template data, indexed element IDs, `streaming_mode`, and last accepted `sequence` (strictly monotonic per card). The sending app can resolve the linked entity on message reads. Other apps receive the stored message representation.
 - **Media**: Binary blob store keyed by `image_key` (`img_v3_...`) and `file_key` (`file_v3_...`) with `Content-Type` and filename metadata.
+- **Content resources**. Documents, Wiki spaces and nodes, Drive files, spreadsheet cells, and Base records carry an owning app or user identity. Range and batch writes commit together under the store lock.
 - **Audit Traces**: Ring buffer / queryable log of inbound Open API calls (method, path, headers, body, status, Feishu `code`, latency) and outbound event deliveries (channel, payload, response status/body, retry attempts).
 
 ---

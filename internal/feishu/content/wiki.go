@@ -86,6 +86,6 @@ func (h handler) readWikiNode(w http.ResponseWriter, r *http.Request) {
 func wikiNodeData(node store.WikiNode) fields {
 	return fields{
 		"space_id": node.SpaceID, "node_token": node.ID, "parent_node_token": node.ParentID,
-		"obj_token": node.ObjectID, "obj_type": node.ObjectType, "node_type": node.Kind, "title": node.Title, "has_child": false,
+		"obj_token": node.ObjectID, "obj_type": node.ObjectType, "node_type": node.Kind, "title": node.Title, "has_child": node.HasChild,
 	}
 }

@@ -112,13 +112,15 @@ func (h handler) fetchDocument(w http.ResponseWriter, r *http.Request) {
 		Revision     int64           `json:"revision_id"`
 		Extra        json.RawMessage `json:"extra_param"`
 		ExportOption json.RawMessage `json:"export_option"`
-		ReadOption   json.RawMessage `json:"read_option"`
-		Scene        json.RawMessage `json:"scene"`
+		ReadOption   struct {
+			Mode string `json:"read_mode"`
+		} `json:"read_option"`
+		Scene json.RawMessage `json:"scene"`
 	}
 	if !read(w, r, &input) {
 		return
 	}
-	if input.Format != "markdown" && input.Format != "xml" {
+	if (input.Format != "markdown" && input.Format != "xml") || (input.ReadOption.Mode != "" && input.ReadOption.Mode != "full") {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
