@@ -111,14 +111,18 @@ const templates: Record<string, string> = {
   grey: "neutral", gray: "neutral",
 };
 
-export function CardPreview({ card, onAction }: { card: ReturnType<typeof extractCard>; onAction?: Act }) {
+export function CardPreview({ card, onAction, generation = 0 }: {
+  card: ReturnType<typeof extractCard>;
+  onAction?: Act;
+  generation?: number;
+}) {
   if (!card) return <Empty title="Card preview unavailable">Inspect the raw JSON for the stored card reference.</Empty>;
   const tone = Object.hasOwn(templates, card.template) ? templates[card.template] : "neutral";
   return <div className="card-preview">
     {(card.title || card.subtitle) && <header className={`card-header card-${tone}`}>
       <strong>{card.title}</strong>{card.subtitle && <small>{card.subtitle}</small>}
     </header>}
-    <div className="card-elements"><Elements key={card.version} items={card.elements} act={onAction} /></div>
+    <div className="card-elements"><Elements key={`${generation}:${card.version}`} items={card.elements} act={onAction} /></div>
   </div>;
 }
 

@@ -96,6 +96,7 @@ function MessageItem({ message, sender, onReply }: { message: Message; sender?: 
   const { refresh } = useContext(RefreshContext);
   const operation = useOperation();
   const [callback, setCallback] = useState<Awaited<ReturnType<typeof triggerCard>>>();
+  const [cardApplyGeneration, setCardApplyGeneration] = useState(0);
   const isBot = message.sender.sender_type === "app";
   const name = message.sender.sender_name || message.sender.id;
   const toast = callback?.toast;
@@ -106,6 +107,7 @@ function MessageItem({ message, sender, onReply }: { message: Message; sender?: 
     setCallback(undefined);
     const result = await triggerCard(message.message_id, sender.open_id, action);
     setCallback(result);
+    if (result.card_applied) setCardApplyGeneration((generation) => generation + 1);
     refresh();
   }) : undefined;
 
@@ -125,7 +127,7 @@ function MessageItem({ message, sender, onReply }: { message: Message; sender?: 
       {message.deleted ? <p className="muted">This message was recalled.</p>
         : message.msg_type === "interactive" ? <div className="message-card">
           {message.card_id && <div className="item-meta">CardKit <code>{message.card_id}</code></div>}
-          <CardPreview card={messageCard(message)} onAction={runAction} />
+          <CardPreview card={messageCard(message)} onAction={runAction} generation={cardApplyGeneration} />
           {operation.busy && <Notice>Waiting for card callback…</Notice>}
           {operation.error && <Notice tone="error">{operation.error}</Notice>}
           {toastText && <Notice tone={toastTone}>{toastText}</Notice>}
