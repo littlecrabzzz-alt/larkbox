@@ -100,7 +100,8 @@ func appSelector(method, path string) string {
 		return "query"
 	case method == http.MethodPost && (path == "/open-apis/auth/v3/tenant_access_token/internal" || path == "/open-apis/auth/v3/app_access_token/internal"):
 		return "app_id"
-	case method == http.MethodPost && path == "/open-apis/authen/v2/oauth/token":
+	case method == http.MethodPost && (path == "/open-apis/authen/v2/oauth/token" || path == "/oauth/v3/token" ||
+		path == "/oauth/v1/revoke" || path == "/oauth/v1/device_authorization"):
 		return "client_id"
 	default:
 		return ""
@@ -110,6 +111,11 @@ func appSelector(method, path string) string {
 // Credential endpoints name their app in the request instead of using Bearer
 // auth. Peek only when an app-scoped rule could match, preserving the reader.
 func declaredApp(r *http.Request, field string) string {
+	if r.URL.Path == "/oauth/v3/token" {
+		if id, _, basic := r.BasicAuth(); basic {
+			return id
+		}
+	}
 	if field == "query" {
 		query := r.URL.Query()
 		appID := query.Get("app_id")

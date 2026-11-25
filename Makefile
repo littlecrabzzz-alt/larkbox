@@ -1,7 +1,7 @@
 BINARY_NAME := larkbox
 BUILD_DIR   := bin
 
-.PHONY: help fmt vet lint test test-live test-blackbox build ui-install ui-test ui-build clean
+.PHONY: help fmt vet lint test test-live test-blackbox test-cli build ui-install ui-test ui-build clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -23,6 +23,15 @@ test-live: ## Run differential tests locally or with FEISHU_LIVE=1 against a Fei
 
 test-blackbox: build ## Run the standalone CLI and webhook recipe (Python 3)
 	python3 examples/blackbox.py --binary $(BUILD_DIR)/$(BINARY_NAME)
+
+test-cli: ## Test official lark-cli onboarding and IM in an isolated Docker container
+	@mkdir -p $(BUILD_DIR)
+	GOOS=linux CGO_ENABLED=0 go build -trimpath -o $(BUILD_DIR)/larkbox-cli-probe ./cmd/larkbox
+	GOOS=linux bash tests/lark_cli/build.sh $(BUILD_DIR)/lark-cli-loopback
+	docker run --rm --network=none \
+		--mount "type=bind,source=$(CURDIR)/$(BUILD_DIR),target=/probe-bin,readonly" \
+		--mount "type=bind,source=$(CURDIR)/tests/lark_cli,target=/probe,readonly" \
+		python:3.11-slim python /probe/run.py --binary /probe-bin/larkbox-cli-probe --cli /probe-bin/lark-cli-loopback
 
 build: ## Build a pure-Go single binary (CGO_ENABLED=0)
 	@mkdir -p $(BUILD_DIR)

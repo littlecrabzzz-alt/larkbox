@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- OAuth denial callbacks, user authorization revocation events, and per-app grant queries.
+- Separate device-code flows for application registration and user login, with browser and headless confirmation and an official CLI test in CI.
 - Group disbanding, user membership and reaction events, single and merged message forwarding, and forwarded attachment reads.
 - Per-app event subscriptions, arbitrary event injection, direct conversation entry, and bot menu configuration and click simulation.
 - Inline card JSON validation and expanded card previews for images, tables, collapsible panels, and interactive inputs.

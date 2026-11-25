@@ -60,6 +60,13 @@ For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exac
 
 Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
+Add the sandbox query parameter `decision=deny` to exercise the OAuth
+`error=access_denied` callback and returned `state`. The redirect still has
+to be registered. The app can revoke a user or refresh token at
+`POST /oauth/v1/revoke`. Inspect current consent with
+`GET /_sandbox/apps/{app_id}/grants` and subscribe to the sandbox event
+`larkbox.auth.authorization_revoked_v1` to exercise cleanup handlers.
+
 To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends ordinary events to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. By default, URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
 
 CardKit writes require the creating app's tenant token. Send or reply with an interactive message whose JSON-encoded `content` is `{"type":"card","data":{"card_id":"..."}}`. The owner sees the latest card in the rendered IM format. Pass `card_msg_content_type=user_card_content` on GET or history to request the underlying card JSON. Other apps in the chat see the stored message reference. Card updates require a positive sequence greater than the previous one. Stale sequences return HTTP 400 and code `300317`. Identical requests can replay a successful UUID for one hour. Reusing it with a different request on the same card and operation returns `200770`. A stream expires after 10 minutes and the entity expires after 14 days. [Feishu CardKit batch update reference](https://open.larkoffice.com/document/cardkit-v1/card/batch_update)
@@ -142,6 +149,13 @@ in traces. `--timeout` overrides the CLI's 30-second request timeout.
 Override file settings with `LARKBOX_EVENT_DELIVERY` (a JSON object) and
 `LARKBOX_CLOCK_START` (an RFC3339 timestamp). The control plane is intended
 for trusted local and test-network clients.
+
+### Official CLI onboarding
+
+Run `make test-cli` with Docker to test application registration, user denial
+and approval, messaging, and logout with official `lark-cli` v1.0.100. The
+[CLI test guide](tests/lark_cli/README.md) covers the loopback adapter, browser
+confirmation, and scripted device decisions.
 
 ### Embedded Web UI
 
@@ -244,6 +258,7 @@ Status Legend:
 - `Planned` — Scheduled in the roadmap
 - `Implemented` — Working with strict-mode validation & unit tests
 - `SDK-Tested` — Verified end-to-end against official Feishu SDK client
+- `CLI-Tested` — Verified end-to-end against pinned official `lark-cli`
 - `Live-Verified` — Verified via differential test against a real Feishu test tenant
 
 ### Authentication
@@ -252,11 +267,16 @@ Status Legend:
 |---|---|---|
 | `POST /open-apis/auth/v3/tenant_access_token/internal` | App credentials check, TTL, `t-...` token | `SDK-Tested` |
 | `POST /open-apis/auth/v3/app_access_token/internal` | Issues `a-...` and `tenant_access_token` | `SDK-Tested` |
-| `GET /open-apis/authen/v1/authorize` & `/v1/index` | OAuth redirect with `code` and optional `state` and PKCE | `SDK-Tested` |
+| `GET /open-apis/authen/v1/authorize` & `/v1/index` | OAuth redirect with `code` or `error=access_denied`, optional `state` and PKCE | `SDK-Tested` |
 | `POST /open-apis/authen/v1/oidc/access_token` | Exchange `code` for `u-...` & `refresh_token` | `SDK-Tested` |
 | `POST /open-apis/authen/v1/oidc/refresh_access_token` | Refresh user access token | `SDK-Tested` |
 | `POST /open-apis/authen/v2/oauth/token` | JSON or form token exchange and refresh | `SDK-Tested` |
 | `GET /open-apis/authen/v1/user_info` | Authenticated user profile (`u-...`) | `SDK-Tested` |
+| `POST /oauth/v1/app/registration` | Separate app registration flow for `config init --new` | `CLI-Tested` |
+| `POST /oauth/v1/device_authorization`, `POST /oauth/v3/token` | Device user consent and token exchange, including pending, backoff, denial and expiry | `CLI-Tested` |
+| `POST /oauth/v3/token` (`client_credentials`) | Tenant Bearer token through form credentials or HTTP Basic | `Live-Verified` |
+| `POST /oauth/v1/revoke` | User and refresh token revocation. Live coverage uses unknown tokens | `CLI-Tested`, `Live-Verified` for unknown tokens |
+| `GET /_sandbox/apps/{app_id}/grants` | Sandbox consent list per app | `Implemented` |
 
 ### Bot, IM, Media & CardKit
 
@@ -292,13 +312,14 @@ Status Legend:
 | `p2p_chat_create`, `im.chat.access_event.bot_p2p_chat_entered_v1` | First conversation and later entries by a user | `SDK-Tested` |
 | `application.bot.menu_v6` | User clicked a configured callback item | `SDK-Tested` |
 | `card.action.trigger` | Synchronous button and form callbacks with toast and persisted card updates | `SDK-Tested` |
+| `larkbox.auth.authorization_revoked_v1` | Sandbox event for a removed user grant | `Implemented` |
 
 ## Verification & Fidelity Strategy
 
 To prevent mock drift, `larkbox` uses a four-layer verification pyramid:
 
 1. **Unit & State-Machine Tests**: Table-driven Go tests covering strict validation, error codes, crypto, and concurrent state mutations (`go test -race ./...`).
-2. **Official SDK Integration Tests**: Go tests exercise REST and events in process. The Node.js, Java, and Python jobs use the built binary to check a REST send, receive a WebSocket event, reply through REST from the handler, and verify the acknowledgment.
+2. **Official Client Integration Tests**: Go tests exercise REST and events in process. The Node.js, Java, and Python jobs use the built binary to check a REST send, receive a WebSocket event, reply through REST from the handler, and verify the acknowledgment. The official CLI job checks app registration, user consent, an IM send, and logout.
 3. **Golden Fixtures**: Normal CI checks REST and webhook contracts against synthetic sandbox reference fixtures. See the [live capture and sanitization guide](testdata/fixtures/README.md).
 4. **Live Differential Tests (`//go:build live`)**: Opt-in suite that runs the same scenarios against local `larkbox` or a real Feishu test tenant (`FEISHU_LIVE=1`), with typed contracts for response differences.
 

@@ -15,7 +15,7 @@ internal/
   store/              Thread-safe in-memory state store (Apps, Tokens, Users, Chats, Messages, Cards, Media, Traces)
   feishu/
     middleware/       Bearer token validation, request/response audit logging, fault injection
-    auth/             v3 internal tokens & authen v1/v2 OAuth endpoints
+    auth/             internal tokens, authen v1/v2 OAuth and Accounts endpoints
     bot/              bot/v3/info
     im/               chats, members, messages, reply/thread, reactions, images & files
     cardkit/          cardkit/v1 streaming card APIs
@@ -25,6 +25,7 @@ internal/
 web/                  Lightweight Vite + React chat playground & protocol inspector (embedded via //go:embed)
 tests/
   sdk_test/           Offline end-to-end integration tests using official oapi-sdk-go (REST + WS)
+  lark_cli/           Pinned official CLI onboarding and IM with loopback transport
   live_test/          //go:build live differential tests for the sandbox and a Feishu test tenant
 testdata/fixtures/    Sanitized REST and webhook wire fixtures
 ```
@@ -37,6 +38,8 @@ All entities are scoped cleanly to support concurrent testing across multiple ch
 
 - **App / Bot**: `app_id`, `app_secret`, `bot_open_id`, `verification_token`, `encrypt_key`, webhook target URL, active WebSocket connections.
 - **Tokens**: `tenant_access_token` (`t-...`), `app_access_token` (`a-...`), `user_access_token` (`u-...`), `refresh_token`, OAuth authorization `code`, each with explicit `app_id`, `expires_at`, and revocation flag.
+- **Authorizations**. Each active grant links an app and a user. Pending exchanges and issued credentials carry the same grant ID. Revocation invalidates that grant's credentials and outstanding exchanges before emitting its event.
+- **Device flows**. App registration and user consent have distinct code pairs, poll deadlines, and one-time completion. Device codes use the sandbox state clock and the configured OAuth code TTL.
 - **Users**: `open_id` (`ou_...`), `user_id`, `union_id` (`on_...`), name, email, avatar.
 - **Chats**: `chat_id` (`oc_...`), `chat_mode` (`p2p` / `group`), name, owner, member set.
 - **Messages**: `message_id` (`om_...`), `chat_id`, `root_id`, `parent_id`, `thread_id`, `msg_type`, raw JSON-string `content`, `mentions`, `deleted` (recalled), `updated`, timestamps, reactions list.

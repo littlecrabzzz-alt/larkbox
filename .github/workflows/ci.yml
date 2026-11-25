@@ -98,3 +98,16 @@ jobs:
         run: |
           make build
           python tests/sdk_external/run.py "${{ matrix.sdk }}" --binary bin/larkbox --python python
+
+  official-cli:
+    name: Official CLI onboarding
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run the pinned CLI against the sandbox
+        run: make test-cli

@@ -474,6 +474,51 @@ paths:
           description: Number of expired credentials
           content: {application/json: {schema: {type: object, properties: {expired: *integer}}}}
         default: *error
+  /_sandbox/apps/{app_id}/grants:
+    get:
+      operationId: listAppGrants
+      summary: List users with active authorization for an app
+      parameters:
+        - {in: path, name: app_id, required: true, schema: *identifier}
+      responses:
+        "200":
+          description: Current grants ordered by user open ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app_id, items]
+                properties:
+                  app_id: *identifier
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/AppGrant'}
+        "404": *error
+  /_sandbox/auth/devices/decision:
+    post:
+      operationId: decideDeviceRequest
+      summary: Approve or deny a pending CLI device request as a simulated user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [user_code, decision]
+              properties:
+                user_code: *identifier
+                open_id: *identifier
+                decision: &decision {type: string, enum: [approve, deny]}
+              if: {properties: {decision: {const: approve}}}
+              then: {required: [open_id]}
+      responses:
+        "200":
+          description: Decision recorded
+          content: {application/json: {schema: {type: object, required: [decision], properties: {decision: *decision}}}}
+        "400": *error
+        "404": *error
+        "409": *error
 components:
   responses:
     Error:
@@ -492,6 +537,13 @@ components:
       properties:
         now: &timestamp {type: string, format: date-time}
         manual: &boolean {type: boolean}
+    AppGrant:
+      type: object
+      required: [open_id, scope, authorized_at]
+      properties:
+        open_id: *identifier
+        scope: {type: string}
+        authorized_at: *timestamp
     Seed:
       type: object
       additionalProperties: false

@@ -128,6 +128,9 @@ type Store struct {
 	revision            uint64
 	nextDedupCleanup    time.Time
 	tokens              map[string]Token
+	authorizations      map[authorizationKey]Authorization
+	deviceFlows         map[string]DeviceFlow
+	deviceUserCodes     map[string]string
 	media               Collection[Media]
 	cards               Collection[Card]
 	cardUUIDs           map[cardRequest]cardReplay
@@ -150,6 +153,9 @@ func New(now func() time.Time, traceCapacity int) *Store {
 		traceCapacity = defaultTraceCapacity
 	}
 	s := &Store{now: now, tokens: make(map[string]Token), traces: make([]Trace, 0, traceCapacity)}
+	s.authorizations = make(map[authorizationKey]Authorization)
+	s.deviceFlows = make(map[string]DeviceFlow)
+	s.deviceUserCodes = make(map[string]string)
 	s.messageUUIDs = make(map[messageRequest]messageDedup)
 	s.chatMessages = make(map[string]map[string]struct{})
 	s.threadMessages = make(map[string]map[string]struct{})
@@ -427,6 +433,9 @@ func (s *Store) reset(seed config.Config) {
 	s.messageOrder = 0
 	s.nextDedupCleanup = time.Time{}
 	clear(s.tokens)
+	clear(s.authorizations)
+	clear(s.deviceFlows)
+	clear(s.deviceUserCodes)
 	clear(s.media.items)
 	clear(s.cards.items)
 	clear(s.cardUUIDs)

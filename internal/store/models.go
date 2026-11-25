@@ -43,6 +43,7 @@ type Token struct {
 	RedirectURI         string
 	CodeChallenge       string
 	CodeChallengeMethod string
+	AuthorizationID     string
 }
 
 // Mention describes a user or bot referenced by a message.
