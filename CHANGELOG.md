@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Calendar events and agenda reads, task completion and reopening, Minutes fixtures and transcript export, and simulated mail send, search, and reading through the pinned CLI.
 - Content and storage APIs for Docs, Wiki, Drive, Sheets, and Base, with read-after-write checks from the pinned official CLI.
 - Contact v3 recipient search, identity resolution, department and employee reads, and scoped directory fixtures. The pinned CLI resolves a recipient before sending a message.
 - Approval v4 instance creation, reads, approve, reject and withdraw actions, and per-definition subscriptions for legacy approval webhooks.
