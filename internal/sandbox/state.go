@@ -18,12 +18,14 @@ type seedInput struct {
 	Users               []config.User               `json:"users"`
 	Departments         []config.Department         `json:"departments"`
 	ApprovalDefinitions []config.ApprovalDefinition `json:"approval_definitions"`
+	Minutes             []config.Minute             `json:"minutes"`
 	Chats               []config.Chat               `json:"chats"`
 	CardTemplates       []config.CardTemplate       `json:"card_templates"`
 }
 
 func (s seedInput) config() config.Config {
-	return config.Config{Apps: s.Apps, Users: s.Users, Departments: s.Departments, ApprovalDefinitions: s.ApprovalDefinitions, Chats: s.Chats, CardTemplates: s.CardTemplates}
+	return config.Config{Apps: s.Apps, Users: s.Users, Departments: s.Departments, ApprovalDefinitions: s.ApprovalDefinitions,
+		Minutes: s.Minutes, Chats: s.Chats, CardTemplates: s.CardTemplates}
 }
 
 func (s seedInput) validateTemplates(w http.ResponseWriter) bool {
@@ -64,7 +66,8 @@ func (c *control) snapshot(w http.ResponseWriter, _ *http.Request) {
 	snapshot := data{
 		"strict_mode": c.cfg.StrictMode, "version": c.version, "apps": appData, "users": users,
 		"departments": c.state.Departments(), "approval_definitions": c.state.ApprovalDefinitions(),
-		"chats": c.chatData(), "cards": c.cardData(false), "faults": c.faults.List(), "ws_sessions": sessions,
+		"minutes": c.state.Minutes(),
+		"chats":   c.chatData(), "cards": c.cardData(false), "faults": c.faults.List(), "ws_sessions": sessions,
 	}
 	c.mu.RUnlock()
 	reply(w, http.StatusOK, snapshot)
@@ -85,6 +88,7 @@ func (c *control) seed(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, data{
 		"apps": len(input.Apps), "users": len(input.Users), "departments": len(input.Departments),
 		"chats": len(input.Chats), "card_templates": len(input.CardTemplates), "approval_definitions": len(input.ApprovalDefinitions),
+		"minutes": len(input.Minutes),
 	})
 }
 

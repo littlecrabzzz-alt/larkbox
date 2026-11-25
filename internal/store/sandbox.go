@@ -38,6 +38,10 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 	for _, definition := range cfg.ApprovalDefinitions {
 		definitions[definition.Code] = definition
 	}
+	minutes := maps.Clone(s.work.minutes)
+	for _, entry := range cfg.Minutes {
+		minutes[entry.Token] = entry
+	}
 	for _, app := range cfg.Apps {
 		if strings.TrimSpace(app.AppSecret) == "" || strings.TrimSpace(app.BotOpenID) == "" {
 			return errors.New("apps require app_secret and bot_open_id")
@@ -79,11 +83,15 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 	directory := config.Config{
 		Apps: slices.Collect(maps.Values(apps)), Users: slices.Collect(maps.Values(users)),
 		Departments: slices.Collect(maps.Values(departments)), ApprovalDefinitions: slices.Collect(maps.Values(definitions)),
+		Minutes: slices.Collect(maps.Values(minutes)),
 	}
 	if err := directory.ValidateDirectory(); err != nil {
 		return err
 	}
 	if err := directory.ValidateApprovals(); err != nil {
+		return err
+	}
+	if err := directory.ValidateMinutes(); err != nil {
 		return err
 	}
 	if upsert {
@@ -107,6 +115,9 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 		}
 		for _, definition := range cfg.ApprovalDefinitions {
 			s.approvalDefinitions.put(definition)
+		}
+		for _, entry := range cfg.Minutes {
+			s.work.minutes[entry.Token] = entry
 		}
 		s.registerTemplates(cfg.CardTemplates)
 	}

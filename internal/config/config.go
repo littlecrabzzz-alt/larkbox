@@ -130,6 +130,7 @@ type Config struct {
 	Users               []User               `json:"users" yaml:"users"`
 	Departments         []Department         `json:"departments,omitempty" yaml:"departments,omitempty"`
 	ApprovalDefinitions []ApprovalDefinition `json:"approval_definitions,omitempty" yaml:"approval_definitions,omitempty"`
+	Minutes             []Minute             `json:"minutes,omitempty" yaml:"minutes,omitempty"`
 	Chats               []Chat               `json:"chats" yaml:"chats"`
 	CardTemplates       []CardTemplate       `json:"card_templates,omitempty" yaml:"card_templates,omitempty"`
 }
@@ -197,7 +198,7 @@ func readFile(path string, cfg *Config) error {
 	}
 	for name, value := range fields {
 		switch strings.ToLower(name) {
-		case "apps", "users", "chats", "departments", "approval_definitions", "card_templates":
+		case "apps", "users", "chats", "departments", "approval_definitions", "minutes", "card_templates":
 			if value == nil {
 				return fmt.Errorf("%s must be a seed list; use [] to clear it", name)
 			}
@@ -275,6 +276,9 @@ func applyEnv(cfg *Config) error {
 	if err := applySeedEnv("LARKBOX_APPROVAL_DEFINITIONS", &cfg.ApprovalDefinitions); err != nil {
 		return err
 	}
+	if err := applySeedEnv("LARKBOX_MINUTES", &cfg.Minutes); err != nil {
+		return err
+	}
 	if err := applySeedEnv("LARKBOX_CHATS", &cfg.Chats); err != nil {
 		return err
 	}
@@ -342,7 +346,10 @@ func (cfg Config) Validate() error {
 	if err := cfg.ValidateDirectory(); err != nil {
 		return err
 	}
-	return cfg.ValidateApprovals()
+	if err := cfg.ValidateApprovals(); err != nil {
+		return err
+	}
+	return cfg.ValidateMinutes()
 }
 
 // ValidateSeeds checks seed list keys and configuration fields.
@@ -383,6 +390,9 @@ func (cfg Config) ValidateSeeds() error {
 		return err
 	}
 	if err := cfg.validateApprovalKeys(); err != nil {
+		return err
+	}
+	if err := cfg.validateMinuteKeys(); err != nil {
 		return err
 	}
 	if err := validateKeys("chats", cfg.Chats, func(chat Chat) string { return chat.ChatID }); err != nil {

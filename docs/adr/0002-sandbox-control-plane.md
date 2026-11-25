@@ -25,8 +25,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /openapi.json` | Returns the machine-readable contract for built-in controls. |
 | `GET /clock` | Returns the current UTC `now` and whether manual time is configured. |
 | `POST /clock/advance` | Requires `{"by":"15s"}` or another positive Go duration. Returns the clock state and wakes due retries. Returns 409 in wall-clock mode. |
-| `GET /state` | Returns strict mode, build version, sanitized apps, users, departments, approval definitions, chats, card summaries, active faults, and WebSocket sessions. |
-| `POST /seed` | Accepts `apps`, `users`, `departments`, `approval_definitions`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates references before committing. |
+| `GET /state` | Returns strict mode, build version, sanitized apps, users, departments, approval definitions, Minutes fixtures, chats, card summaries, active faults, and WebSocket sessions. |
+| `POST /seed` | Accepts `apps`, `users`, `departments`, `approval_definitions`, `minutes`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates references before committing. |
 | `POST /reset` | Empty body or `{}` restores the configured startup seed. An optional `{"seed":{...}}` replaces the state for this reset, with omitted lists treated as empty. Both forms clear runtime entities, credentials, traces, faults, and WebSocket tickets and disconnect existing sessions. |
 | `GET /chats` | Returns `{"chats":[...]}` with member IDs and settings. |
 | `POST /chats/open` | Requires `app_id` and `operator_open_id`. Opens or creates a user-to-bot conversation. Returns `{chat_id, created, event_type, event_id, deliveries, error}`. |
@@ -114,6 +114,11 @@ They provide one manual task for each submitted instance. Subscribe to the
 definition through Approval v4 and include `approval_instance` in the app's
 event types to receive status changes over its webhook. Reset clears the
 runtime instances and per-definition subscriptions.
+
+Minutes fixtures require an active owner in the fixture's tenant. The same
+owner can read the seeded metadata and artifacts with the respective OAuth
+grants. Calendar events, tasks, and mail drafts and messages are runtime
+state cleared by reset.
 
 ### Timing
 

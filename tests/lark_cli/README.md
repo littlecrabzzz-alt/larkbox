@@ -20,6 +20,13 @@ explicit `--search-field` from `+field-list`. The scopes for that workflow are
 listed in [run.py](run.py). The probe checks both inline JSON and the default
 NDJSON export to a local file.
 
+The work workflow schedules, finds, and deletes an event. It completes and
+reopens a task, seeds a Minutes fixture and checks the exported transcript,
+and sends a saved mail draft to the virtual mailbox. The probe retries the
+same draft send and checks that the sent mailbox contains a single copy.
+Calendar deletion and draft sending use the CLI's `--yes` flag against
+synthetic records on the isolated sandbox.
+
 ## Try the browser flow
 
 On Linux, build both binaries and start the sandbox in one terminal.
