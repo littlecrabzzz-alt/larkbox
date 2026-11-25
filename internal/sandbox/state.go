@@ -14,14 +14,16 @@ import (
 )
 
 type seedInput struct {
-	Apps          []config.App          `json:"apps"`
-	Users         []config.User         `json:"users"`
-	Chats         []config.Chat         `json:"chats"`
-	CardTemplates []config.CardTemplate `json:"card_templates"`
+	Apps                []config.App                `json:"apps"`
+	Users               []config.User               `json:"users"`
+	Departments         []config.Department         `json:"departments"`
+	ApprovalDefinitions []config.ApprovalDefinition `json:"approval_definitions"`
+	Chats               []config.Chat               `json:"chats"`
+	CardTemplates       []config.CardTemplate       `json:"card_templates"`
 }
 
 func (s seedInput) config() config.Config {
-	return config.Config{Apps: s.Apps, Users: s.Users, Chats: s.Chats, CardTemplates: s.CardTemplates}
+	return config.Config{Apps: s.Apps, Users: s.Users, Departments: s.Departments, ApprovalDefinitions: s.ApprovalDefinitions, Chats: s.Chats, CardTemplates: s.CardTemplates}
 }
 
 func (s seedInput) validateTemplates(w http.ResponseWriter) bool {
@@ -45,18 +47,23 @@ func (c *control) snapshot(w http.ResponseWriter, _ *http.Request) {
 	slices.SortFunc(apps, func(a, b store.App) int { return cmp.Compare(a.AppID, b.AppID) })
 	appData := make([]data, 0, len(apps))
 	for _, app := range apps {
-		appData = append(appData, data{
+		entry := data{
 			"app_id": app.AppID, "bot_open_id": app.BotOpenID, "bot_name": app.BotName,
 			"webhook_url": app.WebhookURL, "has_encrypt_key": app.EncryptKey != "",
 			"has_verification_token": app.VerificationToken != "", "redirect_uris": append([]string{}, app.RedirectURIs...),
 			"event_types":        app.EventTypes,
 			"active_ws_sessions": counts[app.AppID],
-		})
+		}
+		if app.ContactScope != nil {
+			entry["contact_scope"] = app.ContactScope
+		}
+		appData = append(appData, entry)
 	}
 	users := c.state.Users().List()
 	slices.SortFunc(users, func(a, b store.User) int { return cmp.Compare(a.OpenID, b.OpenID) })
 	snapshot := data{
 		"strict_mode": c.cfg.StrictMode, "version": c.version, "apps": appData, "users": users,
+		"departments": c.state.Departments(), "approval_definitions": c.state.ApprovalDefinitions(),
 		"chats": c.chatData(), "cards": c.cardData(false), "faults": c.faults.List(), "ws_sessions": sessions,
 	}
 	c.mu.RUnlock()
@@ -75,7 +82,10 @@ func (c *control) seed(w http.ResponseWriter, r *http.Request) {
 		stateError(w, err)
 		return
 	}
-	reply(w, http.StatusOK, data{"apps": len(input.Apps), "users": len(input.Users), "chats": len(input.Chats), "card_templates": len(input.CardTemplates)})
+	reply(w, http.StatusOK, data{
+		"apps": len(input.Apps), "users": len(input.Users), "departments": len(input.Departments),
+		"chats": len(input.Chats), "card_templates": len(input.CardTemplates), "approval_definitions": len(input.ApprovalDefinitions),
+	})
 }
 
 func (c *control) reset(w http.ResponseWriter, r *http.Request) {

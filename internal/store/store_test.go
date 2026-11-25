@@ -143,7 +143,7 @@ func TestSeedAndReset(t *testing.T) {
 	app, appFound := state.Apps().Get(cfg.Apps[0].AppID)
 	user, userFound := state.Users().Get(cfg.Users[0].OpenID)
 	chat, chatFound := state.Chats().Get(chatID)
-	if !appFound || !reflect.DeepEqual(app, cfg.Apps[0]) || !userFound || user != cfg.Users[0] || !chatFound || chat.MemberIDs[0] != owner || slices.Contains(chat.MemberIDs, "ou_added") {
+	if !appFound || !reflect.DeepEqual(app, cfg.Apps[0]) || !userFound || !reflect.DeepEqual(user, cfg.Users[0]) || !chatFound || chat.MemberIDs[0] != owner || slices.Contains(chat.MemberIDs, "ou_added") {
 		t.Fatal("reset did not restore the original seed")
 	}
 	if _, err := state.CheckToken("t-test"); !errors.Is(err, ErrNotFound) {

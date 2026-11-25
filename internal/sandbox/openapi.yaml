@@ -34,6 +34,12 @@ paths:
                   users:
                     type: array
                     items: {$ref: '#/components/schemas/User'}
+                  departments:
+                    type: array
+                    items: {$ref: '#/components/schemas/Department'}
+                  approval_definitions:
+                    type: array
+                    items: {$ref: '#/components/schemas/ApprovalDefinition'}
                   chats:
                     type: array
                     items: {$ref: '#/components/schemas/ChatSummary'}
@@ -64,6 +70,8 @@ paths:
                   apps: &integer {type: integer}
                   users: *integer
                   chats: *integer
+                  departments: *integer
+                  approval_definitions: *integer
                   card_templates: *integer
         default: &error {$ref: '#/components/responses/Error'}
   /_sandbox/reset:
@@ -544,12 +552,40 @@ components:
         open_id: *identifier
         scope: {type: string}
         authorized_at: *timestamp
+    Department:
+      type: object
+      required: [open_department_id, department_id, name]
+      additionalProperties: false
+      properties:
+        open_department_id: *identifier
+        department_id: *identifier
+        parent_open_department_id: {type: string}
+        tenant_key: {type: string}
+        leader_open_id: {type: string}
+        name: *identifier
+    ApprovalDefinition:
+      type: object
+      required: [approval_code, name, approver_open_id]
+      additionalProperties: false
+      properties:
+        approval_code: *identifier
+        name: *identifier
+        approver_open_id: *identifier
+        tenant_key: {type: string}
+    ContactScope:
+      type: object
+      additionalProperties: false
+      properties:
+        department_open_ids: {type: array, items: *identifier}
+        user_open_ids: {type: array, items: *identifier}
     Seed:
       type: object
       additionalProperties: false
       properties:
         apps: {type: array, items: {$ref: '#/components/schemas/AppSeed'}}
         users: {type: array, items: {$ref: '#/components/schemas/User'}}
+        departments: {type: array, items: {$ref: '#/components/schemas/Department'}}
+        approval_definitions: {type: array, items: {$ref: '#/components/schemas/ApprovalDefinition'}}
         chats: {type: array, items: {$ref: '#/components/schemas/ChatSeed'}}
         card_templates:
           type: array
@@ -579,6 +615,7 @@ components:
         encrypt_key: *string
         redirect_uris: &strings {type: array, items: *string}
         event_types: *strings
+        contact_scope: {$ref: '#/components/schemas/ContactScope'}
         bot_menu: {$ref: '#/components/schemas/BotMenu'}
     AppSummary:
       type: object
@@ -592,6 +629,7 @@ components:
         redirect_uris: *strings
         active_ws_sessions: *integer
         event_types: {type: [array, 'null'], items: *string}
+        contact_scope: {$ref: '#/components/schemas/ContactScope'}
     BotMenu:
       type: object
       additionalProperties: false
@@ -643,6 +681,8 @@ components:
         avatar_big: *string
         enterprise_email: *string
         mobile: *string
+        department_open_ids: *strings
+        contact_scope: {$ref: '#/components/schemas/ContactScope'}
         tenant_key: *string
         employee_no: *string
     ChatSeed:

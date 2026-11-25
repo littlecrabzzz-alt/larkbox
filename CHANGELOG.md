@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Contact v3 recipient search, identity resolution, department and employee reads, and scoped directory fixtures. The pinned CLI resolves a recipient before sending a message.
+- Approval v4 instance creation, reads, approve, reject and withdraw actions, and per-definition subscriptions for legacy approval webhooks.
 - OAuth denial callbacks, user authorization revocation events, and per-app grant queries.
 - Separate device-code flows for application registration and user login, with browser and headless confirmation and an official CLI test in CI.
 - Group disbanding, user membership and reaction events, single and merged message forwarding, and forwarded attachment reads.

@@ -21,37 +21,40 @@ import (
 
 // App describes a virtual Feishu application and its bot.
 type App struct {
-	TenantKey         string   `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
-	AppID             string   `json:"app_id" yaml:"app_id"`
-	AppSecret         string   `json:"app_secret" yaml:"app_secret"`
-	BotOpenID         string   `json:"bot_open_id" yaml:"bot_open_id"`
-	BotAvatarURL      string   `json:"bot_avatar_url,omitempty" yaml:"bot_avatar_url,omitempty"`
-	BotName           string   `json:"bot_name" yaml:"bot_name"`
-	VerificationToken string   `json:"verification_token" yaml:"verification_token"`
-	EncryptKey        string   `json:"encrypt_key" yaml:"encrypt_key"`
-	WebhookURL        string   `json:"webhook_url" yaml:"webhook_url"`
-	EventTypes        []string `json:"event_types,omitempty" yaml:"event_types,omitempty"`
-	BotMenu           BotMenu  `json:"bot_menu,omitempty" yaml:"bot_menu,omitempty"`
-	RedirectURIs      []string `json:"redirect_uris,omitempty" yaml:"redirect_uris,omitempty"`
+	TenantKey         string        `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
+	AppID             string        `json:"app_id" yaml:"app_id"`
+	AppSecret         string        `json:"app_secret" yaml:"app_secret"`
+	BotOpenID         string        `json:"bot_open_id" yaml:"bot_open_id"`
+	BotAvatarURL      string        `json:"bot_avatar_url,omitempty" yaml:"bot_avatar_url,omitempty"`
+	BotName           string        `json:"bot_name" yaml:"bot_name"`
+	VerificationToken string        `json:"verification_token" yaml:"verification_token"`
+	EncryptKey        string        `json:"encrypt_key" yaml:"encrypt_key"`
+	WebhookURL        string        `json:"webhook_url" yaml:"webhook_url"`
+	EventTypes        []string      `json:"event_types,omitempty" yaml:"event_types,omitempty"`
+	BotMenu           BotMenu       `json:"bot_menu,omitempty" yaml:"bot_menu,omitempty"`
+	RedirectURIs      []string      `json:"redirect_uris,omitempty" yaml:"redirect_uris,omitempty"`
+	ContactScope      *ContactScope `json:"contact_scope,omitempty" yaml:"contact_scope,omitempty"`
 }
 
 // User describes a virtual Feishu user.
 type User struct {
-	OpenID          string `json:"open_id" yaml:"open_id"`
-	Inactive        bool   `json:"inactive,omitempty" yaml:"inactive,omitempty"`
-	UserID          string `json:"user_id" yaml:"user_id"`
-	UnionID         string `json:"union_id" yaml:"union_id"`
-	Name            string `json:"name" yaml:"name"`
-	Email           string `json:"email" yaml:"email"`
-	Avatar          string `json:"avatar,omitempty" yaml:"avatar,omitempty"`
-	EnName          string `json:"en_name,omitempty" yaml:"en_name,omitempty"`
-	AvatarThumb     string `json:"avatar_thumb,omitempty" yaml:"avatar_thumb,omitempty"`
-	AvatarMiddle    string `json:"avatar_middle,omitempty" yaml:"avatar_middle,omitempty"`
-	AvatarBig       string `json:"avatar_big,omitempty" yaml:"avatar_big,omitempty"`
-	EnterpriseEmail string `json:"enterprise_email,omitempty" yaml:"enterprise_email,omitempty"`
-	Mobile          string `json:"mobile,omitempty" yaml:"mobile,omitempty"`
-	TenantKey       string `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
-	EmployeeNo      string `json:"employee_no,omitempty" yaml:"employee_no,omitempty"`
+	OpenID            string        `json:"open_id" yaml:"open_id"`
+	Inactive          bool          `json:"inactive,omitempty" yaml:"inactive,omitempty"`
+	UserID            string        `json:"user_id" yaml:"user_id"`
+	UnionID           string        `json:"union_id" yaml:"union_id"`
+	Name              string        `json:"name" yaml:"name"`
+	Email             string        `json:"email" yaml:"email"`
+	Avatar            string        `json:"avatar,omitempty" yaml:"avatar,omitempty"`
+	EnName            string        `json:"en_name,omitempty" yaml:"en_name,omitempty"`
+	AvatarThumb       string        `json:"avatar_thumb,omitempty" yaml:"avatar_thumb,omitempty"`
+	AvatarMiddle      string        `json:"avatar_middle,omitempty" yaml:"avatar_middle,omitempty"`
+	AvatarBig         string        `json:"avatar_big,omitempty" yaml:"avatar_big,omitempty"`
+	EnterpriseEmail   string        `json:"enterprise_email,omitempty" yaml:"enterprise_email,omitempty"`
+	Mobile            string        `json:"mobile,omitempty" yaml:"mobile,omitempty"`
+	TenantKey         string        `json:"tenant_key,omitempty" yaml:"tenant_key,omitempty"`
+	EmployeeNo        string        `json:"employee_no,omitempty" yaml:"employee_no,omitempty"`
+	DepartmentOpenIDs []string      `json:"department_open_ids,omitempty" yaml:"department_open_ids,omitempty"`
+	ContactScope      *ContactScope `json:"contact_scope,omitempty" yaml:"contact_scope,omitempty"`
 }
 
 // Chat describes a virtual p2p or group chat.
@@ -118,15 +121,17 @@ type CardTemplate struct {
 
 // Config describes the HTTP server, token defaults, and initial state.
 type Config struct {
-	Addr          string         `json:"addr" yaml:"addr"`
-	StrictMode    bool           `json:"strict_mode" yaml:"strict_mode"`
-	EventDelivery EventDelivery  `json:"event_delivery,omitempty" yaml:"event_delivery,omitempty"`
-	ClockStart    *time.Time     `json:"clock_start,omitempty" yaml:"clock_start,omitempty"`
-	TokenTTLs     TokenTTLs      `json:"token_ttls" yaml:"token_ttls"`
-	Apps          []App          `json:"apps" yaml:"apps"`
-	Users         []User         `json:"users" yaml:"users"`
-	Chats         []Chat         `json:"chats" yaml:"chats"`
-	CardTemplates []CardTemplate `json:"card_templates,omitempty" yaml:"card_templates,omitempty"`
+	Addr                string               `json:"addr" yaml:"addr"`
+	StrictMode          bool                 `json:"strict_mode" yaml:"strict_mode"`
+	EventDelivery       EventDelivery        `json:"event_delivery,omitempty" yaml:"event_delivery,omitempty"`
+	ClockStart          *time.Time           `json:"clock_start,omitempty" yaml:"clock_start,omitempty"`
+	TokenTTLs           TokenTTLs            `json:"token_ttls" yaml:"token_ttls"`
+	Apps                []App                `json:"apps" yaml:"apps"`
+	Users               []User               `json:"users" yaml:"users"`
+	Departments         []Department         `json:"departments,omitempty" yaml:"departments,omitempty"`
+	ApprovalDefinitions []ApprovalDefinition `json:"approval_definitions,omitempty" yaml:"approval_definitions,omitempty"`
+	Chats               []Chat               `json:"chats" yaml:"chats"`
+	CardTemplates       []CardTemplate       `json:"card_templates,omitempty" yaml:"card_templates,omitempty"`
 }
 
 // DefaultApp returns the public fixture credentials for the built-in bot.
@@ -142,12 +147,13 @@ func DefaultApp() App {
 // Default returns independent settings and demo seed data for a local server.
 func Default() Config {
 	bot := DefaultApp()
-	alice := User{OpenID: "ou_larkbox_alice", UserID: "alice", UnionID: "on_larkbox_alice", Name: "Alice", Email: "alice@example.test"}
-	bob := User{OpenID: "ou_larkbox_bob", UserID: "bob", UnionID: "on_larkbox_bob", Name: "Bob", Email: "bob@example.test"}
+	dept := Department{OpenID: "od-larkbox-engineering", ID: "engineering", Name: "Engineering"}
+	alice := User{OpenID: "ou_larkbox_alice", UserID: "alice", UnionID: "on_larkbox_alice", Name: "Alice", Email: "alice@example.test", DepartmentOpenIDs: []string{dept.OpenID}}
+	bob := User{OpenID: "ou_larkbox_bob", UserID: "bob", UnionID: "on_larkbox_bob", Name: "Bob", Email: "bob@example.test", DepartmentOpenIDs: []string{dept.OpenID}}
 	return Config{
 		Addr: "127.0.0.1:8080", StrictMode: true,
 		TokenTTLs: TokenTTLs{Tenant: 7200, App: 7200, User: 7200, Refresh: 30 * 24 * 3600, Code: 300},
-		Apps:      []App{bot}, Users: []User{alice, bob},
+		Apps:      []App{bot}, Users: []User{alice, bob}, Departments: []Department{dept},
 		Chats: []Chat{
 			{ChatID: "oc_larkbox_group", ChatMode: "group", Name: "Larkbox Demo", OwnerID: alice.OpenID, MemberIDs: []string{alice.OpenID, bob.OpenID, bot.BotOpenID}},
 			{ChatID: "oc_larkbox_p2p", ChatMode: "p2p", Name: "Alice and Larkbox Bot", OwnerID: alice.OpenID, MemberIDs: []string{alice.OpenID, bot.BotOpenID}},
@@ -191,7 +197,7 @@ func readFile(path string, cfg *Config) error {
 	}
 	for name, value := range fields {
 		switch strings.ToLower(name) {
-		case "apps", "users", "chats", "card_templates":
+		case "apps", "users", "chats", "departments", "approval_definitions", "card_templates":
 			if value == nil {
 				return fmt.Errorf("%s must be a seed list; use [] to clear it", name)
 			}
@@ -199,7 +205,7 @@ func readFile(path string, cfg *Config) error {
 	}
 
 	defaults := *cfg
-	cfg.Apps, cfg.Users, cfg.Chats = nil, nil, nil
+	cfg.Apps, cfg.Users, cfg.Chats, cfg.Departments = nil, nil, nil, nil
 	decode := fileDecoder(body, isJSON)
 	if err := decode(cfg); err != nil {
 		return err
@@ -212,6 +218,9 @@ func readFile(path string, cfg *Config) error {
 	}
 	if cfg.Chats == nil {
 		cfg.Chats = defaults.Chats
+	}
+	if cfg.Departments == nil {
+		cfg.Departments = defaults.Departments
 	}
 	var extra any
 	if err := decode(&extra); !errors.Is(err, io.EOF) {
@@ -258,6 +267,12 @@ func applyEnv(cfg *Config) error {
 		return err
 	}
 	if err := applySeedEnv("LARKBOX_USERS", &cfg.Users); err != nil {
+		return err
+	}
+	if err := applySeedEnv("LARKBOX_DEPARTMENTS", &cfg.Departments); err != nil {
+		return err
+	}
+	if err := applySeedEnv("LARKBOX_APPROVAL_DEFINITIONS", &cfg.ApprovalDefinitions); err != nil {
 		return err
 	}
 	if err := applySeedEnv("LARKBOX_CHATS", &cfg.Chats); err != nil {
@@ -321,7 +336,13 @@ func (cfg Config) Validate() error {
 	if cfg.ClockStart != nil && !simclock.ValidTime(*cfg.ClockStart) {
 		return errors.New("clock_start must be nonzero and keep card expiry timestamps in the RFC3339 range")
 	}
-	return cfg.ValidateSeeds()
+	if err := cfg.ValidateSeeds(); err != nil {
+		return err
+	}
+	if err := cfg.ValidateDirectory(); err != nil {
+		return err
+	}
+	return cfg.ValidateApprovals()
 }
 
 // ValidateSeeds checks seed list keys and configuration fields.
@@ -356,6 +377,12 @@ func (cfg Config) ValidateSeeds() error {
 		}
 	}
 	if err := validateKeys("users", cfg.Users, func(user User) string { return user.OpenID }); err != nil {
+		return err
+	}
+	if err := cfg.validateDepartmentKeys(); err != nil {
+		return err
+	}
+	if err := cfg.validateApprovalKeys(); err != nil {
 		return err
 	}
 	if err := validateKeys("chats", cfg.Chats, func(chat Chat) string { return chat.ChatID }); err != nil {

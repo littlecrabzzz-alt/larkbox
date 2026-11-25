@@ -8,8 +8,9 @@ The test runs in Docker without external network access and uses separate
 CLI configuration and credential storage for each invocation of the test.
 
 The recipe registers an app, denies and approves separate user login
-requests, sends a direct message from Alice to Bob, and logs out. It asserts
-the active consent list and the stored message via `/_sandbox`.
+requests, resolves Bob's open ID by name and email, sends a message from
+Alice, and logs out. It asserts the consent list and stored message via
+`/_sandbox`.
 
 ## Try the browser flow
 
@@ -35,11 +36,11 @@ bin/lark-cli-loopback config init --new --brand feishu --lang en
 bin/lark-cli-loopback config set dpop disabled
 ```
 
-The test profile uses Bearer credentials. Start user login with both scopes
-the pinned CLI's `+messages-send` checks.
+The test profile uses Bearer credentials. Start user login with the contact
+search scope and both scopes the pinned CLI's `+messages-send` checks.
 
 ```sh
-bin/lark-cli-loopback auth login --scope 'im:message im:message.send_as_user' --no-wait --json
+bin/lark-cli-loopback auth login --scope 'contact:user:search im:message im:message.send_as_user' --no-wait --json
 ```
 
 Open `verification_url` and approve as **Alice**, then pass the `device_code`
@@ -50,7 +51,8 @@ to `POST /_sandbox/auth/devices/decision`.
 
 ```sh
 bin/lark-cli-loopback auth login --device-code '<device_code>' --json
-bin/lark-cli-loopback im +messages-send --as user --user-id ou_larkbox_bob --text 'Hello from the sandbox'
+bin/lark-cli-loopback contact +search-user --as user --query 'bob@example.test' --format json
+bin/lark-cli-loopback im +messages-send --as user --user-id '<open_id from search>' --text 'Hello from the sandbox'
 bin/lark-cli-loopback auth logout --json
 ```
 
