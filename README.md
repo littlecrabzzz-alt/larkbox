@@ -280,9 +280,10 @@ remote URL provided by `--url` or `LARKBOX_URL`.
 Set `state_file` or `LARKBOX_STATE_FILE` to a writable file path for a single
 instance. Larkbox creates a private checkpoint at startup, replaces it
 atomically every second, and writes a final checkpoint on graceful shutdown.
-An abrupt restart recovers the last complete write. The persisted state
-includes messages and indexes, uploaded bytes, cards and sequences, OAuth
-grants and credential deadlines, and content and work resources.
+An abrupt restart restores the last completed checkpoint. A write can succeed
+through the API and still be lost if the process exits before the next checkpoint.
+The persisted state includes messages and indexes, uploaded bytes, cards and
+sequences, OAuth grants and credential deadlines, and content and work resources.
 
 ```sh
 docker compose -f compose.yaml -f compose.persist.yaml up --build --wait
