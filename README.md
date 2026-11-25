@@ -99,7 +99,9 @@ and `make ui-build` after frontend changes and commit the regenerated
 
 ## Deferred / Later Phases
 
-The core roadmap prioritizes **Auth, IM, Bot, Media, CardKit, and event delivery**. Docs, Bitable, Approval, Calendar, Contacts/HR, and Mail will be evaluated in later phases. The Feishu Open APIs and the `/_sandbox/*` control plane provide modular interfaces for test suites and leave room for future end-to-end testing features.
+The [planned milestones](#planned-milestones) extend the Auth, IM, CardKit, and
+event baseline with CLI workflows, additional Feishu domains, and shared test
+deployments.
 
 ## Core Capabilities
 
@@ -142,7 +144,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design specificati
 ## API & Event Compatibility Matrix
 
 Status Legend:
-- `Planned` — Scoped for v0.1, not yet implemented
+- `Planned` — Scheduled in the roadmap
 - `Implemented` — Working with strict-mode validation & unit tests
 - `SDK-Tested` — Verified end-to-end against official Feishu SDK client
 - `Live-Verified` — Verified via differential test against a real Feishu test tenant
@@ -238,6 +240,106 @@ streaming card entity. Set `FEISHU_LIVE=0` to force local mode if your
 - **Milestone 2 — Dual Event Engine & CardKit**: WebSocket Protobuf long-connection gateway, Webhook Schema 2.0 (encryption, signature, 3s retry), CardKit streaming cards, `card.action.trigger`, official `oapi-sdk-go/ws` end-to-end tests.
 - **Milestone 3 — Control Plane, Fault Injection & Live Harness**: `/_sandbox/*` control API, request/event trace logs, chaos rules, and `//go:build live` differential test suite.
 - **Milestone 4 — Embedded Web Inspector & Chat Playground**: Lightweight React/Vite UI bundled into the Go binary via `//go:embed`.
+
+### Planned Milestones
+
+Each phase adds verified workflows to the compatibility matrix through focused PRs.
+Use the four-layer fidelity strategy above for the Feishu contracts in each phase.
+Document simulator-specific controls under `/_sandbox/`.
+
+#### Milestone 5 — Black-box test controls
+
+Expose retry delays, attempt counts, and timeouts for Webhook delivery, URL
+verification, and WebSocket acknowledgements in startup configuration. Add time
+advancement for token expiry, CardKit stream and entity expiry, and pending
+retries. Provide a late-callback scenario where the receiver gets the request
+before the deadline and responds after it.
+
+Publish a machine-readable contract at `/_sandbox/openapi.json`, add
+`larkbox sandbox` commands for common control operations, and write the bound
+address to a ready file for `--addr :0` runs. Ship a runnable recipe that starts
+the binary, seeds a scenario, injects a message, and uses traces to assert that
+a failed delivery retries successfully with the same event ID. Use the recipe
+to verify parallel startup, time advancement, and late-response behavior.
+
+#### Milestone 6 — Bot and conversation lifecycle
+
+Add general event injection through the existing dispatcher so callers can
+exercise configured WebSocket and Webhook receivers and assert delivery in
+traces. Cover bot menu management and click events, first creation of and later
+entry into a bot conversation, reaction creation and removal events, and user
+join and leave events. Add message forwarding, merged forwarding with resource
+reads, and group disbanding with its lifecycle event.
+
+Verify that a client querying group, reaction, or message state after a lifecycle
+event sees the committed change. Expand card previews and JSON validation for
+the supported card elements, and compare representative cards with rendering
+in the native Feishu client using a test tenant. Run REST and long-connection
+event and acknowledgement checks with the official Node.js, Java, and Python
+SDKs alongside the Go suite.
+
+#### Milestone 7 — Authorization lifecycle and official CLI onboarding
+
+Cover user denial and its OAuth callback, revocation of access and refresh
+credentials, authorization-removal events, and per-app listing of users
+who granted authorization. Verify callback and revocation contracts against
+Feishu and document simulator-specific grant queries and events.
+
+Support device-code application registration and device-code user authorization
+as separate flows, including polling, denial, and expiry. Pin a `lark-cli`
+version and direct its Accounts and Open API requests to the local test setup.
+Verify app registration, login, and an IM request in the sandbox. Assert that
+revoked credentials are rejected and that grants stay scoped to the app.
+
+#### Milestone 8 — Directory and approvals
+
+Add contacts and recipient resolution by supported identifiers, names, and
+email addresses. Include department and employee lookup with app and user
+visibility rules. Exercise the CLI workflow that resolves a recipient to an
+`open_id` and sends a message.
+
+Add approval instances and state transitions with status-change events. Verify
+that a test client can start an approval, observe the event for a decision, and
+read the resulting instance state.
+
+#### Milestone 9 — Content and storage
+
+Add support for Docs, Wiki, Drive, Sheets, and Bitable (Base). Verify CLI
+workflows that create and read a document, resolve a Wiki node, upload and
+download a Drive file, update and read a spreadsheet range, and write and
+query Base records. Cover authorization and resource lookup errors for each
+workflow.
+
+#### Milestone 10 — Scheduling and work management
+
+Add support for Calendar, Tasks, Minutes, and Mail. Verify CLI workflows that
+schedule and read calendar events, create and complete tasks, read Minutes
+metadata and transcripts, and send and find mail in the simulated mailbox.
+Validate read-after-write behavior and supported state transitions.
+
+#### Milestone 11 — Shared test deployments
+
+Build and publish a versioned container image and verify startup and health in
+Compose. Provide an authenticated control-plane option for shared instances
+and document loopback and isolated-network deployment modes.
+
+Add a configurable rate and quota profile that returns Feishu-style rate-limit
+errors and headers. Expose metrics for pending deliveries and retries, scoped
+`pprof` diagnostics, and structured logs with request and event correlation
+and redacted credentials. Verify that clients can exercise backoff and
+operators can diagnose a queued or failed delivery.
+
+#### Milestone 12 — Restart recovery and continuous fidelity
+
+Add opt-in durable state and versioned snapshot export and import. Define
+recovery for messages, media, cards, active grants, token expiry, and pending
+retries. Verify a restart and a snapshot round trip by reading restored state
+and checking token and delivery behavior.
+
+Run weekly differential checks in CI against a dedicated Feishu test tenant
+using isolated fixtures, scoped credentials, and cleanup for live mutations.
+Report contract differences and keep sanitized captures for review. Keep
+normal pull request checks runnable with a local sandbox.
 
 ## Documentation & Project Standards
 

@@ -24,7 +24,9 @@ Previous ad-hoc mock scripts (e.g., thin Python HTTP stubs) suffer from three st
 
 ## Deferred / Later Phases
 
-Evaluate Docs, Bitable, Approval, Calendar, Contacts/HR, and Mail in future phases once the core Auth and IM surface matures.
+The [planned milestones](../../README.md#planned-milestones) schedule additional
+domains after the Auth and IM baseline. Each phase adds verified workflows by
+applying the protocol fidelity strategy above.
 
 ## Non-Goals
 
