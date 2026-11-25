@@ -3,14 +3,25 @@ package cardkit
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 // ValidMessageCard validates inline cards and template references in IM messages.
 func ValidMessageCard(card map[string]any) bool {
+	if field, _ := imagePickerIssue(card); field != "" {
+		return false
+	}
+	return validMessageCardShape(card)
+}
+
+func validMessageCardShape(card map[string]any) bool {
 	if kind, exists := card["type"]; exists {
 		data, ok := card["data"].(map[string]any)
 		return kind == "template" && ok && validTemplate(data)
@@ -19,7 +30,7 @@ func ValidMessageCard(card map[string]any) bool {
 		return false
 	}
 	config, _ := card["config"].(map[string]any)
-	if !optionalCardType[bool](config, "update_multi") {
+	if !optionalCardType[bool](config, "update_multi", "enable_forward", "enable_forward_interaction") {
 		return false
 	}
 	schema, supplied := card["schema"]
@@ -28,7 +39,9 @@ func ValidMessageCard(card map[string]any) bool {
 	}
 	switch schema {
 	case "2.0":
-		if _, localized := card["i18n_elements"]; localized || config["update_multi"] == false {
+		_, localized := card["i18n_elements"]
+		_, rootElements := card["elements"]
+		if localized || rootElements || config["update_multi"] == false {
 			return false
 		}
 		if value, present := card["body"]; present {
@@ -38,6 +51,9 @@ func ValidMessageCard(card map[string]any) bool {
 		header, _ := card["header"].(map[string]any)
 		return header["title"] != nil || header["subtitle"] != nil
 	case "1.0":
+		if _, body := card["body"]; body {
+			return false
+		}
 		if localized, supplied := card["i18n_elements"]; supplied {
 			_, plain := card["elements"]
 			return !plain && validCardLocales(localized, func(value any) bool {
@@ -48,6 +64,83 @@ func ValidMessageCard(card map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+// ValidatePreviewJSON checks inline card definitions without creating an entity.
+// Card JSON 2.0 uses CardKit's stored-entity checks and addressable-element rules.
+func ValidatePreviewJSON(encoded string) error {
+	doc := object(encoded)
+	if doc == nil || doc["type"] != nil {
+		return errors.New("paste a Card JSON 1.0 or 2.0 object")
+	}
+	if !validCardSettings(doc) {
+		return errors.New("correct the card config or card_link fields")
+	}
+	if field, issue := imagePickerIssue(doc); field != "" {
+		return fmt.Errorf("%s — %s", field, issue)
+	}
+	if doc["schema"] == "2.0" {
+		if err := validateEditedCard(doc); err != nil {
+			if errors.Is(err, errUnsharedCard) {
+				return errors.New(errUnsharedCard.Message)
+			}
+			return previewShapeIssue(doc)
+		}
+		if _, err := indexElements(doc); err != nil {
+			var apiErr protocol.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.Details != nil && len(apiErr.Details.FieldViolations) > 0 {
+					issue := apiErr.Details.FieldViolations[0]
+					return fmt.Errorf("%s — %s", issue.Field, issue.Description)
+				}
+				return errors.New(apiErr.Message)
+			}
+			return err
+		}
+		return nil
+	}
+	if !validMessageCardShape(doc) {
+		return previewShapeIssue(doc)
+	}
+	return nil
+}
+
+func imagePickerIssue(card map[string]any) (field, issue string) {
+	walk(card, func(slot elementSlot, node map[string]any) bool {
+		if node["tag"] != "select_img" {
+			return false
+		}
+		if node["multi_select"] == true && !slot.inForm {
+			field, issue = "multi_select", "Multiple image selection requires a form."
+		} else if slot.inForm && !nonemptyString(node, "name") {
+			field, issue = "name", "An image picker inside a form requires a name."
+		}
+		return field != ""
+	})
+	return field, issue
+}
+
+func previewShapeIssue(doc map[string]any) error {
+	if schema, supplied := doc["schema"]; supplied && schema != "1.0" && schema != "2.0" {
+		return errors.New("schema must be 1.0 or 2.0")
+	}
+	if !optionalCardCheck(doc, "header", validCardHeader) {
+		return errors.New("correct the card header and its title, subtitle, or text tags")
+	}
+	path, elements := "elements", doc["elements"]
+	if doc["schema"] == "2.0" {
+		path = "body.elements"
+		body, _ := doc["body"].(map[string]any)
+		elements = body["elements"]
+	}
+	if components, ok := elements.([]any); ok {
+		for i, raw := range components {
+			if node, ok := raw.(map[string]any); !ok || !validCardComponent(node) {
+				return fmt.Errorf("check the component at %s[%d] and its nested fields", path, i)
+			}
+		}
+	}
+	return fmt.Errorf("check %s and the fields allowed by the selected card schema", path)
 }
 
 func optionalObject(obj map[string]any, field string) bool {
@@ -135,6 +228,14 @@ func cardObjects(value any, nonempty bool, check func(map[string]any) bool) bool
 
 func validCardElements(value any) bool {
 	return cardObjects(value, false, validCardComponent)
+}
+
+func validNestedCardElements(value any) bool {
+	return cardObjects(value, false, validNestedCardComponent)
+}
+
+func validNestedCardComponent(node map[string]any) bool {
+	return node["tag"] != "form" && node["tag"] != "table" && validCardComponent(node)
 }
 
 func cardString(value any) bool {
@@ -250,7 +351,7 @@ func validCardComponent(node map[string]any) bool {
 				})
 			}) && optionalCardCheck(node, "extra", func(value any) bool {
 			extra, ok := value.(map[string]any)
-			return ok && validCardComponent(extra)
+			return ok && validNestedCardComponent(extra)
 		})
 	case "img":
 		return nonemptyString(node, "img_key") && validCardText(node["alt"]) &&
@@ -275,16 +376,16 @@ func validCardComponent(node map[string]any) bool {
 	case "column":
 		return optionalCardType[json.Number](node, "weight") &&
 			optionalCardType[string](node, "width", "vertical_align") &&
-			optionalCardCheck(node, "elements", validCardElements)
+			optionalCardCheck(node, "elements", validNestedCardElements)
 	case "action":
-		return cardObjects(node["actions"], true, validCardComponent)
+		return cardObjects(node["actions"], true, validNestedCardComponent)
 	case "form":
-		return nonemptyString(node, "name") && validCardElements(node["elements"]) && hasCardSubmit(node["elements"])
+		return nonemptyString(node, "name") && validNestedCardElements(node["elements"]) && hasCardSubmit(node["elements"])
 	case "interactive_container":
-		return cardObjects(node["behaviors"], true, validCardBehavior) && validCardElements(node["elements"])
+		return cardObjects(node["behaviors"], true, validCardBehavior) && validNestedCardElements(node["elements"])
 	case "collapsible_panel":
 		return validCardHeader(node["header"]) && optionalCardType[bool](node, "expanded") &&
-			optionalCardCheck(node, "elements", validCardElements)
+			optionalCardCheck(node, "elements", validNestedCardElements)
 	case "button":
 		return (node["text"] != nil || node["icon"] != nil) && optionalCardCheck(node, "text", validCardText) &&
 			optionalCardType[string](node, "type", "url", "name", "form_action_type", "action_type", "size", "width", "margin") &&
@@ -320,10 +421,13 @@ func validCardComponent(node map[string]any) bool {
 				optionalCardType[string](option, "value", "url") && optionalObject(option, "multi_url")
 		})
 	case "select_img":
-		return cardObjects(node["options"], true, func(option map[string]any) bool {
-			return nonemptyString(option, "img_key") && optionalCardType[string](option, "value") &&
-				optionalCardCheck(option, "alt", validCardText)
-		})
+		return optionalCardType[bool](node, "multi_select", "can_preview") &&
+			optionalCardType[string](node, "name", "layout", "aspect_ratio") &&
+			cardObjects(node["options"], true, func(option map[string]any) bool {
+				return nonemptyString(option, "img_key") && optionalCardType[string](option, "value") &&
+					optionalCardType[bool](option, "disabled") && optionalCardCheck(option, "alt", validCardText) &&
+					optionalCardCheck(option, "hover_tips", validCardText) && optionalCardCheck(option, "disabled_tips", validCardText)
+			})
 	case "img_combination":
 		return nonemptyString(node, "combination_mode") && cardObjects(node["img_list"], true, func(image map[string]any) bool {
 			return nonemptyString(image, "img_key") && optionalCardCheck(image, "alt", validCardText)

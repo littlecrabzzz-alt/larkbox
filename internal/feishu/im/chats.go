@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -18,6 +19,7 @@ import (
 var (
 	missingChat          = protocol.APIError{Code: 232006, Message: "Your request specifies a chat_id which is invalid.", Status: http.StatusBadRequest}
 	invalidChatParameter = protocol.APIError{Code: 232001, Message: "Your request contains an invalid request parameter.", Status: http.StatusBadRequest}
+	chatPermission       = protocol.APIError{Code: 232014, Message: "The token used in the request does NOT have the permissions necessary to complete the request.", Status: http.StatusBadRequest}
 )
 
 func writeChatFailure(w http.ResponseWriter, err error) {
@@ -86,19 +88,27 @@ func (h handler) createChat(w http.ResponseWriter, r *http.Request) {
 	}
 	chat := store.Chat{
 		ChatID: protocol.NewID(protocol.ChatID), ChatMode: req.Mode, Name: req.Name,
-		OwnerID: owner, MemberIDs: members, ChatSettings: req.ChatSettings, CreatedAt: h.state.Now(), AppID: actor.AppID,
+		OwnerID: owner, CreatorID: actor.OpenID, MemberIDs: members, ChatSettings: req.ChatSettings, CreatedAt: h.state.Now(), AppID: actor.AppID,
 	}
 	if req.Mode == "p2p" {
 		if len(members) != 2 || manager == "true" {
 			badField(w, "chat_mode", "A p2p chat requires two participants and has no managers.")
 			return
 		}
-		direct, err := store.Commit(r.Context(), h.state, func() (store.Chat, error) { return h.state.EnsureP2PChat(actor, chat) })
+		var created bool
+		direct, err := store.Commit(r.Context(), h.state, func() (store.Chat, error) {
+			direct, first, err := h.state.EnsureP2PChat(actor, chat)
+			created = first
+			return direct, err
+		})
 		if err != nil {
 			writeChatFailure(w, err)
 			return
 		}
 		chat = direct
+		if created {
+			h.emitFirstBotChat(r, chat.ChatID)
+		}
 	} else {
 		if manager == "true" && app.BotOpenID != "" && owner != app.BotOpenID {
 			chat.BotManagers = []string{app.AppID}
@@ -342,6 +352,7 @@ func (h handler) listMembers(w http.ResponseWriter, r *http.Request) {
 
 type memberChange struct {
 	invalid, missing, pending []string
+	users                     []string
 	available, unavailable    int
 }
 
@@ -401,16 +412,17 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	var result memberChange
 	var selectionFailure protocol.APIError
 	var changedBots []store.App
+	var recipients []string
 	actor, id := caller(r), r.PathValue("chat_id")
-	err := h.state.Mutate(r.Context(), func() error {
-		return h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
+	chat, err := store.Commit(r.Context(), h.state, func() (store.Chat, error) {
+		updated, receivedBy, err := h.state.ChangeIMChat(actor, id, func(chat *store.Chat) error {
 			if chat.ChatMode == "p2p" {
 				return invalidChatParameter
 			}
 			if !add && !managesChat(actor, *chat) {
 				for _, member := range req.IDs {
 					if target := ids[member].openID; target != "" && target != actor.OpenID && slices.Contains(chat.MemberIDs, target) {
-						return protocol.APIError{Code: 232014, Status: http.StatusBadRequest, Message: "The token used in the request does NOT have the permissions necessary to complete the request."}
+						return chatPermission
 					}
 				}
 			}
@@ -423,6 +435,8 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		})
+		recipients = receivedBy
+		return updated, err
 	})
 
 	data := fields{"invalid_id_list": emptySlice(result.invalid)}
@@ -440,6 +454,13 @@ func (h handler) changeMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, bot := range changedBots {
 		h.emitMembership(r, id, bot, add)
+	}
+	if len(result.users) > 0 {
+		kind := "im.chat.member.user.deleted_v1"
+		if add {
+			kind = "im.chat.member.user.added_v1"
+		}
+		h.emitChatLifecycle(r, chat, kind, recipients, result.users)
 	}
 	success(w, data)
 }
@@ -501,6 +522,8 @@ func applyMembers(chat *store.Chat, requested []string, ids map[string]memberTar
 			if isBot {
 				botCount++
 				changed = append(changed, bot)
+			} else {
+				result.users = append(result.users, openID)
 			}
 		case !present || chat.OwnerID == openID || (isBot && len(changed) >= 5):
 			result.invalid = append(result.invalid, id)
@@ -509,6 +532,8 @@ func applyMembers(chat *store.Chat, requested []string, ids map[string]memberTar
 			if isBot {
 				chat.BotManagers = slices.DeleteFunc(chat.BotManagers, func(manager string) bool { return manager == bot.AppID })
 				changed = append(changed, bot)
+			} else {
+				result.users = append(result.users, openID)
 			}
 		}
 	}
@@ -545,5 +570,94 @@ func (h handler) emitMembership(r *http.Request, chatID string, bot store.App, a
 	h.emitter.Emit(r.Context(), Event{
 		Type: kind, AppID: bot.AppID, ChatID: chatID, ActorID: actor.OpenID, ActorAppID: actor.AppID,
 		BotOpenID: bot.BotOpenID, At: h.state.Now(),
+	})
+}
+
+func (h handler) disbandChat(w http.ResponseWriter, r *http.Request) {
+	actor := caller(r)
+	var recipients []string
+	chat, err := store.Commit(r.Context(), h.state, func() (store.Chat, error) {
+		removed, receivedBy, err := h.state.DeleteIMChat(actor, r.PathValue("chat_id"), func(chat store.Chat) error {
+			if chat.ChatMode != "group" {
+				return protocol.APIError{Code: 232008, Status: http.StatusBadRequest, Message: "Your request specifies a chat whose type is NOT supported currently."}
+			}
+			if chat.OwnerID != actor.OpenID && (actor.IsUser || chat.CreatorID != actor.OpenID) {
+				return protocol.APIError{Code: 232017, Status: http.StatusBadRequest, Message: "No Permission: the operator must be the owner or authorized creator."}
+			}
+			return nil
+		})
+		recipients = receivedBy
+		return removed, err
+	})
+	if err != nil {
+		writeChatFailure(w, err)
+		return
+	}
+	h.emitChatLifecycle(r, chat, "im.chat.disbanded_v1", recipients, nil)
+	success(w, fields{})
+}
+
+func (h handler) emitChatLifecycle(r *http.Request, chat store.Chat, kind string, recipients, members []string) {
+	if len(recipients) == 0 {
+		return
+	}
+	actor := caller(r)
+	app, _ := h.state.Apps().Get(actor.AppID)
+	tenant := app.TenantKey
+	if tenant == "" {
+		tenant = "larkbox"
+	}
+	operator, _ := h.state.Users().Get(actor.OpenID)
+	operatorTenant := operator.TenantKey
+	if operatorTenant == "" {
+		operatorTenant = tenant
+	}
+	payload := fields{
+		"chat_id": chat.ChatID, "name": chat.Name, "external": chat.External,
+		"operator_id": h.eventIdentity(actor.OpenID), "operator_tenant_key": operatorTenant,
+	}
+	if len(chat.I18nNames) > 0 {
+		payload["i18n_names"] = chat.I18nNames
+	}
+	if len(members) > 0 {
+		users := make([]fields, 0, len(members))
+		for _, id := range members {
+			user, _ := h.state.Users().Get(id)
+			userTenant := user.TenantKey
+			if userTenant == "" {
+				userTenant = tenant
+			}
+			users = append(users, fields{"name": user.Name, "tenant_key": userTenant, "user_id": h.eventIdentity(id)})
+		}
+		payload["users"] = users
+	}
+	now := h.state.Now()
+	for _, appID := range recipients {
+		h.emitter.Emit(r.Context(), Event{Type: kind, AppID: appID, ChatID: chat.ChatID,
+			ActorID: actor.OpenID, ActorAppID: actor.AppID, At: now, Payload: payload})
+	}
+}
+
+func (h handler) emitFirstBotChat(r *http.Request, chatID string) {
+	actor := caller(r)
+	app, _ := h.state.Apps().Get(actor.AppID)
+	chat, ok := h.state.Chats().Get(chatID)
+	if !ok || chat.ChatMode != "p2p" || len(chat.MemberIDs) != 2 || !slices.Contains(chat.MemberIDs, app.BotOpenID) {
+		return
+	}
+	peer := chat.MemberIDs[0]
+	if peer == app.BotOpenID {
+		peer = chat.MemberIDs[1]
+	}
+	user, exists := h.state.Users().Get(peer)
+	if !exists {
+		return
+	}
+	operator, _ := h.state.Users().Get(actor.OpenID)
+	operator.OpenID = actor.OpenID
+	h.emitter.Emit(r.Context(), Event{
+		Type: event.FirstBotConversation, AppID: actor.AppID, ChatID: chatID,
+		ActorID: actor.OpenID, ActorAppID: actor.AppID, At: chat.CreatedAt,
+		Payload: event.FirstBotConversationPayload(chatID, operator, user),
 	})
 }

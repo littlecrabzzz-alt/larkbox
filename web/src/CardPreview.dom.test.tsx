@@ -35,6 +35,54 @@ function formCard(submitField: object, reason = "Initial reason", selected = ["e
 }
 
 describe("card form callbacks", () => {
+  it("shows image choices and submits image values as an array when multiple selection is enabled", () => {
+    const onAction = vi.fn();
+    const card = extractCard({ schema: "2.0", body: { elements: [{
+      tag: "form", name: "gallery", elements: [
+        {
+          tag: "select_img", name: "photos", multi_select: true, required: true,
+          options: [
+            { img_key: "image_start", value: "start", hover_tips: { tag: "plain_text", content: "Start" } },
+            { img_key: "image_middle", value: "middle", disabled: true },
+            { img_key: "image_end", value: "end" },
+          ],
+        },
+        { tag: "button", name: "save", form_action_type: "submit", text: { tag: "plain_text", content: "Save" } },
+      ],
+    }] } });
+    act(() => root.render(<CardPreview card={card} onAction={onAction} />));
+    expect(container.querySelector("img[alt=Start]")?.getAttribute("src")).toBe("/_sandbox/images/image_start");
+    const [start, middle, end] = Array.from(container.querySelectorAll<HTMLInputElement>("input[type=checkbox]"));
+    expect(middle.disabled).toBe(true);
+    const submit = container.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    act(() => submit.click());
+    expect(onAction).not.toHaveBeenCalled();
+    act(() => start.click());
+    act(() => end.click());
+    act(() => submit.click());
+    expect(onAction).toHaveBeenCalledExactlyOnceWith({
+      tag: "button", name: "save", value: undefined, form_value: { photos: ["start", "end"] },
+    });
+  });
+
+  it("preserves checkbox booleans and date offsets in a form submission", () => {
+    const onAction = vi.fn();
+    const card = extractCard({ schema: "2.0", body: { elements: [{
+      tag: "form", name: "schedule", elements: [
+        { tag: "checker", name: "urgent", checked: false, text: { tag: "plain_text", content: "Urgent" } },
+        { tag: "date_picker", name: "when", initial_date: "2026-04-09" },
+        { tag: "button", name: "save", form_action_type: "submit", text: { tag: "plain_text", content: "Save" } },
+      ],
+    }] } });
+    act(() => root.render(<CardPreview card={card} onAction={onAction} />));
+    const submit = container.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    act(() => submit.click());
+    expect(onAction.mock.calls[0][0].form_value).toEqual({ urgent: false, when: expect.stringMatching(/^2026-04-09 [+-]\d{4}$/) });
+    act(() => container.querySelector<HTMLInputElement>("input[type=checkbox]")!.click());
+    act(() => submit.click());
+    expect(onAction.mock.calls[1][0].form_value.urgent).toBe(true);
+  });
+
   it.each([{ action_type: "form_submit" }, { form_action_type: "submit" }])(
     "submits the form with %o and includes selected_values",
     (submitField) => {

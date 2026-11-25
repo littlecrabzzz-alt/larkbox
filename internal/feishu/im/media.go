@@ -178,8 +178,12 @@ func (h handler) downloadResource(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.PathValue("file_key")
 	if referencesResource(m, kind, key) {
+		owner := m.ResourceAppID
+		if owner == "" {
+			owner = m.AppID
+		}
 		media, found := h.state.Media().Get(key)
-		if found && media.Kind == kind && media.AppID == m.AppID && media.UploadType != "avatar" {
+		if found && media.Kind == kind && media.AppID == owner && media.UploadType != "avatar" {
 			writeMedia(w, media)
 			return
 		}

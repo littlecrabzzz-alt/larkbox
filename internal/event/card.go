@@ -71,7 +71,7 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 		return CardActionResult{}, err
 	}
 	message, user := target.Message, target.Operator
-	app, ok := d.state.Apps().Get(message.AppID)
+	app, ok := d.state.Apps().Get(message.CardAppID())
 	if !ok {
 		return CardActionResult{}, errors.New("interactive message has no known app")
 	}
@@ -99,7 +99,7 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 			URL: input.URL, PreviewToken: input.PreviewToken, OpenMessageID: message.ID, OpenChatID: message.ChatID,
 		},
 	}
-	job, err := d.newJob(ctx, message.AppID, cardActionTrigger, d.state.Now(), payload)
+	job, err := d.newJob(ctx, app.AppID, cardActionTrigger, d.state.Now(), payload)
 	if err != nil {
 		return CardActionResult{}, err
 	}

@@ -168,6 +168,7 @@ func TestCardElementCRUDAndBatch(t *testing.T) {
 		method, path, body string
 		code               int
 	}{
+		{"POST", "/elements", `{"sequence":1,"type":"append","target_element_id":"container","elements":"[{\"tag\":\"table\",\"columns\":[{\"name\":\"state\",\"data_type\":\"text\"}],\"rows\":[]}]"}`, 99992402},
 		{"POST", "/elements", `{"sequence":1,"type":"append","target_element_id":"container","elements":"[{\"tag\":\"plain_text\",\"element_id\":\"a\",\"content\":\"duplicate\"}]"}`, 300301},
 		{"POST", "/elements", `{"sequence":1,"type":"insert_before","target_element_id":"a","elements":"[{\"tag\":\"plain_text\",\"element_id\":\"b\",\"content\":\"before\"}]"}`, 0},
 		{"PUT", "/elements/b", `{"sequence":2,"element":"{\"tag\":\"markdown\",\"content\":\"replace\"}"}`, 0},

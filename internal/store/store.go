@@ -119,6 +119,7 @@ type Store struct {
 	apps                Collection[App]
 	users               Collection[User]
 	chats               Collection[Chat]
+	disbandedChats      map[string]struct{}
 	messages            Collection[Message]
 	messageUUIDs        map[messageRequest]messageDedup
 	chatMessages        map[string]map[string]struct{}
@@ -155,6 +156,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, cloneApp)
 	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, nil)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
+	s.disbandedChats = make(map[string]struct{})
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
 	s.messages.index = s.indexMessage
 	s.messages.prepare = func(m *Message) {
@@ -175,6 +177,26 @@ func New(now func() time.Time, traceCapacity int) *Store {
 
 // Apps returns the application and bot collection.
 func (s *Store) Apps() *Collection[App] { return &s.apps }
+
+// ChangeBotMenu updates a bot's effective menu under the app store lock.
+func (s *Store) ChangeBotMenu(appID string, change func(*config.BotMenu) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	app, ok := s.apps.items[appID]
+	if !ok || app.BotOpenID == "" {
+		return ErrNotFound
+	}
+	menu := app.BotMenu.Clone()
+	if err := change(&menu); err != nil {
+		return err
+	}
+	if err := menu.Validate(); err != nil {
+		return err
+	}
+	app.BotMenu = menu
+	s.apps.put(app)
+	return nil
+}
 
 // Users returns the user collection.
 func (s *Store) Users() *Collection[User] { return &s.users }
@@ -397,6 +419,7 @@ func (s *Store) reset(seed config.Config) {
 	clear(s.users.items)
 	s.userSeedOrder = slices.Clone(seed.Users)
 	clear(s.chats.items)
+	clear(s.disbandedChats)
 	clear(s.messages.items)
 	clear(s.messageUUIDs)
 	clear(s.chatMessages)
@@ -494,7 +517,9 @@ func (s *Store) QueryTraces(filter TraceFilter) []Trace {
 }
 
 func cloneApp(app App) App {
+	app.BotMenu = app.BotMenu.Clone()
 	app.RedirectURIs = slices.Clone(app.RedirectURIs)
+	app.EventTypes = slices.Clone(app.EventTypes)
 	return app
 }
 
@@ -523,6 +548,8 @@ func cloneChat(chat Chat) Chat {
 }
 
 func cloneMessage(message Message) Message {
+	message.forwardedIDs = slices.Clone(message.forwardedIDs)
+	message.invalidSources = slices.Clone(message.invalidSources)
 	message.Mentions = slices.Clone(message.Mentions)
 	message.Reactions = slices.Clone(message.Reactions)
 	return message

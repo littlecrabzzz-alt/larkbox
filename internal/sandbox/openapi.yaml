@@ -128,6 +128,37 @@ paths:
                   chats:
                     type: array
                     items: {$ref: '#/components/schemas/ChatSummary'}
+  /_sandbox/chats/open:
+    post:
+      operationId: openBotChat
+      summary: Simulate a user opening a bot conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id, operator_open_id]
+              additionalProperties: false
+              properties:
+                app_id: &identifier {type: string, minLength: 1}
+                operator_open_id: *identifier
+      responses:
+        "200":
+          description: Conversation and delivery outcome
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/InjectedEvent'}
+                  - type: object
+                    required: [chat_id, created, event_type]
+                    properties:
+                      chat_id: *identifier
+                      created: {type: boolean}
+                      event_type:
+                        enum: [p2p_chat_create, im.chat.access_event.bot_p2p_chat_entered_v1]
+        default: *error
   /_sandbox/chats/{chat_id}/messages:
     get:
       operationId: listChatMessages
@@ -171,6 +202,36 @@ paths:
         "200":
           description: Card entity with JSON and elements
           content: {application/json: {schema: {$ref: '#/components/schemas/Card'}}}
+        default: *error
+  /_sandbox/cards/validate:
+    post:
+      operationId: validateCard
+      summary: Validate an inline Card JSON 1.0 or 2.0 definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [card]
+              additionalProperties: false
+              properties:
+                card: {type: object}
+      responses:
+        "200":
+          description: Valid inline definition
+          content: {application/json: {schema: {type: object, properties: {valid: {type: boolean}}}}}
+        default: *error
+  /_sandbox/images/{image_key}:
+    get:
+      operationId: getCardImage
+      summary: Read uploaded raster image bytes for previews
+      parameters:
+        - {in: path, name: image_key, required: true, schema: *identifier}
+      responses:
+        "200":
+          description: Raster image
+          content: {image/*: {schema: {type: string, format: binary}}}
         default: *error
   /_sandbox/ws/sessions:
     get:
@@ -245,7 +306,7 @@ paths:
               required: [app_id]
               additionalProperties: false
               properties:
-                app_id: &identifier {type: string, minLength: 1}
+                app_id: *identifier
                 webhook_url: {type: [string, "null"], format: uri}
       responses:
         "200":
@@ -259,6 +320,61 @@ paths:
                   status_code: *integer
                   latency_ms: *integer
                   error: {type: string}
+        default: *error
+  /_sandbox/events/inject:
+    post:
+      operationId: injectEvent
+      summary: Deliver a custom event for an app regardless of subscriptions
+      description: Uses Schema 2.0 unless the event type is p2p_chat_create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id, event_type, event]
+              additionalProperties: false
+              properties:
+                app_id: *identifier
+                event_type: *identifier
+                event: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: Event ID and configured receiver outcomes
+          content: {application/json: {schema: {$ref: '#/components/schemas/InjectedEvent'}}}
+        default: *error
+  /_sandbox/bots/{app_id}/menu:
+    get:
+      operationId: getBotMenu
+      summary: Read a bot's effective menu
+      parameters:
+        - {in: path, name: app_id, required: true, schema: *identifier}
+      responses:
+        "200":
+          description: Effective bot menu
+          content: {application/json: {schema: {$ref: '#/components/schemas/BotMenu'}}}
+        default: *error
+  /_sandbox/bots/{app_id}/menu/click:
+    post:
+      operationId: clickBotMenu
+      summary: Simulate a user's click on a bot menu callback item
+      parameters:
+        - {in: path, name: app_id, required: true, schema: *identifier}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [menu_id, operator_open_id]
+              additionalProperties: false
+              properties:
+                menu_id: *identifier
+                operator_open_id: *identifier
+      responses:
+        "200":
+          description: Event ID and configured receiver outcomes
+          content: {application/json: {schema: {$ref: '#/components/schemas/InjectedEvent'}}}
         default: *error
   /_sandbox/traces:
     get:
@@ -410,6 +526,8 @@ components:
         verification_token: *string
         encrypt_key: *string
         redirect_uris: &strings {type: array, items: *string}
+        event_types: *strings
+        bot_menu: {$ref: '#/components/schemas/BotMenu'}
     AppSummary:
       type: object
       properties:
@@ -421,6 +539,40 @@ components:
         has_verification_token: *boolean
         redirect_uris: *strings
         active_ws_sessions: *integer
+        event_types: {type: [array, 'null'], items: *string}
+    BotMenu:
+      type: object
+      additionalProperties: false
+      properties:
+        bot_menu_enable: *boolean
+        bot_menu_display_strategy: *integer
+        bot_menus:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [menu_id, default_name, menu_content_type]
+            properties:
+              menu_id: *identifier
+              parent_menu_id: *string
+              sort: *integer
+              default_name: *identifier
+              i18n_name: {type: object, additionalProperties: *string}
+              menu_content_type: {type: integer, enum: [1, 2, 3, 4]}
+              event_key: *string
+              icon_file_key: *string
+              redirect_link:
+                type: object
+                additionalProperties: false
+                properties:
+                  pc_url: *string
+                  mobile_url: *string
+              ud_icon:
+                type: object
+                additionalProperties: false
+                properties:
+                  token: *string
+                  color: *string
     User:
       type: object
       required: [open_id]
@@ -515,6 +667,7 @@ components:
         message_id: *identifier
         chat_id: *identifier
         msg_type: *string
+        card_action_disabled: *boolean
         body: {type: object, properties: {content: *string}}
     SendMessage:
       type: object
@@ -566,6 +719,12 @@ components:
         channel: *string
         status_code: *integer
         error: *string
+    InjectedEvent:
+      type: object
+      properties:
+        event_id: *string
+        error: *string
+        deliveries: {type: array, items: {$ref: '#/components/schemas/Delivery'}}
     EventDelivery:
       type: object
       properties:

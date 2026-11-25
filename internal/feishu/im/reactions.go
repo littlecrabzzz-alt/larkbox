@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -67,8 +68,10 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 	if !actor.IsUser {
 		reaction.OperatorAppID = actor.AppID
 	}
-	_, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
-		return h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
+	var receivedBy []string
+	var created bool
+	err := h.state.Mutate(r.Context(), func() error {
+		_, recipients, err := h.state.ChangeIMMessageAndRecipients(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
 			if m.MsgType == "system" {
 				return protocol.APIError{Code: 231017, Message: "This operation is not supported for this message type.", Status: http.StatusBadRequest}
 			}
@@ -81,12 +84,18 @@ func (h handler) createReaction(w http.ResponseWriter, r *http.Request) {
 			m.ReactionOrder++
 			reaction.Order, reaction.CreatedAt = m.ReactionOrder, h.state.Now()
 			m.Reactions = append(m.Reactions, reaction)
+			created = true
 			return nil
 		})
+		receivedBy = recipients
+		return err
 	})
 	if err != nil {
 		reactionError(w, err)
 		return
+	}
+	if created {
+		h.emitReaction(r, "im.message.reaction.created_v1", actor, reaction, receivedBy)
 	}
 	success(w, h.reactionData(reaction, "open_id"))
 }
@@ -95,8 +104,9 @@ func (h handler) deleteReaction(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
 	id := r.PathValue("reaction_id")
 	var reaction store.Reaction
-	_, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
-		return h.state.ChangeIMMessage(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
+	var receivedBy []string
+	err := h.state.Mutate(r.Context(), func() error {
+		_, recipients, err := h.state.ChangeIMMessageAndRecipients(actor, r.PathValue("message_id"), func(m *store.Message, _ store.Chat) error {
 			index := slices.IndexFunc(m.Reactions, func(candidate store.Reaction) bool { return candidate.ID == id })
 			if index < 0 {
 				return reactionMissing
@@ -109,12 +119,36 @@ func (h handler) deleteReaction(w http.ResponseWriter, r *http.Request) {
 			m.Reactions = slices.Delete(m.Reactions, index, index+1)
 			return nil
 		})
+		receivedBy = recipients
+		return err
 	})
 	if err != nil {
 		reactionError(w, err)
 		return
 	}
+	h.emitReaction(r, "im.message.reaction.deleted_v1", actor, reaction, receivedBy)
 	success(w, h.reactionData(reaction, "open_id"))
+}
+
+func (h handler) emitReaction(r *http.Request, kind string, actor store.IMActor, reaction store.Reaction, recipients []string) {
+	now := h.state.Now()
+	payload := fields{
+		"message_id": r.PathValue("message_id"), "reaction_type": fields{"emoji_type": reaction.EmojiType},
+		"action_time": strconv.FormatInt(now.UnixMilli(), 10),
+	}
+	if actor.IsUser {
+		payload["operator_type"] = "user"
+		payload["user_id"] = h.eventIdentity(actor.OpenID)
+	} else {
+		payload["operator_type"] = "app"
+		payload["app_id"] = actor.AppID
+	}
+	for _, target := range recipients {
+		h.emitter.Emit(r.Context(), Event{
+			Type: kind, AppID: target, MessageID: r.PathValue("message_id"), ActorID: actor.OpenID, ActorAppID: actor.AppID,
+			At: now, Payload: payload,
+		})
+	}
 }
 
 func (h handler) listReactions(w http.ResponseWriter, r *http.Request) {

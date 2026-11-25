@@ -29,12 +29,18 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `POST /seed` | Accepts any of `apps`, `users`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates duplicate IDs, URLs, member and owner references, and card templates before committing. |
 | `POST /reset` | Empty body or `{}` restores the configured startup seed. An optional `{"seed":{...}}` replaces the state for this reset, with omitted lists treated as empty. Both forms clear runtime entities, credentials, traces, faults, and WebSocket tickets and disconnect existing sessions. |
 | `GET /chats` | Returns `{"chats":[...]}` with member IDs and settings. |
+| `POST /chats/open` | Requires `app_id` and `operator_open_id`. Opens or creates a user-to-bot conversation. Returns `{chat_id, created, event_type, event_id, deliveries, error}`. |
 | `GET /chats/{chat_id}/messages` | Returns `{"messages":[...]}` in creation order, including thread replies, sender and mention details, reactions, and available rendered and raw card JSON. Recalled messages retain metadata while their content is cleared. |
 | `GET /cards`, `GET /cards/{card_id}` | Return `{"cards":[...]}` or one card object with owning app, raw JSON, element index, streaming mode, last sequence, revision, and expiry timestamps. An inactive stream has a null `streaming_expires_at`. |
+| `POST /cards/validate` | Accepts `{"card":{...}}` with inline Card JSON 1.0 or 2.0. Returns `{"valid":true}` or a validation message in the standard error response. |
+| `GET /images/{image_key}` | Returns locally uploaded raster image bytes for card previews. |
 | `GET /ws/sessions` | Returns `{"ws_sessions":[...]}` with session, app, device and service IDs, and connection time. |
 | `POST /messages/send` | Persists a virtual user's message and returns HTTP 201 with `{message, deliveries}`. Each member bot has a delivery result containing its app ID, event ID, and per-channel status. |
 | `POST /cards/action` | Requires `message_id`, `operator_open_id`, and `action.tag`. Accepts SDK action fields `value`, `name`, `option`, `options`, `input_value`, `form_value`, `checked`, and `timezone`, plus optional top-level `host` and `delivery_type`. Returns `{toast, card_applied, card_error, message, delivery}` after callback processing. |
 | `POST /events/webhook/verify` | Requires `app_id`. Uses the registered URL or a one-call HTTP(S) `webhook_url` override. Uses a one-second control-plane deadline by default. An explicit file or environment verification timeout changes that deadline. Returns `{verified, status_code, error, latency_ms}`. A transport failure has status code 0 inside the result. |
+| `POST /events/inject` | Requires `app_id`, `event_type`, and an `event` object. Delivers through the configured receivers regardless of the app's event subscription list. Returns `{event_id, deliveries, error}`. |
+| `GET /bots/{app_id}/menu` | Returns the bot's effective menu in Application v7 field names. |
+| `POST /bots/{app_id}/menu/click` | Requires `menu_id` and `operator_open_id`. Dispatches the subscribed `application.bot.menu_v6` event for a callback item in an enabled menu. Returns `{event_id, deliveries, error}`. |
 | `POST /tokens/expire` | Requires `app_id`. Accepts `token` or a nonempty `tokens` list to expire individual credentials, or expires all credentials for that app when both fields are omitted. Explicit `null` selectors return 400. Returns `{"expired":n}` without echoing credentials. |
 
 A user message requires one sender selector (`sender_open_id` or
@@ -48,6 +54,22 @@ event metadata. Caller-supplied mention placeholders return 400. For replies,
 requires a parent. The message commit captures the eligible member bots.
 Those apps receive `im.message.receive_v1` through the same dispatcher used
 by Open API events.
+
+An app seed can specify `event_types` as an explicit list. Omission enables the
+legacy default events for receive, recall, and bot membership, and an empty array
+disables ordinary events. A subscribed chat open dispatches `p2p_chat_create`
+for a newly created chat and `im.chat.access_event.bot_p2p_chat_entered_v1` for
+an existing one. The first event uses the legacy flat envelope. An existing
+conversation returns its latest non-recalled message ID and time in the entry
+event when available. For unsubscribed chat opens or menu clicks, the response
+shows an empty event ID and delivery list.
+
+The menu mirrors the bot-menu fields in the Application v7 SDK. The sandbox
+applies updates immediately using the bot app's own tenant token. A menu item
+of type `2` uses a unique `event_key`. Open-link, submenu, and send-message items
+are represented in menu configuration. The click control returns HTTP 422 for
+these items because the control represents triggering a menu callback.
+
 Card actions use the dispatcher’s synchronous callback deadline and channel
 selection. A failed delivery is represented in the result for the saved
 message, callback, or verification. Request validation uses HTTP 400,
@@ -125,7 +147,7 @@ development or CI trust boundary. The embedded UI can use same-origin
 requests against the control plane.
 
 App reads expose identifiers, names, configured URLs, connection counts,
-and booleans for presence of webhook encryption and verification
+event subscriptions, and booleans for presence of webhook encryption and verification
 credentials. App secrets, encryption keys, verification tokens, OAuth
 credentials, and WebSocket tickets are excluded from control reads.
 Audit data uses a header allowlist, credential-field redaction, and bounded

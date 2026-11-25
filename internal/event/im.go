@@ -3,6 +3,7 @@ package event
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
@@ -15,10 +16,34 @@ const (
 	botDeleted     = "im.chat.member.bot.deleted_v1"
 )
 
+// FirstBotConversation is the legacy event for a newly created bot DM.
+const FirstBotConversation = "p2p_chat_create"
+
+// FirstBotConversationPayload describes the initiator and the human participant.
+func FirstBotConversationPayload(chatID string, operator, user store.User) any {
+	return map[string]any{
+		"chat_id":  chatID,
+		"operator": map[string]string{"open_id": operator.OpenID, "user_id": operator.UserID},
+		"user":     map[string]string{"open_id": user.OpenID, "user_id": user.UserID, "name": user.Name},
+	}
+}
+
 type userID struct {
 	OpenID  string `json:"open_id"`
 	UserID  string `json:"user_id,omitempty"`
 	UnionID string `json:"union_id,omitempty"`
+}
+
+func subscribed(app store.App, kind string) bool {
+	if app.EventTypes != nil {
+		return slices.Contains(app.EventTypes, kind)
+	}
+	switch kind {
+	case messageReceive, messageRecall, botAdded, botDeleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Dispatcher) userIdentity(openID string) userID {
@@ -62,6 +87,9 @@ func (d *Dispatcher) DispatchMessageReceive(ctx context.Context, appID string, m
 		return Result{}, fmt.Errorf("unknown event chat %q", m.ChatID)
 	}
 	app, _ := d.state.Apps().Get(appID)
+	if !subscribed(app, messageReceive) {
+		return Result{}, nil
+	}
 	from := sender{ID: d.userIdentity(m.SenderOpenID), Type: "user", TenantKey: d.userTenant(m.SenderOpenID, app)}
 	if !m.SenderIsUser && m.AppID != "" {
 		bot, _ := d.state.Apps().Get(m.AppID)
@@ -97,7 +125,7 @@ func (d *Dispatcher) DispatchMessageReceive(ctx context.Context, appID string, m
 			message.Mentions = append(message.Mentions, mapped)
 		}
 	}
-	return d.Dispatch(ctx, appID, messageReceive, struct {
+	return d.DispatchSubscribed(ctx, appID, messageReceive, struct {
 		Sender  sender          `json:"sender"`
 		Message receivedMessage `json:"message"`
 	}{from, message})

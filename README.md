@@ -148,7 +148,10 @@ for trusted local and test-network clients.
 Run `larkbox` (or `go run ./cmd/larkbox` from this repository) and open
 [http://127.0.0.1:8080/](http://127.0.0.1:8080/). The inspector lets you
 send messages as virtual users, interact with cards, inspect CardKit state
-and protocol traces, and manage sandbox fault rules. Start with `--no-ui`
+and protocol traces, and manage sandbox fault rules. In the CardKit inspector,
+use **Validate card JSON** to check an inline definition and preview it before
+sending. The chat preview can submit supported controls and display locally
+uploaded raster images. Start with `--no-ui`
 to disable the inspector while keeping the HTTP APIs available.
 
 `make build` and `go install github.com/littlecrabzzz-alt/larkbox/cmd/larkbox@latest`
@@ -157,6 +160,34 @@ development, install dependencies with `make ui-install`, then run
 `pnpm --dir web run dev` alongside larkbox on port 8080. Run `make ui-test`
 and `make ui-build` after frontend changes and commit the regenerated
 `internal/webui/dist/` with the source.
+
+### Conversation events
+
+Set an app's `event_types` in its config or seed entry to subscribe to a
+specific list. An omitted list keeps the default receive, recall, and bot
+membership events. An empty list disables ordinary events for that app.
+The controls for card callbacks and custom event injection can be used
+independently of those subscriptions.
+
+```sh
+larkbox sandbox inject-event --data '{"app_id":"cli_larkbox","event_type":"example.custom_v1","event":{"key":"sample"}}'
+larkbox sandbox open-chat --data '{"app_id":"cli_larkbox","operator_open_id":"ou_larkbox_bob"}'
+```
+
+Subscribe to `p2p_chat_create` and `im.chat.access_event.bot_p2p_chat_entered_v1`
+to receive the first conversation event and subsequent entries. The first
+event uses the legacy Feishu envelope with a top-level `uuid`.
+
+Configure menus with the app's own tenant token using
+`PATCH /open-apis/application/v7/applications/{app_id}/ability`.
+Send `bot.enable: true`, `bot.bot_menu_enable`, and the `bot.bot_menus` list
+from the Application v7 SDK. Changes take effect immediately in the sandbox.
+Read the effective menu at `GET /_sandbox/bots/{app_id}/menu` and click
+an event item with `POST /_sandbox/bots/{app_id}/menu/click`. Pass its
+`menu_id` and the simulated user's `operator_open_id` in the body.
+Subscribe to `application.bot.menu_v6` to receive the click. See the
+[control-plane contract](docs/adr/0002-sandbox-control-plane.md) for
+the receipt format and constraints.
 
 ## Non-Goals
 
@@ -233,9 +264,12 @@ Status Legend:
 |---|---|---|
 | `GET /open-apis/bot/v3/info` | Current bot profile & `open_id` | `SDK-Tested` |
 | `POST / GET /open-apis/im/v1/chats`, `GET /chats/:chat_id` | Create, list, inspect chats | `SDK-Tested` |
-| `GET / POST / DELETE /open-apis/im/v1/chats/:chat_id/members` | Manage members and emit bot join and leave events | `SDK-Tested` |
+| `GET / POST / DELETE /open-apis/im/v1/chats/:chat_id/members` | Manage members and emit bot and user join and leave events | `SDK-Tested` |
+| `DELETE /open-apis/im/v1/chats/:chat_id` | Disband a group and remove its message history | `SDK-Tested` |
+| `PATCH /open-apis/application/v7/applications/:app_id/ability` | Set an app's effective bot menu | `SDK-Tested` |
 | `POST /open-apis/im/v1/messages` | Strict `receive_id_type` & JSON-string `content` checks | `SDK-Tested` |
 | `POST /open-apis/im/v1/messages/:message_id/reply` | Maintains `parent_id`, `root_id`, `thread_id` | `SDK-Tested` |
+| `POST /open-apis/im/v1/messages/:message_id/forward`, `POST /open-apis/im/v1/messages/merge_forward` | Forward to a user, group, or topic. Read merged children by parent ID and attachments by child ID. Honors card forwarding settings | `SDK-Tested` |
 | `PATCH / PUT / DELETE / GET /open-apis/im/v1/messages/:message_id` | Card update, edit, recall, detail | `SDK-Tested` |
 | `GET /open-apis/im/v1/messages` | History list with sort & cursor pagination | `SDK-Tested` |
 | `POST / GET / DELETE /open-apis/im/v1/messages/:message_id/reactions` | Emoji reactions | `SDK-Tested` |
@@ -247,11 +281,16 @@ Status Legend:
 
 | Event / Transport | Notes | Status |
 |---|---|---|
-| HTTP Webhook (Schema 2.0) | `url_verification`, AES-256-CBC, `X-Lark-Signature`, 3s retry | `SDK-Tested` |
+| HTTP Webhook | Schema 2.0 and legacy first conversation events, `url_verification`, AES-256-CBC, `X-Lark-Signature`, 3s retry | `SDK-Tested` |
 | WebSocket Long Connection | `/callback/ws/endpoint` + `/ws/v2` Protobuf frames | `SDK-Tested` |
 | `im.message.receive_v1` | p2p, group, `@bot` mentions, replies & threads | `SDK-Tested` |
 | `im.message.recalled_v1` | Triggered on message recall | `SDK-Tested` |
 | `im.chat.member.bot.added_v1` / `deleted_v1` | Bot added/removed from chat | `SDK-Tested` |
+| `im.chat.member.user.added_v1` / `deleted_v1` | Users added to or removed from a group | `SDK-Tested` |
+| `im.chat.disbanded_v1` | Group dissolved | `SDK-Tested` |
+| `im.message.reaction.created_v1` / `deleted_v1` | A user or bot changed a reaction | `SDK-Tested` |
+| `p2p_chat_create`, `im.chat.access_event.bot_p2p_chat_entered_v1` | First conversation and later entries by a user | `SDK-Tested` |
+| `application.bot.menu_v6` | User clicked a configured callback item | `SDK-Tested` |
 | `card.action.trigger` | Synchronous button and form callbacks with toast and persisted card updates | `SDK-Tested` |
 
 ## Verification & Fidelity Strategy
@@ -259,9 +298,14 @@ Status Legend:
 To prevent mock drift, `larkbox` uses a four-layer verification pyramid:
 
 1. **Unit & State-Machine Tests**: Table-driven Go tests covering strict validation, error codes, crypto, and concurrent state mutations (`go test -race ./...`).
-2. **Official SDK Integration Tests**: End-to-end tests running official `github.com/larksuite/oapi-sdk-go/v3` (both REST and `ws.Client`) directly against an in-process `larkbox` server.
+2. **Official SDK Integration Tests**: Go tests exercise REST and events in process. The Node.js, Java, and Python jobs use the built binary to check a REST send, receive a WebSocket event, reply through REST from the handler, and verify the acknowledgment.
 3. **Golden Fixtures**: Normal CI checks REST and webhook contracts against synthetic sandbox reference fixtures. See the [live capture and sanitization guide](testdata/fixtures/README.md).
 4. **Live Differential Tests (`//go:build live`)**: Opt-in suite that runs the same scenarios against local `larkbox` or a real Feishu test tenant (`FEISHU_LIVE=1`), with typed contracts for response differences.
+
+Run the [Node.js, Java, and Python probes](tests/sdk_external/README.md)
+locally with pinned official SDK versions. Node.js long connections require
+an app ID beginning with `cli_` plus 16 hexadecimal characters. Use a
+platform-shaped ID in the local app seed for that client.
 
 Run the differential suite locally with the built-in test app and chat.
 

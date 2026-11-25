@@ -94,6 +94,10 @@ func (e eventEmitter) Emit(ctx context.Context, notification im.Event) {
 		e.dispatcher.EnqueueMessageRecalled(ctx, notification.AppID, notification.ChatID, notification.MessageID, notification.RecallType, notification.At)
 	case "im.chat.member.bot.added_v1", "im.chat.member.bot.deleted_v1":
 		e.dispatcher.EnqueueBotMembership(ctx, notification.AppID, notification.ChatID, notification.ActorID, notification.ActorAppID, notification.At, notification.Type == "im.chat.member.bot.added_v1")
+	default:
+		if notification.Payload != nil {
+			e.dispatcher.Enqueue(ctx, notification.AppID, notification.Type, notification.At, notification.Payload)
+		}
 	}
 	if e.next != nil && e.state.Current(ctx) {
 		e.next.Emit(ctx, notification)

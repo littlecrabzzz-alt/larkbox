@@ -30,6 +30,8 @@ type App struct {
 	VerificationToken string   `json:"verification_token" yaml:"verification_token"`
 	EncryptKey        string   `json:"encrypt_key" yaml:"encrypt_key"`
 	WebhookURL        string   `json:"webhook_url" yaml:"webhook_url"`
+	EventTypes        []string `json:"event_types,omitempty" yaml:"event_types,omitempty"`
+	BotMenu           BotMenu  `json:"bot_menu,omitempty" yaml:"bot_menu,omitempty"`
 	RedirectURIs      []string `json:"redirect_uris,omitempty" yaml:"redirect_uris,omitempty"`
 }
 
@@ -61,6 +63,7 @@ type Chat struct {
 	MemberIDs       []string `json:"member_ids" yaml:"member_ids"`
 	ChatSettings    `yaml:",inline"`
 	AppID           string            `json:"-" yaml:"-"`
+	CreatorID       string            `json:"-" yaml:"-"`
 	BotManagers     []string          `json:"-" yaml:"-"`
 	CreatedAt       time.Time         `json:"-" yaml:"-"`
 	MemberOrder     map[string]uint64 `json:"-" yaml:"-"`
@@ -339,6 +342,18 @@ func (cfg Config) ValidateSeeds() error {
 	}
 	if err := validateKeys("apps", cfg.Apps, func(app App) string { return app.AppID }); err != nil {
 		return err
+	}
+	for _, app := range cfg.Apps {
+		if err := app.BotMenu.Validate(); err != nil {
+			return fmt.Errorf("app %q bot_menu: %w", app.AppID, err)
+		}
+		seen := make(map[string]bool, len(app.EventTypes))
+		for _, kind := range app.EventTypes {
+			if kind == "" || strings.ContainsAny(kind, " \t\r\n") || seen[kind] {
+				return fmt.Errorf("app %q event_types must contain unique, nonempty event types", app.AppID)
+			}
+			seen[kind] = true
+		}
 	}
 	if err := validateKeys("users", cfg.Users, func(user User) string { return user.OpenID }); err != nil {
 		return err

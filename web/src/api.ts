@@ -40,6 +40,7 @@ export type Message = {
   raw_card_json?: unknown;
   rendered_card_json?: unknown;
   card_id?: string;
+  card_action_disabled?: boolean;
 };
 export type SendInput = {
   chat_id: string;
@@ -60,7 +61,9 @@ export type CardAction = {
   option?: string;
   options?: string[];
   input_value?: string;
-  form_value?: Record<string, string | string[]>;
+  checked?: boolean;
+  timezone?: string;
+  form_value?: Record<string, string | string[] | boolean>;
 };
 export type ActionResult = {
   toast: { type?: string; content?: string; i18n?: Record<string, string> } | null;
@@ -155,6 +158,7 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 export const sandbox = (path: string) => "/_sandbox" + path;
 export const messagesPath = (id: string) => sandbox(`/chats/${encodeURIComponent(id)}/messages`);
 export const cardPath = (id: string) => sandbox(`/cards/${encodeURIComponent(id)}`);
+export const cardImagePath = (key: string) => sandbox(`/images/${encodeURIComponent(key)}`);
 export const faultPath = (id: string) => sandbox(`/faults/${encodeURIComponent(id)}`);
 
 export const MAX_TRACE_LIMIT = 256;
@@ -176,6 +180,7 @@ const post = <T>(path: string, payload: unknown) =>
 export const sendMessage = (input: SendInput) => post<SendResult>("/messages/send", input);
 export const triggerCard = (message_id: string, operator_open_id: string, action: CardAction) =>
   post<ActionResult>("/cards/action", { message_id, operator_open_id, action });
+export const validateCard = (card: unknown) => post<{ valid: boolean; error?: string }>("/cards/validate", { card });
 export const resetSandbox = () => post<{ reset: boolean }>("/reset", {});
 export const addFault = (input: FaultSpec) => post<Fault>("/faults", input);
 export const verifyWebhook = (app_id: string, webhook_url?: string) =>

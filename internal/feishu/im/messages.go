@@ -51,7 +51,7 @@ func (h handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		input.Peer = user.OpenID
 	}
-	message, err := store.Commit(r.Context(), h.state, func() (store.Message, error) { return h.state.CreateIMMessage(caller(r), input) })
+	message, err := h.createMessage(r, input)
 	if err != nil {
 		writeFailure(w, err, missingChat)
 		return
@@ -77,7 +77,7 @@ func (h handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.ParentID = r.PathValue("message_id")
-	message, err := store.Commit(r.Context(), h.state, func() (store.Message, error) { return h.state.CreateIMMessage(caller(r), input) })
+	message, err := h.createMessage(r, input)
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
@@ -99,6 +99,19 @@ func (h handler) newMessage(w http.ResponseWriter, req messageRequest) (store.Ne
 		MsgType: req.MsgType, Content: encoded, UUID: req.UUID, Mentions: mentions,
 		CardID: interactiveCardID(req.MsgType, content),
 	}, true
+}
+
+func (h handler) createMessage(r *http.Request, input store.NewMessage) (store.Message, error) {
+	var created bool
+	message, err := store.Commit(r.Context(), h.state, func() (store.Message, error) {
+		message, first, err := h.state.CreateIMMessage(caller(r), input)
+		created = first
+		return message, err
+	})
+	if err == nil && created {
+		h.emitFirstBotChat(r, message.ChatID)
+	}
+	return message, err
 }
 
 func decodeContentObject(encoded string) map[string]any {
@@ -361,7 +374,7 @@ func (h handler) messageData(m store.Message, kind string, explicitIDType bool) 
 		"deleted": m.Deleted, "updated": m.Updated, "chat_id": m.ChatID, "sender": sender,
 		"body": fields{"content": payload}, "mentions": mentions,
 	}
-	for key, value := range map[string]string{"root_id": m.RootID, "parent_id": m.ParentID, "thread_id": m.ThreadID} {
+	for key, value := range map[string]string{"root_id": m.RootID, "parent_id": m.ParentID, "thread_id": m.ThreadID, "upper_message_id": m.UpperMessageID} {
 		if value != "" {
 			result[key] = value
 		}
@@ -378,13 +391,18 @@ func (h handler) getMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := h.state.IMMessage(caller(r), r.PathValue("message_id"))
+	actor := caller(r)
+	messages, err := h.state.IMMessageItems(actor, r.PathValue("message_id"))
 	if err != nil {
 		writeFailure(w, err, missingMessage)
 		return
 	}
 	_, explicitIDType := r.URL.Query()["user_id_type"]
-	success(w, fields{"items": []fields{h.messageData(cardForRead(m, caller(r).AppID, original), kind, explicitIDType)}})
+	items := make([]fields, 0, len(messages))
+	for _, m := range messages {
+		items = append(items, h.messageData(cardForRead(m, actor.AppID, original), kind, explicitIDType))
+	}
+	success(w, fields{"items": items})
 }
 
 func sentBy(actor store.IMActor, m *store.Message) bool {
@@ -421,6 +439,9 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 				return protocol.NewError(protocol.IMInvalidParameter, nil)
 			}
 			if patch {
+				if m.Forwarded {
+					return noPermission
+				}
 				if m.CardID != "" {
 					return protocol.APIError{Code: protocol.IMInvalidParameter, Message: "Use CardKit APIs to update a message card entity.", Status: http.StatusBadRequest}
 				}

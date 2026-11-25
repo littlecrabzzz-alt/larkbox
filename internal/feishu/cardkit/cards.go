@@ -177,7 +177,7 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 func validEntityCard(doc map[string]any) bool {
 	_, rootElements := doc["elements"]
 	_, fallback := doc["fallback"]
-	return doc["schema"] == "2.0" && !rootElements && !fallback && ValidMessageCard(doc) &&
+	return doc["schema"] == "2.0" && !rootElements && !fallback && validMessageCardShape(doc) &&
 		optionalCardCheck(doc, "body", func(value any) bool {
 			body, ok := value.(map[string]any)
 			return ok && optionalCardType[string](body, "direction", "horizontal_spacing", "vertical_spacing", "horizontal_align", "vertical_align", "padding")
@@ -194,7 +194,7 @@ func validCardSettings(doc map[string]any) bool {
 
 func validConfig(value any) bool {
 	config, ok := value.(map[string]any)
-	return ok && optionalCardType[bool](config, "streaming_mode", "update_multi", "enable_forward", "wide_screen_mode") &&
+	return ok && optionalCardType[bool](config, "streaming_mode", "update_multi", "enable_forward", "enable_forward_interaction", "wide_screen_mode") &&
 		optionalObject(config, "style") &&
 		optionalCardCheck(config, "summary", func(value any) bool {
 			summary, ok := value.(map[string]any)
@@ -260,6 +260,7 @@ type elementSlot struct {
 	parent map[string]any
 	key    string
 	index  int // -1 for a component stored directly in an object property
+	inForm bool
 }
 
 func (s elementSlot) list() []any {
@@ -283,29 +284,34 @@ func (s elementSlot) remove() {
 	s.parent[s.key] = slices.Delete(s.list(), s.index, s.index+1)
 }
 
-func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) bool {
+func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) {
+	walkWithin(parent, false, visit)
+}
+
+func walkWithin(parent map[string]any, inForm bool, visit func(elementSlot, map[string]any) bool) bool {
+	inForm = inForm || parent["tag"] == "form"
 	// Walk only structural properties so an ID in callback values, chart data,
 	// template variables, or other opaque payloads does not become a card element.
 	for _, key := range []string{"body", "header", "elements", "columns", "actions", "fields", "options", "extra", "text", "title", "subtitle", "alt", "label", "placeholder", "text_tag_list"} {
 		switch value := parent[key].(type) {
 		case map[string]any:
-			if visitNode(elementSlot{parent, key, -1}, value, visit) {
+			if visitNode(elementSlot{parent, key, -1, inForm}, value, visit) {
 				return true
 			}
 		case []any:
 			for i, item := range value {
-				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{parent, key, i}, node, visit) {
+				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{parent, key, i, inForm}, node, visit) {
 					return true
 				}
 			}
 		}
 	}
-	// Localized suffix tags contain the same element shape under locale keys.
-	if locales, ok := parent["i18n_text_tag_list"].(map[string]any); ok {
+	for _, field := range []string{"i18n_text_tag_list", "i18n_elements"} {
+		locales, _ := parent[field].(map[string]any)
 		for _, locale := range slices.Sorted(maps.Keys(locales)) {
 			nodes, _ := locales[locale].([]any)
 			for i, item := range nodes {
-				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{locales, locale, i}, node, visit) {
+				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{locales, locale, i, inForm}, node, visit) {
 					return true
 				}
 			}
@@ -316,7 +322,7 @@ func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) b
 
 func visitNode(slot elementSlot, node map[string]any, visit func(elementSlot, map[string]any) bool) bool {
 	tag, _ := node["tag"].(string)
-	return (tag != "" && visit(slot, node)) || walk(node, visit)
+	return (tag != "" && visit(slot, node)) || walkWithin(node, slot.inForm, visit)
 }
 
 func findElement(doc map[string]any, id string) (elementSlot, map[string]any) {
@@ -523,6 +529,9 @@ func validateEditedCard(doc map[string]any) error {
 	}
 	if config, _ := doc["config"].(map[string]any); config["update_multi"] == false {
 		return errUnsharedCard
+	}
+	if field, issue := imagePickerIssue(doc); field != "" {
+		return invalid(field, issue)
 	}
 	if !validEntityCard(doc) || !validCardSettings(doc) {
 		return invalid("data", "The operation would leave an invalid card.")

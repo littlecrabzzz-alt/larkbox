@@ -1,6 +1,6 @@
 import { useContext, useState, type FormEvent } from "react";
 import {
-  cardPath, MAX_TRACE_LIMIT, remove, sandbox, tracesPath, type AppInfo, type CardEntity, type Trace, type TraceFilters,
+  cardPath, MAX_TRACE_LIMIT, remove, sandbox, tracesPath, validateCard, type AppInfo, type CardEntity, type Trace, type TraceFilters,
 } from "./api";
 import { CardPreview, extractCard } from "./CardPreview";
 import { AppOptions, Badge, Empty, formatTime, Json, Notice, RefreshContext, useOperation, useResource } from "./common";
@@ -55,8 +55,45 @@ export function CardKit() {
         <h3>Raw card JSON</h3>
         <Json value={card.card_json} />
       </div>}
+      <CardJSONCheck />
     </section>
   </div>;
+}
+
+function CardJSONCheck() {
+  const [source, setSource] = useState("");
+  const [preview, setPreview] = useState<ReturnType<typeof extractCard>>();
+  const operation = useOperation();
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPreview(undefined);
+    void operation.run(async () => {
+      let card: unknown;
+      try {
+        card = JSON.parse(source);
+      } catch (error) {
+        throw new Error("Invalid JSON. " + (error instanceof Error ? error.message : ""));
+      }
+      await validateCard(card);
+      setPreview(extractCard(card));
+    });
+  }
+
+  return <details className="panel-content card-panel">
+    <summary>Validate card JSON</summary>
+    <form className="stack" onSubmit={submit}>
+      <label>Card JSON<textarea className="card-json-input" value={source} rows={8}
+        onChange={(event) => { setSource(event.target.value); setPreview(undefined); }}
+        spellCheck={false} disabled={operation.busy} required /></label>
+      <button type="submit" className="primary" disabled={operation.busy || !source.trim()}>Validate and preview</button>
+      {operation.error && <Notice tone="error">{operation.error}</Notice>}
+    </form>
+    {preview && <div className="stack">
+      <Notice tone="success">Card JSON passed validation.</Notice>
+      <CardPreview card={preview} />
+    </div>}
+  </details>;
 }
 
 function traceKey(trace: Trace) {

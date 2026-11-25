@@ -32,6 +32,7 @@ type Event struct {
 	RecallType string
 	BotOpenID  string
 	At         time.Time
+	Payload    any
 }
 
 // EventEmitter receives committed IM events. Implementations must support
@@ -67,6 +68,7 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store, emitter EventEmitter
 		{"POST", "chats", h.createChat, false},
 		{"GET", "chats", h.listChats, false},
 		{"GET", "chats/{chat_id}", h.getChat, false},
+		{"DELETE", "chats/{chat_id}", h.disbandChat, false},
 		{"GET", "chats/{chat_id}/members", h.listMembers, false},
 		{"POST", "chats/{chat_id}/members", h.changeMembers, false},
 		{"DELETE", "chats/{chat_id}/members", h.changeMembers, false},
@@ -74,6 +76,8 @@ func RegisterRoutes(mux *http.ServeMux, state *store.Store, emitter EventEmitter
 		{"GET", "messages", h.listMessages, false},
 		{"GET", "messages/{message_id}", h.getMessage, false},
 		{"POST", "messages/{message_id}/reply", h.replyMessage, false},
+		{"POST", "messages/{message_id}/forward", h.forwardMessage, false},
+		{"POST", "messages/merge_forward", h.forwardMessage, true},
 		{"PATCH", "messages/{message_id}", h.editMessage, false},
 		{"PUT", "messages/{message_id}", h.editMessage, true},
 		{"DELETE", "messages/{message_id}", h.recallMessage, false},
@@ -117,6 +121,18 @@ func caller(r *http.Request) store.IMActor {
 	return actor
 }
 
+func (h handler) eventIdentity(openID string) fields {
+	user, _ := h.state.Users().Get(openID)
+	identity := fields{"open_id": openID}
+	if user.UserID != "" {
+		identity["user_id"] = user.UserID
+	}
+	if user.UnionID != "" {
+		identity["union_id"] = user.UnionID
+	}
+	return identity
+}
+
 func success(w http.ResponseWriter, data any) {
 	_ = protocol.WriteJSON(w, http.StatusOK, protocol.Envelope{Code: protocol.Success, Msg: "success", Data: data})
 }
@@ -143,6 +159,8 @@ func writeFailure(w http.ResponseWriter, err error, missing protocol.APIError) {
 		_ = protocol.WriteError(w, apiErr)
 	case errors.Is(err, store.ErrOutsideChat):
 		_ = protocol.WriteError(w, protocol.NewError(protocol.IMBotOutsideChat, nil))
+	case errors.Is(err, store.ErrChatDisbanded):
+		fail(w, 232009, "Your request specifies a chat which has already been dissolved.")
 	case errors.Is(err, store.ErrMessageCardNotFound):
 		fail(w, 230001, "The card entity does not exist.")
 	case errors.Is(err, store.ErrCardExpired):
