@@ -26,8 +26,7 @@ function parse(value: unknown): Node | undefined {
 }
 
 export function messageCard(message: Pick<Message, "raw_card_json" | "rendered_card_json" | "content">) {
-  return [message.raw_card_json, message.rendered_card_json, message.content]
-    .map(extractCard).find((card) => card !== undefined);
+  return extractCard(message.raw_card_json) ?? extractCard(message.rendered_card_json) ?? extractCard(message.content);
 }
 
 export function extractCard(value: unknown) {
@@ -38,6 +37,7 @@ export function extractCard(value: unknown) {
   const elements = record(card.body)?.elements ?? card.elements ?? english(card.i18n_elements);
   if (!header && !Array.isArray(elements)) return;
   return {
+    version: JSON.stringify(card),
     title: text(header?.title ?? card.title),
     subtitle: text(header?.subtitle),
     template: string(header?.template),
@@ -55,12 +55,12 @@ export function actionFor(node: Node, fields: Partial<Pick<CardAction, "option" 
   };
 }
 
-export function formValues(values: FormData) {
+export function formValues(values: FormData, multipleNames = new Set<string>()) {
   const fields = new Map<string, string | string[]>();
   for (const [name, value] of values) {
     if (typeof value !== "string") continue;
     const previous = fields.get(name);
-    fields.set(name, previous === undefined ? value : [previous].flat().concat(value));
+    fields.set(name, previous === undefined && !multipleNames.has(name) ? value : [previous ?? []].flat().concat(value));
   }
   return Object.fromEntries(fields);
 }
@@ -118,12 +118,21 @@ export function CardPreview({ card, onAction }: { card: ReturnType<typeof extrac
     {(card.title || card.subtitle) && <header className={`card-header card-${tone}`}>
       <strong>{card.title}</strong>{card.subtitle && <small>{card.subtitle}</small>}
     </header>}
-    <div className="card-elements"><Elements items={card.elements} act={onAction} /></div>
+    <div className="card-elements"><Elements key={card.version} items={card.elements} act={onAction} /></div>
   </div>;
 }
 
 function Elements({ items, act, inForm = false }: { items: unknown[]; act?: Act; inForm?: boolean }) {
-  return <>{items.map((item, index) => <Element key={index} item={item} act={act} inForm={inForm} />)}</>;
+  const occurrences = new Map<string, number>();
+  return <>{items.map((item, index) => {
+    const node = record(item);
+    const id = string(node?.element_id);
+    const name = string(node?.name);
+    const identity = id ? `id:${id}` : name ? `name:${string(node?.tag)}:${name}` : `index:${index}`;
+    const count = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, count + 1);
+    return <Element key={JSON.stringify([identity, count])} item={item} act={act} inForm={inForm} />;
+  })}</>;
 }
 
 function Element({ item, act, inForm }: { item: unknown; act?: Act; inForm: boolean }) {
@@ -173,7 +182,7 @@ function CardButton({ node, act, inForm }: { node: Node; act?: Act; inForm: bool
   const destination = jump?.default_url ?? node.url ?? record(node.multi_url)?.url;
   const href = safeURL(destination);
   const action = actionFor(node);
-  const submit = inForm && node.action_type === "form_submit";
+  const submit = inForm && (node.action_type === "form_submit" || node.form_action_type === "submit");
   const label = text(node.text) || "Run action";
   const className = node.type === "primary" ? "button primary" : node.type === "danger" ? "button danger" : "button";
   if (href && !action.value && !submit && node.disabled !== true) return <Link className={className} href={href}>{label}</Link>;
@@ -184,7 +193,9 @@ function CardButton({ node, act, inForm }: { node: Node; act?: Act; inForm: bool
       const form = event.currentTarget.form;
       if (submit && form) {
         if (!HTMLFormElement.prototype.reportValidity.call(form)) return;
-        act?.({ ...action, form_value: formValues(new FormData(form)) });
+        const selects = HTMLFormElement.prototype.querySelectorAll.call(form, "select[multiple][name]:enabled");
+        const multipleNames = new Set(Array.from(selects, (select) => select.getAttribute("name")!));
+        act?.({ ...action, form_value: formValues(new FormData(form), multipleNames) });
       } else {
         act?.(action);
       }
@@ -209,7 +220,7 @@ function CardInput({ node, act, inForm }: { node: Node; act?: Act; inForm: boole
 function CardSelect({ node, act, inForm }: { node: Node; act?: Act; inForm: boolean }) {
   const multiple = node.tag === "multi_select_static";
   const [selection, setSelection] = useState<string[]>();
-  const initial = multiple ? list(node.initial_options).map(string) : [string(node.initial_option)];
+  const initial = multiple ? list(node.selected_values ?? node.initial_options).map(string) : [string(node.initial_option)];
   const values = selection ?? initial;
   const label = text(node.label) || text(node.placeholder) || string(node.name) || "Card selection";
   const disabled = !act || node.disabled === true;

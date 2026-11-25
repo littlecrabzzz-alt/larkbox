@@ -1,6 +1,6 @@
 import { useContext, useState, type FormEvent } from "react";
 import {
-  cardPath, remove, sandbox, tracesPath, type AppInfo, type CardEntity, type Trace, type TraceFilters,
+  cardPath, MAX_TRACE_LIMIT, remove, sandbox, tracesPath, type AppInfo, type CardEntity, type Trace, type TraceFilters,
 } from "./api";
 import { CardPreview, extractCard } from "./CardPreview";
 import { AppOptions, Badge, Empty, formatTime, Json, Notice, RefreshContext, useOperation, useResource } from "./common";
@@ -77,13 +77,16 @@ export function ProtocolTraces({ apps }: { apps: AppInfo[] }) {
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
+    const limit = String(values.get("limit") ?? "");
     setFilters({
       direction: String(values.get("direction")),
       app_id: String(values.get("app_id")),
       method: String(values.get("method")).toUpperCase(),
       path_prefix: String(values.get("path_prefix")),
       event_type: String(values.get("event_type")),
+      event_id: String(values.get("event_id")),
       channel: String(values.get("channel")),
+      limit: limit === "" ? undefined : Number(limit),
     });
     select("");
   }
@@ -106,9 +109,11 @@ export function ProtocolTraces({ apps }: { apps: AppInfo[] }) {
         <label>Method<input name="method" placeholder="GET" /></label>
         <label>Path prefix<input name="path_prefix" placeholder="/open-apis/im/" /></label>
         <label>Event type<input name="event_type" placeholder="im.message.receive_v1" /></label>
+        <label>Event ID<input name="event_id" /></label>
         <label>Channel<select name="channel">
           <option value="">All channels</option><option value="webhook">Webhook</option><option value="websocket">WebSocket</option>
         </select></label>
+        <label>Limit<input name="limit" type="number" min="1" max={MAX_TRACE_LIMIT} placeholder={String(MAX_TRACE_LIMIT)} /></label>
         <button type="submit" className="primary">Apply filters</button>
       </form>
     </section>

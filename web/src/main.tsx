@@ -28,11 +28,11 @@ function App() {
 
 function Inspector({ setAuto }: { setAuto: (auto: boolean) => void }) {
   const { auto, refresh } = useContext(RefreshContext);
-  const state = useResource<Snapshot>(sandbox("/state"));
+  const [epoch, setEpoch] = useState(0);
+  const state = useResource<Snapshot>(sandbox("/state"), epoch);
   const health = useResource<Health>("/healthz");
   const [path, setPath] = useState(currentPath);
   const [confirm, setConfirm] = useState(false);
-  const [epoch, setEpoch] = useState(0);
   const [resetDone, setResetDone] = useState(false);
   const reset = useOperation();
   const cancelReset = useRef<HTMLButtonElement>(null);
@@ -66,7 +66,6 @@ function Inspector({ setAuto }: { setAuto: (auto: boolean) => void }) {
   const strict = state?.data?.strict_mode ?? health?.data?.strict_mode;
   const online = health?.data?.status === "ok" && !health.error;
   const healthText = online ? "Online" : health ? "Unavailable" : "Connecting";
-  const apps = state?.data?.apps ?? [];
 
   return <>
     <a className="skip-link" href="#main">Skip to workspace</a>
@@ -118,13 +117,13 @@ function Inspector({ setAuto }: { setAuto: (auto: boolean) => void }) {
         <div><h1>{active.label}</h1><p>{active.description}</p></div>
         {health?.data && <code className="version">{health.data.version}</code>}
       </div>
-      <div key={active.path + epoch}>
-        {active.path === "/chats" && (state?.data
-          ? <ChatPlayground state={state.data} />
-          : <section className="panel"><Empty title={state?.error ? "Sandbox unavailable" : "Loading sandbox…"} /></section>)}
-        {active.path === "/cards" && <CardKit />}
-        {active.path === "/traces" && <ProtocolTraces apps={apps} />}
-        {active.path === "/faults" && <Tools apps={apps} />}
+      <div key={active.path}>
+        {state?.data ? <>
+          {active.path === "/chats" && <ChatPlayground state={state.data} />}
+          {active.path === "/cards" && <CardKit />}
+          {active.path === "/traces" && <ProtocolTraces apps={state.data.apps} />}
+          {active.path === "/faults" && <Tools apps={state.data.apps} />}
+        </> : <section className="panel"><Empty title={state?.error ? "Sandbox unavailable" : "Loading sandbox…"} /></section>}
       </div>
     </main>
   </>;

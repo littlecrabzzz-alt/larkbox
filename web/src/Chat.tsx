@@ -180,7 +180,6 @@ function Composer({ chat, sender, hasBot, reply, cancelReply, textarea }: {
   const [result, setResult] = useState<SendResult>();
   const operation = useOperation();
   const canMention = hasBot && (mode === "text" || ["text", "post"].includes(type.trim()));
-  const failed = result?.deliveries.some((target) => target.error || target.deliveries.some((delivery) => delivery.error));
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -232,9 +231,39 @@ function Composer({ chat, sender, hasBot, reply, cancelReply, textarea }: {
       <button className="primary" type="submit" disabled={!sender || !draft.trim() || operation.busy}>{operation.busy ? "Sending…" : "Send message"}</button>
     </div>
     {operation.error && <Notice tone="error">{operation.error}</Notice>}
-    {result && <Notice tone={failed ? "warning" : "success"}>
-      {failed ? "Message saved. A bot delivery failed." : result.deliveries.length ? "Message saved and sent to member bots." : "Message saved. No bot deliveries."}
-      {result.deliveries.length > 0 && <details><summary>Delivery results</summary><Json value={result.deliveries} /></details>}
-    </Notice>}
+    {result && <DeliveryStatus targets={result.deliveries} />}
   </form>;
+}
+
+function channelName(channel: string) {
+  if (channel === "websocket") return "WebSocket";
+  if (channel === "webhook") return "webhook";
+  return channel || "unknown transport";
+}
+
+export function DeliveryStatus({ targets }: { targets: SendResult["deliveries"] }) {
+  const channels = new Map<string, number>();
+  const failures: string[] = [];
+  for (const target of targets) {
+    const previousFailures = failures.length;
+    for (const delivery of target.deliveries) {
+      const channel = channelName(delivery.channel);
+      if (delivery.error || delivery.status_code < 200 || delivery.status_code >= 300) {
+        failures.push(`${target.app_id} (${channel}): ${delivery.error || (delivery.status_code ? `status ${delivery.status_code}` : "no response")}`);
+      } else {
+        channels.set(channel, (channels.get(channel) ?? 0) + 1);
+      }
+    }
+    if (target.error && previousFailures === failures.length) failures.push(`${target.app_id}: ${target.error}`);
+  }
+
+  const delivered = [...channels].map(([channel, count]) => `${count} via ${channel}`).join(", ");
+  const outcome = failures.length
+    ? `Message saved with delivery failures.${delivered ? ` Delivered ${delivered}.` : ""}`
+    : delivered ? `Message saved and delivered ${delivered}.` : "Message saved locally. No active webhook or WebSocket transport.";
+  return <Notice tone={failures.length ? "warning" : delivered ? "success" : "info"}>
+    {outcome}
+    {failures.length > 0 && <ul>{failures.map((failure, index) => <li key={index}>{failure}</li>)}</ul>}
+    {targets.length > 0 && <details><summary>Delivery results</summary><Json value={targets} /></details>}
+  </Notice>;
 }

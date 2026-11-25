@@ -15,6 +15,14 @@ describe("sandbox API", () => {
       .toBe("/_sandbox/traces?direction=inbound&path_prefix=%2Fopen-apis%2Fim%2F");
   });
 
+  it("encodes event IDs and constrains the trace limit to 1–256", () => {
+    expect(tracesPath({ direction: "outbound", event_id: " evt/2? ", limit: 25 }))
+      .toBe("/_sandbox/traces?direction=outbound&event_id=evt%2F2%3F&limit=25");
+    expect(tracesPath({ limit: 0 })).toBe("/_sandbox/traces?limit=1");
+    expect(tracesPath({ limit: 300 })).toBe("/_sandbox/traces?limit=256");
+    expect(tracesPath({ limit: Number.NaN })).toBe("/_sandbox/traces");
+  });
+
   it("posts JSON to the exact control-plane paths and preserves wire field names", async () => {
     const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response("{}"));
     vi.stubGlobal("fetch", fetcher);

@@ -89,7 +89,7 @@ export type Matchers = {
   event_type?: string;
   channel?: string;
 };
-export type TraceFilters = Matchers & { direction?: string };
+export type TraceFilters = Matchers & { direction?: string; event_id?: string; limit?: number };
 export type Trace = {
   direction: "inbound" | "outbound";
   started_at: string;
@@ -116,8 +116,12 @@ export type FaultKind = "latency" | "rate_limit" | "http_error" | "token_expiry"
 export type FaultSpec = Matchers & {
   kind: FaultKind;
   remaining_hits?: number;
+  probability?: number;
   delay_ms?: number;
+  retry_after?: number;
   status_code?: number;
+  error_code?: number;
+  error_msg?: string;
   duplicate_count?: number;
 };
 export type Fault = FaultSpec & { fault_id: string };
@@ -153,10 +157,15 @@ export const messagesPath = (id: string) => sandbox(`/chats/${encodeURIComponent
 export const cardPath = (id: string) => sandbox(`/cards/${encodeURIComponent(id)}`);
 export const faultPath = (id: string) => sandbox(`/faults/${encodeURIComponent(id)}`);
 
-export function tracesPath(filters: TraceFilters) {
+export const MAX_TRACE_LIMIT = 256;
+
+export function tracesPath({ limit, ...filters }: TraceFilters) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
     if (value?.trim()) query.set(key, value.trim());
+  }
+  if (limit !== undefined && Number.isFinite(limit)) {
+    query.set("limit", String(Math.max(1, Math.min(MAX_TRACE_LIMIT, Math.trunc(limit)))));
   }
   return sandbox("/traces") + (query.size ? "?" + query.toString() : "");
 }

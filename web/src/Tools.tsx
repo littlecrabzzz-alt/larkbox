@@ -50,6 +50,22 @@ function ActiveFaults() {
   </section>;
 }
 
+export function buildFaultSpec(kind: FaultKind, values: FormData): FaultSpec {
+  const value = (name: string) => String(values.get(name) ?? "").trim() || undefined;
+  const number = (name: string) => {
+    const raw = value(name);
+    return raw === undefined ? undefined : Number(raw);
+  };
+  return {
+    kind, app_id: value("app_id"), method: value("method")?.toUpperCase(),
+    path_prefix: value("path_prefix"), event_type: value("event_type"), channel: value("channel"),
+    remaining_hits: number("remaining_hits"), probability: number("probability"),
+    delay_ms: number("delay_ms"), retry_after: number("retry_after"),
+    status_code: number("status_code"), error_code: number("error_code"), error_msg: value("error_msg"),
+    duplicate_count: number("duplicate_count"),
+  };
+}
+
 function CreateFault({ apps }: { apps: AppInfo[] }) {
   const [kind, setKind] = useState<FaultKind>("latency");
   const [created, setCreated] = useState("");
@@ -59,20 +75,10 @@ function CreateFault({ apps }: { apps: AppInfo[] }) {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const values = new FormData(event.currentTarget);
-    const value = (name: string) => String(values.get(name) ?? "").trim() || undefined;
-    const number = (name: string) => {
-      const raw = value(name);
-      return raw === undefined ? undefined : Number(raw);
-    };
-    const spec: FaultSpec = {
-      kind, app_id: value("app_id"), method: value("method")?.toUpperCase(),
-      path_prefix: value("path_prefix"), event_type: value("event_type"), channel: value("channel"),
-      remaining_hits: number("remaining_hits"), delay_ms: number("delay_ms"),
-      status_code: number("status_code"), duplicate_count: number("duplicate_count"),
-    };
+    const spec = buildFaultSpec(kind, new FormData(event.currentTarget));
     void operation.run(async () => {
       setCreated("");
+      if (spec.probability === 0) throw new Error("Probability must be greater than 0 and at most 1.");
       const result = await addFault(spec);
       setCreated(result.fault_id);
       refresh();
@@ -87,6 +93,7 @@ function CreateFault({ apps }: { apps: AppInfo[] }) {
       </select></label>
       <label>App<select name="app_id"><AppOptions apps={apps} all="Any app" /></select></label>
       <label>Remaining hits<input name="remaining_hits" type="number" min="1" placeholder="Unlimited" /></label>
+      <label>Probability<input name="probability" type="number" min="0" max="1" step="any" placeholder="1 (always)" /></label>
       <label>Channel<select key={kind} name="channel">
         <option value="">{inbound ? "Any inbound request" : kind === "duplicate_event" ? "Any outbound channel" : "Any channel"}</option>
         {kind !== "duplicate_event" && <option value="inbound">Inbound</option>}
@@ -96,7 +103,12 @@ function CreateFault({ apps }: { apps: AppInfo[] }) {
       <label>Path prefix<input name="path_prefix" placeholder={kind === "duplicate_event" ? "/webhook" : "/open-apis/"} /></label>
       {!inbound && <label>Event type<input name="event_type" placeholder="Any event" /></label>}
       {kind === "latency" && <label>Delay (ms)<input name="delay_ms" type="number" min="1" max="60000" defaultValue="250" required /></label>}
-      {kind === "http_error" && <label>Status code<input name="status_code" type="number" min="400" max="599" placeholder="500" /></label>}
+      {kind === "rate_limit" && <label>Retry after (seconds)<input name="retry_after" type="number" min="0" max="86400" placeholder="1" /></label>}
+      {kind === "http_error" && <>
+        <label>Status code<input name="status_code" type="number" min="400" max="599" placeholder="500" /></label>
+        <label>Feishu error code<input name="error_code" type="number" min="1" placeholder="99991401" /></label>
+        <label>Error message<input name="error_msg" placeholder="internal server error" /></label>
+      </>}
       {kind === "duplicate_event" && <label>Total copies<input name="duplicate_count" type="number" min="2" max="10" placeholder="2" /></label>}
       <div className="full-width"><button className="primary" disabled={operation.busy} type="submit">{operation.busy ? "Creating…" : "Create rule"}</button></div>
       {operation.error && <div className="full-width"><Notice tone="error">{operation.error}</Notice></div>}
@@ -152,7 +164,7 @@ function Utilities({ apps }: { apps: AppInfo[] }) {
         }}>
           <div><h3>Webhook verification</h3><p className="muted">Send a <code>url_verification</code> challenge.</p></div>
           <label>Webhook URL override<input type="url" value={url} onChange={(event) => setURL(event.target.value)}
-            placeholder={app?.webhook_url || "Use configured URL"} /></label>
+            placeholder={app?.webhook_url ? "Use configured webhook URL" : "Enter webhook URL"} /></label>
           <div><button type="submit" disabled={!app || verify.busy}>{verify.busy ? "Verifying…" : "Verify webhook"}</button></div>
           {verify.error && <Notice tone="error">{verify.error}</Notice>}
           {verified?.appID === app?.app_id && verified && <Notice tone={verified.value.verified ? "success" : "error"}>

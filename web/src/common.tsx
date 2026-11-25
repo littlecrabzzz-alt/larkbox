@@ -3,9 +3,9 @@ import { request, type AppInfo } from "./api";
 
 export const RefreshContext = createContext({ auto: false, revision: 0, refresh: () => {} });
 
-export function useResource<T>(path: string | undefined) {
+export function useResource<T>(path: string | undefined, generation = 0) {
   const { auto, revision } = useContext(RefreshContext);
-  const [result, setResult] = useState<{ path: string; data?: T; error?: string }>();
+  const [result, setResult] = useState<{ path: string; generation: number; data?: T; error?: string }>();
   const reload = useRef<(() => void) | undefined>(undefined);
 
   useEffect(() => {
@@ -17,10 +17,13 @@ export function useResource<T>(path: string | undefined) {
       pending = true;
       try {
         const data = await request<T>(path, { signal: controller.signal });
-        if (!controller.signal.aborted) setResult({ path, data });
+        if (!controller.signal.aborted) setResult({ path, generation, data });
       } catch (error) {
         if (!controller.signal.aborted) {
-          setResult((previous) => ({ path, error: errorText(error), data: previous?.path === path ? previous.data : undefined }));
+          setResult((previous) => ({
+            path, generation, error: errorText(error),
+            data: previous?.path === path && previous.generation === generation ? previous.data : undefined,
+          }));
         }
       } finally {
         pending = false;
@@ -32,7 +35,7 @@ export function useResource<T>(path: string | undefined) {
       reload.current = undefined;
       controller.abort();
     };
-  }, [path, revision]);
+  }, [path, revision, generation]);
 
   useEffect(() => {
     if (!auto || !path) return;
@@ -40,7 +43,7 @@ export function useResource<T>(path: string | undefined) {
     return () => window.clearInterval(id);
   }, [auto, path]);
 
-  return result?.path === path ? result : undefined;
+  return result?.path === path && result?.generation === generation ? result : undefined;
 }
 
 export function useOperation() {
