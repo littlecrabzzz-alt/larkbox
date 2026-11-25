@@ -59,6 +59,10 @@ jobs:
         if: steps.check_go.outputs.exists == 'true'
         run: go build ./...
 
+      - name: Test process restart and snapshot recovery
+        if: steps.check_go.outputs.exists == 'true'
+        run: make test-restart
+
   official-sdk:
     name: Official SDK (${{ matrix.sdk }})
     runs-on: ubuntu-latest

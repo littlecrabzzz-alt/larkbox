@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
@@ -34,10 +35,14 @@ var Version = "0.1.0-dev"
 
 // Server is both an HTTP handler and a gracefully stoppable HTTP server.
 type Server struct {
-	http   *http.Server
-	store  *store.Store
-	events *event.Dispatcher
-	faults *fault.Engine
+	http       *http.Server
+	store      *store.Store
+	events     *event.Dispatcher
+	faults     *fault.Engine
+	clock      *simclock.Manual
+	stateFile  string
+	snapshotMu sync.Mutex
+	controlMu  sync.RWMutex
 }
 
 // RegisterRoutes attaches handlers to one route group. Patterns include the
@@ -137,6 +142,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	}
 	events := event.New(state, settings.eventOptions)
 	limits := middleware.NewRateLimiter(cfg.RateLimits)
+	runtime := &Server{store: state, events: events, faults: faults, clock: clock, stateFile: cfg.StateFile}
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
@@ -170,8 +176,11 @@ func New(cfg config.Config, opts ...Option) *Server {
 	mux.Handle("/open-apis/", api)
 	mux.Handle("/oauth/", api)
 	mux.Handle("/page/cli", api)
-	control := sandbox.New(cfg, Version, state, events, faults, clock)
+	control := sandbox.New(cfg, Version, state, events, faults, clock, &runtime.controlMu)
 	operator := operatorRoutes(cfg, events, limits)
+	if cfg.SandboxToken != "" {
+		runtime.registerSnapshotRoutes(operator)
+	}
 	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pattern := operator.Handler(r); pattern != "" {
 			operator.ServeHTTP(w, r)
@@ -185,13 +194,11 @@ func New(cfg config.Config, opts ...Option) *Server {
 	})
 	mux.Handle("/_sandbox/", protectControl(cfg.SandboxToken, correlatedControl(controlPlane)))
 
-	return &Server{
-		http: &http.Server{
-			Addr: cfg.Addr, Handler: withWebUI(mux, settings.noUI, cfg.SandboxToken), ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
-		},
-		store: state, events: events, faults: faults,
+	runtime.http = &http.Server{
+		Addr: cfg.Addr, Handler: withWebUI(mux, settings.noUI, cfg.SandboxToken), ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
+	return runtime
 }
 
 func configuredDelivery(settings config.EventDelivery) event.Options {
@@ -292,5 +299,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.faults.Stop()
 	s.events.StopRetries()
 	httpErr := s.http.Shutdown(ctx)
-	return errors.Join(httpErr, s.events.Shutdown(ctx))
+	eventErr := s.events.Shutdown(ctx)
+	return errors.Join(httpErr, eventErr, s.SaveCheckpoint())
 }

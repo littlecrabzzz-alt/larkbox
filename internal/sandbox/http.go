@@ -26,14 +26,14 @@ type control struct {
 	events  *event.Dispatcher
 	faults  *fault.Engine
 	clock   *simclock.Manual
-	mu      sync.RWMutex // Serialize control-plane state preparation with reset.
+	mu      *sync.RWMutex // Serialize control-plane state preparation with state replacement.
 }
 
 type data = map[string]any
 
 // New creates the unauthenticated local control plane.
-func New(cfg config.Config, version string, state *store.Store, events *event.Dispatcher, faults *fault.Engine, clock *simclock.Manual) http.Handler {
-	c := &control{cfg: cfg, version: version, state: state, events: events, faults: faults, clock: clock}
+func New(cfg config.Config, version string, state *store.Store, events *event.Dispatcher, faults *fault.Engine, clock *simclock.Manual, boundary *sync.RWMutex) http.Handler {
+	c := &control{cfg: cfg, version: version, state: state, events: events, faults: faults, clock: clock, mu: boundary}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_sandbox/state", c.snapshot)
 	mux.HandleFunc("GET /_sandbox/openapi.json", describeOpenAPI)

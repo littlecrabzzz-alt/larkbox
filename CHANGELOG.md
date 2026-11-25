@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sandbox CLI, OpenAPI discovery, atomic ready files, and a runnable black-box retry and late-callback recipe.
 - Embedded Web Inspector with a chat playground, interactive card previews and callbacks, CardKit streaming state, protocol traces, and sandbox fault tools. Use `--no-ui` to disable the inspector.
 - Initial repository setup, open-source templates, CI workflow, and governance documentation.
+- Opt-in durable state, protected snapshot export and import, pending delivery recovery, and scheduled Feishu contract checks with sanitized artifacts.
 - Project architecture specification and initial Architecture Decision Record (ADR-0001).
 - Pure-Go CLI, YAML/JSON configuration with local seed data, and a health endpoint with graceful shutdown.
 - Feishu response, ID, and webhook crypto helpers, plus an in-memory store with token expiry, CardKit sequencing, and audit traces.
@@ -49,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose and versioned container images, operator authentication, configurable per-app API budgets, delivery metrics, runtime profiles, and correlated JSON logs.
 
 ### Fixed
+
+- Match the Feishu internal token endpoints' invalid app secret response observed on the dedicated test tenant.
 
 - Fence stale Open API writes and event notifications after sandbox reset.
 - Redact structured audit and card diagnostics consistently, apply one inbound fault per request, and validate sandbox seed and token selectors before changing state.

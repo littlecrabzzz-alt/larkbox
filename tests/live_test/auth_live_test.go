@@ -42,7 +42,7 @@ func TestAuthContract(t *testing.T) {
 		body          []byte
 		status, code  int
 	}{
-		{"bad secret", "auth/tenant_access_token_bad_secret", wrong, http.StatusOK, 10015},
+		{"bad secret", "auth/tenant_access_token_bad_secret", wrong, http.StatusOK, 10014},
 		{"missing parameter", "auth/tenant_access_token_missing_param", []byte("{}"), http.StatusOK, 10003},
 		{"malformed JSON", "auth/tenant_access_token_malformed", []byte("{"), http.StatusBadRequest, 9499},
 	} {

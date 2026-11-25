@@ -60,6 +60,13 @@ func (c *Manual) Reset() {
 	c.set(c.start)
 }
 
+// Restore installs the current time from a validated snapshot.
+func (c *Manual) Restore(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.set(now.UTC())
+}
+
 func (c *Manual) set(now time.Time) {
 	c.now = now
 	close(c.changed)

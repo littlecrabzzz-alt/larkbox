@@ -275,6 +275,43 @@ The file equivalents are `sandbox_token`, `pprof`, `json_logs`, and
 `rate_limits`. The operator token also works with the built-in CLI over the
 remote URL provided by `--url` or `LARKBOX_URL`.
 
+### Restart recovery
+
+Set `state_file` or `LARKBOX_STATE_FILE` to a writable file path for a single
+instance. Larkbox creates a private checkpoint at startup, replaces it
+atomically every second, and writes a final checkpoint on graceful shutdown.
+An abrupt restart restores the last completed checkpoint. A write can succeed
+through the API and still be lost if the process exits before the next checkpoint.
+The persisted state includes messages and indexes, uploaded bytes, cards and
+sequences, OAuth grants and credential deadlines, and content and work resources.
+
+```sh
+docker compose -f compose.yaml -f compose.persist.yaml up --build --wait
+```
+
+The Compose override retains `/data/state.json` in a named volume when the
+container is replaced. A recovered retry keeps its original event ID,
+transport, attempt number, and due time. WebSocket retries wait for a peer
+to reconnect for up to three minutes. A restored attempt can be delivered
+again with the same event ID. Restored manual clocks retain their saved
+time. Reset returns to the startup seed and initial clock.
+
+With an operator token, use the versioned snapshot endpoint to move runtime
+state between instances using the same clock mode. Snapshot files contain
+sandbox credentials and data. Keep them in private storage.
+
+```sh
+umask 077
+curl --fail --header "Authorization: Bearer ${LARKBOX_SANDBOX_TOKEN}" \
+  http://127.0.0.1:8080/_sandbox/snapshot --output snapshot.json
+curl --fail --header "Authorization: Bearer ${LARKBOX_SANDBOX_TOKEN}" \
+  --header 'Content-Type: application/json' --data-binary @snapshot.json \
+  http://127.0.0.1:8080/_sandbox/snapshot
+```
+
+Run `make test-restart` to exercise an abrupt process stop and recovery,
+followed by an explicit snapshot import and token expiry check.
+
 ### Conversation events
 
 Set an app's `event_types` in its config or seed entry to subscribe to a
@@ -495,6 +532,15 @@ message and reaction. The suite also uploads a synthetic PNG and closes its
 streaming card entity. Set `FEISHU_LIVE=0` to force local mode if your
 `.env.local` enables Feishu. See the
 [fixture capture and sanitization guide](testdata/fixtures/README.md).
+
+The weekly Feishu fidelity workflow runs the local suite and compares Auth
+and the IM message and reaction lifecycle against an isolated Feishu test
+tenant. Set `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and `FEISHU_TEST_CHAT_ID`
+as secrets in the repository's `feishu-test` Actions environment. Give
+the app the message and history scopes listed above and add its bot to the
+test chat. The job uploads field types, HTTP statuses, and business codes for
+contract review. Normal PR checks use only the local sandbox.
+[Feishu fidelity workflow](.github/workflows/feishu-fidelity.yml)
 
 ## Roadmap
 

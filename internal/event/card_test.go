@@ -31,6 +31,23 @@ const (
 	clickedCard = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","element_id":"md","content":"clicked"}]}}`
 )
 
+func TestCardActionTargetDoesNotCrossSnapshotRestore(t *testing.T) {
+	cfg := config.Default()
+	d := testDispatcher(t, cfg, Options{}, nil)
+	message, input := actionMessage(t, d, cfg)
+	target, err := d.state.CardActionTarget(message.ID, input.OperatorOpenID)
+	requireNoError(t, err)
+	body, err := d.state.ExportSnapshot()
+	requireNoError(t, err)
+	snapshot, err := store.DecodeSnapshot(body)
+	requireNoError(t, err)
+	d.state.RestoreSnapshot(snapshot)
+	err = d.state.ApplyCardAction(t.Context(), target, store.Card{Type: "card_json", JSON: []byte(clickedCard)}, "", store.Redactor{})
+	if !errors.Is(err, store.ErrReset) {
+		t.Fatalf("old callback committed against restored revisions: %v", err)
+	}
+}
+
 func actionMessage(t *testing.T, d *Dispatcher, cfg config.Config) (store.Message, CardActionTriggerInput) {
 	t.Helper()
 	app := cfg.Apps[0]

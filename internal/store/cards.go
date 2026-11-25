@@ -144,11 +144,12 @@ func cardContent(card Card) string {
 	return string(card.JSON)
 }
 
-// CardActionSnapshot binds a click to the message and linked card revisions.
+// CardActionSnapshot binds a click to the state generation and card revisions.
 type CardActionSnapshot struct {
 	Message      Message
 	Operator     User
 	cardRevision uint64
+	resetEpoch   uint64
 }
 
 // CardActionTarget snapshots the clicked message, operator, and entity revision.
@@ -159,7 +160,7 @@ func (s *Store) CardActionTarget(messageID, openID string) (CardActionSnapshot, 
 	if err != nil {
 		return CardActionSnapshot{}, err
 	}
-	target := CardActionSnapshot{Message: cloneMessage(m), Operator: user}
+	target := CardActionSnapshot{Message: cloneMessage(m), Operator: user, resetEpoch: s.resetEpoch}
 	if m.CardID != "" {
 		card, err := s.ownedCard(m.CardAppID(), m.CardID)
 		if err != nil {
@@ -197,6 +198,9 @@ func (s *Store) cardActionTarget(messageID, openID string) (Message, User, error
 func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, card Card, reference string, redactor Redactor) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if target.resetEpoch != s.resetEpoch {
+		return ErrReset
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

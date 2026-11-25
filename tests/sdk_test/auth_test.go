@@ -115,7 +115,7 @@ func TestOfficialSDKAuth(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bad.Success() || bad.Code != 10015 || bad.Msg != "wrong app secret" {
+		if bad.Success() || bad.Code != 10014 || bad.Msg != "app secret invalid" {
 			t.Fatalf("credential error: %+v", bad.CodeError)
 		}
 		tenant, err := client.GetTenantAccessTokenBySelfBuiltApp(t.Context(),

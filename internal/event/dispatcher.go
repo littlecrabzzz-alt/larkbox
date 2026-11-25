@@ -111,18 +111,20 @@ type Dispatcher struct {
 	retriesStopped chan struct{}
 	stopRetries    sync.Once
 
-	mu           sync.Mutex
-	closed       bool
-	resetCtx     context.Context
-	resetCancel  context.CancelFunc
-	generation   uint64
-	pending      int
-	active       sync.WaitGroup
-	ws           gateway
-	retryWaiters atomic.Int64
-	retries      atomic.Uint64
-	attempts     atomic.Uint64
-	failures     atomic.Uint64
+	mu            sync.Mutex
+	closed        bool
+	resetCtx      context.Context
+	resetCancel   context.CancelFunc
+	generation    uint64
+	pending       int
+	active        sync.WaitGroup
+	ws            gateway
+	retryWaiters  atomic.Int64
+	retries       atomic.Uint64
+	attempts      atomic.Uint64
+	failures      atomic.Uint64
+	retryJournal  map[retryKey]PendingRetry
+	socketChanged chan struct{}
 }
 
 // Metrics contains current queue sizes and cumulative delivery counters.
@@ -171,6 +173,7 @@ func New(state *store.Store, opts Options) *Dispatcher {
 	return &Dispatcher{
 		state: state, opts: opts, ctx: ctx, cancel: cancel, resetCtx: resetCtx, resetCancel: resetCancel,
 		done: make(chan struct{}), stopping: make(chan struct{}), retriesStopped: make(chan struct{}),
+		retryJournal: make(map[retryKey]PendingRetry), socketChanged: make(chan struct{}),
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -466,10 +469,18 @@ func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Deli
 }
 
 func (d *Dispatcher) socketDelivery(ctx context.Context, s *session, job deliveryJob) Delivery {
-	var result Delivery
-	attempts := 0
-	for attempt := 1; ; attempt++ {
+	return d.socketDeliveryFrom(ctx, s, job, 1, 0)
+}
+
+func (d *Dispatcher) socketDeliveryFrom(ctx context.Context, s *session, job deliveryJob, start, used int) (result Delivery) {
+	eligible := true
+	defer func() { d.finishRetry(ctx, job, "websocket", eligible) }()
+	attempts := used
+	for attempt := start; ; attempt++ {
 		if attempts > 0 && (!d.canRetry(ctx) || s.disconnected()) {
+			if result.Err == nil {
+				result.Err = errDisconnectedBeforeWrite
+			}
 			return result
 		}
 		result = d.socketAttempt(ctx, s, job, attempt, nil)
@@ -486,7 +497,11 @@ func (d *Dispatcher) socketDelivery(ctx context.Context, s *session, job deliver
 		}
 		attempts++
 		// Once a write may have reached a peer, keep retries on that replica.
-		if result.Err == nil || attempts == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, attempts, result.completedAt, s.done) {
+		if result.Err == nil || attempts >= d.opts.WebSocketMaxAttempts {
+			eligible = result.Err != nil && ctx.Err() != nil && result.Status == 0
+			return result
+		}
+		if ctx.Err() != nil || !d.waitRetry(ctx, job, "websocket", attempt, attempts, result.completedAt, s.done) {
 			return result
 		}
 	}
@@ -504,7 +519,13 @@ func (d *Dispatcher) canRetry(ctx context.Context) bool {
 	}
 }
 
-func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt time.Time, peerDone <-chan struct{}) (ready bool) {
+func (d *Dispatcher) waitRetry(ctx context.Context, job deliveryJob, channel string, attempt, used int, completedAt time.Time, peerDone <-chan struct{}) bool {
+	due := completedAt.Add(d.opts.RetryBackoff(used))
+	d.scheduleRetry(ctx, job, channel, attempt, used, due)
+	return d.waitUntilRetry(ctx, due, peerDone)
+}
+
+func (d *Dispatcher) waitUntilRetry(ctx context.Context, due time.Time, peerDone <-chan struct{}) (ready bool) {
 	if !d.canRetry(ctx) {
 		return false
 	}
@@ -515,9 +536,7 @@ func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt tim
 		}
 		d.retryWaiters.Add(-1)
 	}()
-	delay := d.opts.RetryBackoff(attempt)
 	if clock := d.opts.ManualClock; clock != nil {
-		due := completedAt.Add(delay)
 		for {
 			now, changed := clock.Snapshot()
 			if !now.Before(due) {
@@ -534,7 +553,7 @@ func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt tim
 			}
 		}
 	}
-	timer := time.NewTimer(delay)
+	timer := time.NewTimer(time.Until(due))
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -629,6 +648,7 @@ func (d *Dispatcher) Reset(reset func()) {
 	d.resetCtx, d.resetCancel = context.WithCancel(d.ctx)
 	d.generation++
 	clear(d.ws.tickets)
+	clear(d.retryJournal)
 	var sessions []*session
 	for _, app := range d.ws.apps {
 		sessions = append(sessions, app.sessions...)

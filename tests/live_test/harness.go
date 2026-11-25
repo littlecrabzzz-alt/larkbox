@@ -217,6 +217,7 @@ func (h *harness) checkResponse(t *testing.T, name string, resp *larkcore.ApiRes
 func (h *harness) checkWire(t *testing.T, name string, status int, raw []byte, liveStatus int, liveShape string) {
 	t.Helper()
 	if h.live {
+		captureShape(t, name, status, raw, liveShape)
 		fixturetest.Envelope(t, status, raw, liveStatus, liveShape)
 		return
 	}
@@ -247,7 +248,7 @@ func registerMutation(t *testing.T, operation string, apply, fallback mutation) 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if _, err := runMutation(ctx, fallback); err != nil {
-			t.Logf("%s cleanup: %v", operation, err)
+			t.Errorf("%s cleanup: %v", operation, err)
 		}
 	})
 	return func() *larkcore.ApiResp {

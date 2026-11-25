@@ -523,6 +523,20 @@ func TestControlCardActionRedactsDiagnosticCardContent(t *testing.T) {
 	if !ok || !strings.Contains(message.Content, token) {
 		t.Fatal("diagnostic redaction changed the stored callback result")
 	}
+	snapshot, err := srv.Store().ExportSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.DecodeSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Store().RestoreSnapshot(restored)
+	history = call(t, srv, "GET", "/_sandbox/chats/"+cfg.Chats[0].ChatID+"/messages", "", 200)
+	assertContains(t, history, "Updated card [REDACTED] / [REDACTED]")
+	if bytes.Contains(history, []byte(token)) {
+		t.Fatal("restored diagnostics exposed the prior action credential")
+	}
 }
 
 func TestControlCardDetailPreservesStandardIcon(t *testing.T) {

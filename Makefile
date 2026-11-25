@@ -1,7 +1,7 @@
 BINARY_NAME := larkbox
 BUILD_DIR   := bin
 
-.PHONY: help fmt vet lint test test-live test-blackbox test-cli build ui-install ui-test ui-build clean
+.PHONY: help fmt vet lint test test-live test-blackbox test-restart test-cli build ui-install ui-test ui-build clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -23,6 +23,9 @@ test-live: ## Run differential tests locally or with FEISHU_LIVE=1 against a Fei
 
 test-blackbox: build ## Run the standalone CLI and webhook recipe (Python 3)
 	python3 examples/blackbox.py --binary $(BUILD_DIR)/$(BINARY_NAME)
+
+test-restart: build ## Verify process restart and snapshot recovery (Python 3)
+	python3 -B examples/restart.py --binary $(BUILD_DIR)/$(BINARY_NAME)
 
 test-cli: ## Test official lark-cli onboarding and IM in an isolated Docker container
 	@mkdir -p $(BUILD_DIR)

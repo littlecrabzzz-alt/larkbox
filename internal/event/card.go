@@ -61,6 +61,7 @@ type cardActionPayload struct {
 // TriggerCardAction delivers one synchronous callback to one receiver. A live
 // long connection takes precedence over the webhook. Delivery is never retried.
 func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTriggerInput) (CardActionResult, error) {
+	ctx, _ = d.state.Admit(ctx)
 	ctx, finish, err := d.begin(ctx)
 	if err != nil {
 		return CardActionResult{}, err
@@ -102,6 +103,9 @@ func (d *Dispatcher) TriggerCardAction(ctx context.Context, input CardActionTrig
 	job, err := d.newJob(ctx, app.AppID, cardActionTrigger, d.state.Now(), payload)
 	if err != nil {
 		return CardActionResult{}, err
+	}
+	if !d.state.Current(ctx) {
+		return CardActionResult{}, store.ErrReset
 	}
 	job.redactor = store.AppRedactor(job.app, payload.Token, input.PreviewToken)
 	result := CardActionResult{EventID: job.id, Redactor: job.redactor}

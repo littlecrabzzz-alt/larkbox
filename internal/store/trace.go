@@ -56,26 +56,22 @@ const redactedValue = "[REDACTED]"
 // Redactor protects protocol fields and known credentials in diagnostic copies.
 // Its zero value redacts credential fields without replacing specific values.
 type Redactor struct {
-	values *strings.Replacer
+	values  *strings.Replacer
+	secrets []string
 }
 
 // NewRedactor also redacts occurrences of the given nonempty credentials.
 func NewRedactor(secrets ...string) Redactor {
-	if len(secrets) == 0 {
+	values := slices.DeleteFunc(slices.Clone(secrets), func(value string) bool { return value == "" })
+	if len(values) == 0 {
 		return Redactor{}
 	}
-	values := slices.Clone(secrets)
 	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
 	pairs := make([]string, 0, len(values)*2)
 	for _, value := range values {
-		if value != "" {
-			pairs = append(pairs, value, redactedValue)
-		}
+		pairs = append(pairs, value, redactedValue)
 	}
-	if len(pairs) == 0 {
-		return Redactor{}
-	}
-	return Redactor{values: strings.NewReplacer(pairs...)}
+	return Redactor{values: strings.NewReplacer(pairs...), secrets: values}
 }
 
 // AppRedactor protects the app's credentials in addition to delivery credentials.

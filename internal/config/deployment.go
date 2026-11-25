@@ -49,6 +49,9 @@ func (cfg Config) validateDeployment() error {
 }
 
 func (cfg *Config) applyDeploymentEnv() error {
+	if path, ok := os.LookupEnv("LARKBOX_STATE_FILE"); ok {
+		cfg.StateFile = path
+	}
 	if value, ok := os.LookupEnv("LARKBOX_SANDBOX_TOKEN"); ok {
 		cfg.SandboxToken = value
 	}

@@ -16,8 +16,61 @@ import (
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
+
+func TestCompletedLastWebhookAttemptLeavesNoShutdownRetry(t *testing.T) {
+	cfg := config.Default()
+	clock := simclock.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	started, release := make(chan struct{}), make(chan struct{})
+	var attempts atomic.Int64
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 2 {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer peer.Close()
+	cfg.Apps[0].WebhookURL = peer.URL
+	d := testDispatcher(t, cfg, Options{
+		ManualClock: clock, WebhookMaxAttempts: 2,
+		RetryBackoff: func(int) time.Duration { return time.Second },
+	}, clock.Now)
+	d.Enqueue(t.Context(), cfg.Apps[0].AppID, "im.message.receive_v1", clock.Now(), map[string]string{"text": "pending"})
+	deadline := time.Now().Add(time.Second)
+	for d.Metrics().RetryWaiters == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if d.Metrics().RetryWaiters != 1 {
+		t.Fatal("first failure did not schedule a retry")
+	}
+	_, err := clock.Advance(time.Second)
+	requireNoError(t, err)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("last attempt did not reach the receiver")
+	}
+	d.StopRetries()
+	close(release)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	requireNoError(t, d.Shutdown(ctx))
+	if d.Metrics().Failures != 2 {
+		t.Fatal("expected both attempts to complete with HTTP errors")
+	}
+	requireNoError(t, d.ExportCheckpoint(func(retries []PendingRetry) error {
+		if len(retries) != 0 {
+			t.Errorf("exhausted delivery left a pending retry: %+v", retries)
+		}
+		return nil
+	}))
+}
 
 func TestWebhookPayloadsAndChallenge(t *testing.T) {
 	for _, mode := range []string{"plaintext", "encrypted"} {
