@@ -136,7 +136,7 @@ func (s *Store) StartApproval(appID string, input ApprovalStart) (ApprovalChange
 		return ApprovalChange{}, ErrApprovalDepartment
 	}
 	instance := ApprovalInstance{
-		Code: approvalCode(), TaskID: protocol.NewID(protocol.CardID), Status: ApprovalPending, StartedAt: s.Now(),
+		Code: resourceUUID(), TaskID: protocol.NewID(protocol.CardID), Status: ApprovalPending, StartedAt: s.Now(),
 		DefinitionCode: definition.Code, DefinitionName: definition.Name, TenantKey: definition.TenantKey,
 		Form: input.Form, UUID: input.UUID, DepartmentID: department, Submitter: cloneUser(submitter), Approver: cloneUser(approver),
 	}
@@ -223,7 +223,7 @@ func cloneApproval(instance ApprovalInstance) ApprovalInstance {
 	return instance
 }
 
-func approvalCode() string {
+func resourceUUID() string {
 	hex := strings.ToUpper(protocol.NewID(""))
 	return hex[:8] + "-" + hex[8:12] + "-" + hex[12:16] + "-" + hex[16:20] + "-" + hex[20:]
 }

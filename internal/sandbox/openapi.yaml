@@ -40,6 +40,9 @@ paths:
                   approval_definitions:
                     type: array
                     items: {$ref: '#/components/schemas/ApprovalDefinition'}
+                  minutes:
+                    type: array
+                    items: {$ref: '#/components/schemas/Minute'}
                   chats:
                     type: array
                     items: {$ref: '#/components/schemas/ChatSummary'}
@@ -55,7 +58,7 @@ paths:
   /_sandbox/seed:
     post:
       operationId: seed
-      summary: Upsert apps, users, chats, or templates
+      summary: Upsert sandbox fixtures
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/Seed'}}}
@@ -72,6 +75,7 @@ paths:
                   chats: *integer
                   departments: *integer
                   approval_definitions: *integer
+                  minutes: *integer
                   card_templates: *integer
         default: &error {$ref: '#/components/responses/Error'}
   /_sandbox/reset:
@@ -586,6 +590,7 @@ components:
         users: {type: array, items: {$ref: '#/components/schemas/User'}}
         departments: {type: array, items: {$ref: '#/components/schemas/Department'}}
         approval_definitions: {type: array, items: {$ref: '#/components/schemas/ApprovalDefinition'}}
+        minutes: {type: array, items: {$ref: '#/components/schemas/Minute'}}
         chats: {type: array, items: {$ref: '#/components/schemas/ChatSeed'}}
         card_templates:
           type: array
@@ -599,6 +604,18 @@ components:
               data:
                 type: string
                 description: Card JSON 2.0 serialized as a string.
+    Minute:
+      type: object
+      required: [minute_token, title, owner_open_id]
+      additionalProperties: false
+      properties:
+        minute_token: {type: string, pattern: '^[a-z0-9]{1,128}$'}
+        title: *identifier
+        owner_open_id: *identifier
+        tenant_key: *string
+        duration_ms: {type: integer, minimum: 0, format: int64}
+        transcript: *string
+        summary: *string
     AppSeed:
       type: object
       required: [app_id]

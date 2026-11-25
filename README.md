@@ -50,12 +50,12 @@ curl -fsS http://127.0.0.1:8080/healthz
 
 The server starts in strict mode with a virtual app, bot, users, and chats. The startup log shows the built-in local app credentials. `/healthz` is available in the foundation slice. The compatibility matrix tracks Feishu endpoint implementation.
 
-Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, `departments`, `chats`, `approval_definitions`, and `card_templates` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
+Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, `departments`, `chats`, `approval_definitions`, `minutes`, and `card_templates` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
 
 - `LARKBOX_ADDR`, `LARKBOX_STRICT_MODE`
 - `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
 - `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS`, `LARKBOX_CARD_TEMPLATES` (JSON arrays)
-- `LARKBOX_DEPARTMENTS`, `LARKBOX_APPROVAL_DEFINITIONS` (JSON arrays)
+- `LARKBOX_DEPARTMENTS`, `LARKBOX_APPROVAL_DEFINITIONS`, `LARKBOX_MINUTES` (JSON arrays)
 
 For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exactly matches one of the app's configured `redirect_uris`. The demo app registers `http://127.0.0.1:8080/callback` and `http://localhost:8080/callback`. Callbacks must use HTTP or HTTPS and have no fragment. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user.
 
@@ -154,7 +154,7 @@ for trusted local and test-network clients.
 ### Official CLI onboarding
 
 Run `make test-cli` with Docker to test application registration, user denial
-and approval, recipient search, messaging, content workflows, and logout with
+and approval, recipient search, messaging, content and work workflows, and logout with
 official `lark-cli` v1.0.100. The
 [CLI test guide](tests/lark_cli/README.md) covers the loopback adapter, browser
 confirmation, and scripted device decisions.
@@ -168,6 +168,22 @@ writes. A new Base provides `Table1` with a text field named `Name` for
 record creation and keyword search. Drive accepts single-request uploads
 up to 20 MiB in the virtual root. Wiki resolves a document node by its
 node token or its underlying document token.
+
+### Scheduling and work
+
+Create single events on the requesting identity's primary calendar and
+query the agenda by time range. Tasks record creation, edits, completion,
+and reopening against the same task GUID.
+
+Seed recorded meetings through `POST /_sandbox/seed` or the `minutes`
+configuration list. Each meeting has a lowercase `minute_token`, a title,
+an active `owner_open_id` in its tenant, and `duration_ms`. Add `transcript`
+and `summary` to exercise `lark-cli minutes +detail` and its file export.
+
+Mail uses the user seed's `enterprise_email` or `email`. The virtual mailbox
+accepts MIME drafts, stores a sent copy, and delivers inbox copies to seeded
+recipients in the same tenant. Delivery stays inside Larkbox. Search by text
+or list the inbox or sent folder, then use the returned message ID to read it.
 
 ### Directory and approval fixtures
 
@@ -349,6 +365,15 @@ Status Legend:
 | `/open-apis/drive/v1/files`, `/open-apis/drive/v1/metas/batch_query` | Upload, download, and look up Drive files | `CLI-Tested` |
 | `/open-apis/sheets/v3/spreadsheets`, `/open-apis/sheet_ai/v2/spreadsheets`, `/open-apis/sheets/v2/spreadsheets` | Create workbooks and read or write cell values | `CLI-Tested` |
 | `/open-apis/base/v3/bases`, `/open-apis/bitable/v1/apps` | Base metadata, table and field lookup, and record writes and queries | `CLI-Tested` for Base v3 |
+
+### Scheduling and work
+
+| Endpoint family | Notes | Status |
+|---|---|---|
+| `/open-apis/calendar/v4/calendars/{calendar_id}/events` | Schedule, read, list by time window, and delete single events | `CLI-Tested` |
+| `/open-apis/task/v2/tasks` | Create, read, edit, complete, and reopen tasks | `CLI-Tested` |
+| `/open-apis/minutes/v1/minutes/{minute_token}` | Read seeded meeting metadata, summaries, and transcripts | `CLI-Tested` |
+| `/open-apis/mail/v1/user_mailboxes/{mailbox_id}` | Compose and send draft mail, list and search messages, and read mail | `CLI-Tested` |
 
 ### Events & Callbacks
 

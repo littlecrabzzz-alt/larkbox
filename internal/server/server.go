@@ -19,6 +19,7 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/content"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/im"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/work"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
@@ -133,6 +134,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 	cardkit.RegisterRoutes(feishu, state)
 	contact.RegisterRoutes(feishu, cfg, state)
 	content.RegisterRoutes(feishu, cfg, state)
+	work.RegisterRoutes(feishu, cfg, state)
 	approval.RegisterRoutes(feishu, cfg, state, events)
 	im.RegisterRoutes(feishu, state, eventEmitter{state: state, dispatcher: events, next: settings.emitter})
 	for _, register := range settings.feishu {

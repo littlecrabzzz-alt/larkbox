@@ -124,6 +124,7 @@ type Store struct {
 	approvalRequests    map[approvalRequest]approvalReplay
 	approvalSubscribers map[string]map[string]bool
 	content             contentState
+	work                workState
 	chats               Collection[Chat]
 	disbandedChats      map[string]struct{}
 	messages            Collection[Message]
@@ -173,6 +174,7 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.approvalRequests = make(map[approvalRequest]approvalReplay)
 	s.approvalSubscribers = make(map[string]map[string]bool)
 	s.content = newContent()
+	s.work = newWork()
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.disbandedChats = make(map[string]struct{})
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
@@ -439,6 +441,7 @@ func cloneSeed(cfg config.Config) config.Config {
 	}
 	cfg.Departments = slices.Clone(cfg.Departments)
 	cfg.ApprovalDefinitions = slices.Clone(cfg.ApprovalDefinitions)
+	cfg.Minutes = slices.Clone(cfg.Minutes)
 	cfg.Chats = slices.Clone(cfg.Chats)
 	for i, chat := range cfg.Chats {
 		cfg.Chats[i] = cloneChat(chat)
@@ -469,6 +472,7 @@ func (s *Store) reset(seed config.Config) {
 	clear(s.approvalRequests)
 	clear(s.approvalSubscribers)
 	s.content = newContent()
+	s.work = newWork()
 	s.userSeedOrder = slices.Clone(seed.Users)
 	clear(s.chats.items)
 	clear(s.disbandedChats)
@@ -498,6 +502,9 @@ func (s *Store) reset(seed config.Config) {
 	}
 	for _, definition := range seed.ApprovalDefinitions {
 		s.approvalDefinitions.put(definition)
+	}
+	for _, minute := range seed.Minutes {
+		s.work.minutes[minute.Token] = minute
 	}
 	for _, chat := range seed.Chats {
 		s.chats.items[chat.ChatID] = cloneChat(chat)
