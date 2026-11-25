@@ -145,7 +145,7 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 	v2 := doc["schema"] == "2.0"
 	var validationErr error
 	count := 0
-	walk(doc, func(slot elementSlot, node map[string]any) bool {
+	walk(doc, func(_ elementSlot, node map[string]any) bool {
 		count++
 		if v2 {
 			if count > 200 {
@@ -154,16 +154,6 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 			}
 			if node["tag"] == "note" || node["tag"] == "action" {
 				validationErr = invalid("tag", "Component is unavailable in card JSON 2.0.")
-				return true
-			}
-		}
-		if node["tag"] == "select_img" {
-			if node["multi_select"] == true && !slot.inForm {
-				validationErr = invalid("multi_select", "Multiple image selection requires a form.")
-				return true
-			}
-			if slot.inForm && !nonemptyString(node, "name") {
-				validationErr = invalid("name", "An image picker inside a form requires a name.")
 				return true
 			}
 		}
@@ -187,7 +177,7 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 func validEntityCard(doc map[string]any) bool {
 	_, rootElements := doc["elements"]
 	_, fallback := doc["fallback"]
-	return doc["schema"] == "2.0" && !rootElements && !fallback && ValidMessageCard(doc) &&
+	return doc["schema"] == "2.0" && !rootElements && !fallback && validMessageCardShape(doc) &&
 		optionalCardCheck(doc, "body", func(value any) bool {
 			body, ok := value.(map[string]any)
 			return ok && optionalCardType[string](body, "direction", "horizontal_spacing", "vertical_spacing", "horizontal_align", "vertical_align", "padding")
@@ -316,8 +306,8 @@ func walkWithin(parent map[string]any, inForm bool, visit func(elementSlot, map[
 			}
 		}
 	}
-	// Localized suffix tags contain the same element shape under locale keys.
-	if locales, ok := parent["i18n_text_tag_list"].(map[string]any); ok {
+	for _, field := range []string{"i18n_text_tag_list", "i18n_elements"} {
+		locales, _ := parent[field].(map[string]any)
 		for _, locale := range slices.Sorted(maps.Keys(locales)) {
 			nodes, _ := locales[locale].([]any)
 			for i, item := range nodes {
@@ -539,6 +529,9 @@ func validateEditedCard(doc map[string]any) error {
 	}
 	if config, _ := doc["config"].(map[string]any); config["update_multi"] == false {
 		return errUnsharedCard
+	}
+	if field, issue := imagePickerIssue(doc); field != "" {
+		return invalid(field, issue)
 	}
 	if !validEntityCard(doc) || !validCardSettings(doc) {
 		return invalid("data", "The operation would leave an invalid card.")

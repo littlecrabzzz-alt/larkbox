@@ -88,11 +88,11 @@ function CardJSONCheck() {
         spellCheck={false} disabled={operation.busy} required /></label>
       <button type="submit" className="primary" disabled={operation.busy || !source.trim()}>Validate and preview</button>
       {operation.error && <Notice tone="error">{operation.error}</Notice>}
-      {preview && <>
-        <Notice tone="success">Card JSON passed validation.</Notice>
-        <CardPreview card={preview} />
-      </>}
     </form>
+    {preview && <div className="stack">
+      <Notice tone="success">Card JSON passed validation.</Notice>
+      <CardPreview card={preview} />
+    </div>}
   </details>;
 }
 

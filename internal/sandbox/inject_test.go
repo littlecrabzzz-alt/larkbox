@@ -35,7 +35,12 @@ func TestInjectEventUsesConfiguredReceiverAndTrace(t *testing.T) {
 	cfg := config.Default()
 	app := &cfg.Apps[0]
 	app.WebhookURL, app.EncryptKey = receiver.URL, ""
+	app.EventTypes = []string{}
+	cfg.EventDelivery.WebhookMaxAttempts = 1
 	srv := sandboxServer(t, cfg)
+	suppressed := call(t, srv, http.MethodPost, "/_sandbox/messages/send",
+		`{"chat_id":"oc_larkbox_group","sender_open_id":"ou_larkbox_alice","text":"Do not deliver"}`, http.StatusCreated)
+	assertContains(t, suppressed, `"event_id":""`, `"deliveries":[]`)
 	const route = "/_sandbox/events/inject"
 	const kind = "example.custom_v1"
 	raw := call(t, srv, http.MethodPost, route,

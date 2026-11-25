@@ -285,6 +285,7 @@ func TestOfficialSDKIMCardValidation(t *testing.T) {
 		`{"schema":"2.0","body":{"elements":[{"tag":"select_static","options":{"value":"one"}}]}}`,
 		`{"schema":"2.0","body":{"elements":[{"tag":"date_picker","initial_date":20260101}]}}`,
 		`{"schema":"2.0","body":{"elements":[{"tag":"checker","checked":"true"}]}}`,
+		`{"schema":"2.0","body":{"elements":[{"tag":"select_img","multi_select":true,"options":[{"img_key":"img_test","value":"photo"}]}]}}`,
 		`{"type":"template","data":{"template_id":7}}`,
 		`{"i18n_elements":{}}`, `{"i18n_elements":{"en_us":[]}}`, `{"i18n_elements":{"en_us":{"tag":"hr"}}}`,
 		`{"i18n_elements":{"en_us":[{"tag":"markdown","content":42}]}}`,

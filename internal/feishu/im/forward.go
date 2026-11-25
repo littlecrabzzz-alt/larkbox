@@ -69,7 +69,7 @@ func (h handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	if created {
 		h.emitFirstBotChat(r, message.ChatID)
 	}
-	data := h.messageData(message, "open_id", false)
+	data := h.messageData(cardForRead(message, actor.AppID, false), "open_id", false)
 	if merged {
 		data = fields{"message": data, "invalid_message_id_list": emptySlice(invalid)}
 	}

@@ -271,6 +271,11 @@ func TestForwardMessageAndReadResourcesWithOfficialSDK(t *testing.T) {
 		t.Fatalf("unexpected bundle items: %s", get.RawBody)
 	}
 	checkResource(value(items[1].MessageId))
+	childReply, err := forwarder.Im.Message.Reply(t.Context(), larkim.NewReplyMessageReqBuilder().MessageId(value(items[1].MessageId)).
+		Body(larkim.NewReplyMessageReqBodyBuilder().MsgType("text").Content(`{"text":"Reply to a bundle item"}`).
+			ReplyInThread(true).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, childReply.CodeError, 230001)
 	history, err := forwarder.Im.Message.List(t.Context(), larkim.NewListMessageReqBuilder().ContainerIdType("chat").ContainerId(target).Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, history.CodeError, 0)
@@ -349,5 +354,41 @@ func TestForwardedCardsUseOriginalAppPolicy(t *testing.T) {
 	toast := action(forward(send(`{"enable_forward_interaction":true}`), 0), http.StatusOK)
 	if receiveSDKEvent(t, callbacks) != origin.AppID || !bytes.Contains(toast, []byte("Received by original app")) {
 		t.Fatalf("forwarded card callback missing or sent incorrectly: %s", toast)
+	}
+
+	const document = `{"schema":"2.0","config":{"enable_forward_interaction":true},"body":{"elements":[
+		{"tag":"markdown","content":"Linked preview"},
+		{"tag":"button","text":{"tag":"plain_text","content":"Review"},"behaviors":[{"type":"callback","value":{"internal":"owner-fixture-value"}}]}
+	]}}`
+	entity := sdkCardEntity(t, owner, "card_json", document)
+	original := value(sdkCardMessage(t, owner, source, sdkEntityReference(entity)).MessageId)
+	copied, err := forwarder.Im.Message.Forward(t.Context(), larkim.NewForwardMessageReqBuilder().MessageId(original).
+		ReceiveIdType("chat_id").Body(larkim.NewForwardMessageReqBodyBuilder().ReceiveId(target).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, copied.CodeError, 0)
+	plain := "Linked preview"
+	if !bytes.Contains(copied.RawBody, []byte(plain)) || bytes.Contains(copied.RawBody, []byte("owner-fixture-value")) {
+		t.Fatalf("forward did not return the rendered projection: %s", copied.RawBody)
+	}
+	detail, err := forwarder.Im.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(value(copied.Data.MessageId)).
+		CardMsgContentType("user_card_content").Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, detail.CodeError, 0)
+	if !bytes.Contains(detail.RawBody, []byte(plain)) || bytes.Contains(detail.RawBody, []byte("owner-fixture-value")) {
+		t.Fatalf("forwarded card read did not return the rendered projection: %s", detail.RawBody)
+	}
+	action(value(copied.Data.MessageId), http.StatusOK)
+	if receiveSDKEvent(t, callbacks) != origin.AppID {
+		t.Fatal("forwarded CardKit callback went to the wrong app")
+	}
+	bundle, err := forwarder.Im.Message.MergeForward(t.Context(), larkim.NewMergeForwardMessageReqBuilder().ReceiveIdType("chat_id").
+		Body(larkim.NewMergeForwardMessageReqBodyBuilder().ReceiveId(target).MessageIdList([]string{original}).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, bundle.CodeError, 0)
+	children, err := forwarder.Im.Message.Get(t.Context(), larkim.NewGetMessageReqBuilder().MessageId(value(bundle.Data.Message.MessageId)).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, children.CodeError, 0)
+	if len(children.Data.Items) != 2 || !bytes.Contains(children.RawBody, []byte(plain)) || bytes.Contains(children.RawBody, []byte("owner-fixture-value")) {
+		t.Fatalf("bundled CardKit child did not keep its rendered content: %s", children.RawBody)
 	}
 }

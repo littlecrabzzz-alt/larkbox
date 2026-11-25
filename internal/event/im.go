@@ -125,7 +125,7 @@ func (d *Dispatcher) DispatchMessageReceive(ctx context.Context, appID string, m
 			message.Mentions = append(message.Mentions, mapped)
 		}
 	}
-	return d.Dispatch(ctx, appID, messageReceive, struct {
+	return d.DispatchSubscribed(ctx, appID, messageReceive, struct {
 		Sender  sender          `json:"sender"`
 		Message receivedMessage `json:"message"`
 	}{from, message})

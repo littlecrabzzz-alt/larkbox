@@ -307,6 +307,9 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, bool, e
 	switch {
 	case req.ParentID != "":
 		parent, err = s.imMessage(actor, req.ParentID)
+		if err == nil && parent.UpperMessageID != "" {
+			err = ErrNotFound
+		}
 		if err == nil && actor.Sandbox && parent.ChatID != req.ChatID {
 			err = ErrOutsideChat
 		}
@@ -447,7 +450,7 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, bool, e
 	s.messageOrder++
 	m.Order = s.messageOrder
 	if len(sources) > 0 {
-		m.forwardedIDs = s.copyForwarded(actor.AppID, m, sources)
+		m.forwardedIDs = s.copyForwarded(m, sources)
 	}
 	s.messages.put(m)
 	if req.UUID != "" {

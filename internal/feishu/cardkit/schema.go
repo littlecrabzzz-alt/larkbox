@@ -15,6 +15,13 @@ import (
 
 // ValidMessageCard validates inline cards and template references in IM messages.
 func ValidMessageCard(card map[string]any) bool {
+	if field, _ := imagePickerIssue(card); field != "" {
+		return false
+	}
+	return validMessageCardShape(card)
+}
+
+func validMessageCardShape(card map[string]any) bool {
 	if kind, exists := card["type"]; exists {
 		data, ok := card["data"].(map[string]any)
 		return kind == "template" && ok && validTemplate(data)
@@ -69,6 +76,9 @@ func ValidatePreviewJSON(encoded string) error {
 	if !validCardSettings(doc) {
 		return errors.New("correct the card config or card_link fields")
 	}
+	if field, issue := imagePickerIssue(doc); field != "" {
+		return fmt.Errorf("%s — %s", field, issue)
+	}
 	if doc["schema"] == "2.0" {
 		if err := validateEditedCard(doc); err != nil {
 			if errors.Is(err, errUnsharedCard) {
@@ -89,10 +99,25 @@ func ValidatePreviewJSON(encoded string) error {
 		}
 		return nil
 	}
-	if !ValidMessageCard(doc) {
+	if !validMessageCardShape(doc) {
 		return previewShapeIssue(doc)
 	}
 	return nil
+}
+
+func imagePickerIssue(card map[string]any) (field, issue string) {
+	walk(card, func(slot elementSlot, node map[string]any) bool {
+		if node["tag"] != "select_img" {
+			return false
+		}
+		if node["multi_select"] == true && !slot.inForm {
+			field, issue = "multi_select", "Multiple image selection requires a form."
+		} else if slot.inForm && !nonemptyString(node, "name") {
+			field, issue = "name", "An image picker inside a form requires a name."
+		}
+		return field != ""
+	})
+	return field, issue
 }
 
 func previewShapeIssue(doc map[string]any) error {

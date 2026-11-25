@@ -87,7 +87,7 @@ func (s *Store) prepareForward(actor IMActor, dest *Message, request forwardRequ
 		dest.MsgType, dest.Content = "merge_forward", "Merged and Forwarded Message"
 		return sources, nil
 	}
-	source := s.renderMessage(actor.AppID, sources[0])
+	source := s.renderMessage(sources[0].CardAppID(), sources[0])
 	dest.MsgType, dest.Content, dest.Mentions = source.MsgType, source.Content, source.Mentions
 	dest.DiagnosticRedactor = source.DiagnosticRedactor
 	dest.ResourceAppID = resourceOwner(source)
@@ -100,10 +100,10 @@ func (s *Store) prepareForward(actor IMActor, dest *Message, request forwardRequ
 	return children, nil
 }
 
-func (s *Store) copyForwarded(appID string, parent Message, sources []Message) []string {
+func (s *Store) copyForwarded(parent Message, sources []Message) []string {
 	ids := make([]string, 0, len(sources))
 	for _, source := range sources {
-		snapshot := s.renderMessage(appID, source)
+		snapshot := s.renderMessage(source.CardAppID(), source)
 		child := Message{
 			ID: protocol.NewID(protocol.MessageID), ChatID: parent.ChatID, UpperMessageID: parent.ID,
 			AppID: source.AppID, SenderOpenID: source.SenderOpenID, SenderIsUser: source.SenderIsUser,
@@ -117,7 +117,7 @@ func (s *Store) copyForwarded(appID string, parent Message, sources []Message) [
 			for _, id := range source.forwardedIDs {
 				nested = append(nested, s.messages.items[id])
 			}
-			child.forwardedIDs = s.copyForwarded(appID, child, nested)
+			child.forwardedIDs = s.copyForwarded(child, nested)
 		}
 		s.messages.put(child)
 		ids = append(ids, child.ID)
