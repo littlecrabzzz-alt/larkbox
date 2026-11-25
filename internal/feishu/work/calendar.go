@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -26,7 +27,7 @@ func primaryData(owner store.ResourceOwner) fields {
 }
 
 func (h handler) ownCalendar(w http.ResponseWriter, r *http.Request) (store.ResourceOwner, bool) {
-	owner := h.owner(r)
+	owner := middleware.ResourceOwner(r)
 	calendar := r.PathValue("calendar_id")
 	if calendar != "" && calendar != "primary" && calendar != store.CalendarID(owner) {
 		fail(w, protocol.ResourceNotFound)
@@ -42,7 +43,7 @@ func (h handler) calendar(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) primaryCalendar(w http.ResponseWriter, r *http.Request) {
-	owner := h.owner(r)
+	owner := middleware.ResourceOwner(r)
 	reply(w, fields{"calendars": []fields{{"calendar": primaryData(owner), "user_id": owner.UserOpenID}}})
 }
 

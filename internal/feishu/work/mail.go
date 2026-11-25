@@ -21,7 +21,7 @@ const (
 )
 
 func (h handler) mailbox(w http.ResponseWriter, r *http.Request) (store.ResourceOwner, store.User, bool) {
-	owner := h.owner(r)
+	owner := middleware.ResourceOwner(r)
 	user, ok := h.state.Mailbox(owner, r.PathValue("mailbox_id"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)

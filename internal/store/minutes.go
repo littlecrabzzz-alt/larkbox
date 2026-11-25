@@ -26,7 +26,7 @@ func (s *Store) Minute(owner ResourceOwner, token string) (config.Minute, bool) 
 	app, hasApp := s.apps.items[owner.AppID]
 	user, hasUser := s.users.items[owner.UserOpenID]
 	if !hasMinute || !hasApp || !hasUser || user.Inactive || owner.UserOpenID != entry.OwnerOpenID ||
-		entry.TenantKey != app.TenantKey || entry.TenantKey != user.TenantKey {
+		entry.TenantKey != owner.TenantKey || entry.TenantKey != app.TenantKey || entry.TenantKey != user.TenantKey {
 		return config.Minute{}, false
 	}
 	return entry, true

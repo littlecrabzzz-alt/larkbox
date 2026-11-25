@@ -2,6 +2,7 @@ package store
 
 import (
 	"cmp"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -30,7 +31,8 @@ func (s *Store) Mailbox(owner ResourceOwner, selector string) (User, bool) {
 	defer s.mu.RUnlock()
 	app, hasApp := s.apps.items[owner.AppID]
 	user, hasUser := s.users.items[owner.UserOpenID]
-	if !hasApp || !hasUser || user.Inactive || user.TenantKey != app.TenantKey || (user.Email == "" && user.EnterpriseEmail == "") {
+	if !hasApp || !hasUser || user.Inactive || user.TenantKey != owner.TenantKey || app.TenantKey != owner.TenantKey ||
+		(user.Email == "" && user.EnterpriseEmail == "") {
 		return User{}, false
 	}
 	if !strings.EqualFold(selector, "me") && !userMailAddress(user, selector) {
@@ -77,11 +79,11 @@ func (s *Store) SendMailDraft(owner ResourceOwner, id string) (MailMessage, erro
 	}
 	recipients := slices.Concat(draft.To, draft.CC, draft.BCC)
 	if len(recipients) == 0 {
-		return MailMessage{}, ErrNotFound
+		return MailMessage{}, errors.New("draft requires a recipient")
 	}
 	app, hasApp := s.apps.items[owner.AppID]
 	sender, hasUser := s.users.items[owner.UserOpenID]
-	if !hasApp || !hasUser || sender.Inactive || sender.TenantKey != app.TenantKey || !userMailAddress(sender, draft.From) {
+	if !hasApp || !hasUser || sender.Inactive || sender.TenantKey != owner.TenantKey || app.TenantKey != owner.TenantKey || !userMailAddress(sender, draft.From) {
 		return MailMessage{}, ErrTokenOwner
 	}
 	message := MailMessage{
@@ -95,7 +97,7 @@ func (s *Store) SendMailDraft(owner ResourceOwner, id string) (MailMessage, erro
 			continue
 		}
 		incoming := cloneMail(message)
-		incoming.Owner = ResourceOwner{AppID: owner.AppID, UserOpenID: user.OpenID}
+		incoming.Owner = ResourceOwner{TenantKey: owner.TenantKey, AppID: owner.AppID, UserOpenID: user.OpenID}
 		incoming.MessageID, incoming.Folder = protocol.NewID("mm_"), "INBOX"
 		incoming.BCC = nil
 		incoming.Raw = ""

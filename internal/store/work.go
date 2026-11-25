@@ -51,7 +51,7 @@ func (s *Store) CreateCalendarEvent(entry CalendarEvent) CalendarEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry.ID = protocol.NewID("evt_") + "_0"
-	s.work.events[entry.ID] = entry
+	s.work.events[entry.ID] = cloneCalendarEvent(entry)
 	return entry
 }
 
@@ -63,7 +63,7 @@ func (s *Store) CalendarEvent(owner ResourceOwner, id string) (CalendarEvent, bo
 	if !ok || entry.Owner != owner {
 		return CalendarEvent{}, false
 	}
-	return entry, true
+	return cloneCalendarEvent(entry), true
 }
 
 // CalendarEvents returns events overlapping the requested half-open interval.
@@ -73,7 +73,7 @@ func (s *Store) CalendarEvents(owner ResourceOwner, start, end time.Time) []Cale
 	result := make([]CalendarEvent, 0)
 	for _, entry := range s.work.events {
 		if entry.Owner == owner && entry.Start.Before(end) && entry.End.After(start) {
-			result = append(result, entry)
+			result = append(result, cloneCalendarEvent(entry))
 		}
 	}
 	slices.SortFunc(result, func(a, b CalendarEvent) int {
@@ -83,6 +83,11 @@ func (s *Store) CalendarEvents(owner ResourceOwner, start, end time.Time) []Cale
 		return cmp.Compare(a.ID, b.ID)
 	})
 	return result
+}
+
+func cloneCalendarEvent(entry CalendarEvent) CalendarEvent {
+	entry.VChat, entry.Reminders = slices.Clone(entry.VChat), slices.Clone(entry.Reminders)
+	return entry
 }
 
 // DeleteCalendarEvent removes one visible event from its calendar.

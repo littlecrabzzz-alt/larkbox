@@ -22,13 +22,7 @@ type handler struct{ state *store.Store }
 func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 	h := handler{state}
 	withToken := func(required middleware.RequiredToken, path string, action http.HandlerFunc, scopes ...string) {
-		mux.Handle(path, middleware.Bearer(state, required, cfg.StrictMode)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity, _ := middleware.AuthFromContext(r.Context())
-			if cfg.StrictMode && (identity.Kind == store.UserToken || identity.Scope != "") && !middleware.RequireOneScope(w, identity, scopes...) {
-				return
-			}
-			action(w, r)
-		})))
+		mux.Handle(path, middleware.OwnedResource(state, required, cfg.StrictMode, action, scopes...))
 	}
 	register := func(path string, action http.HandlerFunc, scopes ...string) {
 		withToken(middleware.TenantOrUser, path, action, scopes...)
@@ -61,22 +55,16 @@ func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 	mail(http.MethodPost, "/search", h.searchMail, mailReadScope)
 }
 
-func (h handler) owner(r *http.Request) store.ResourceOwner {
-	if actor, ok := middleware.AuthFromContext(r.Context()); ok {
-		return store.ResourceOwner{AppID: actor.AppID, UserOpenID: actor.UserOpenID}
-	}
-	if apps := h.state.Apps().List(); len(apps) > 0 {
-		return store.ResourceOwner{AppID: apps[0].AppID}
-	}
-	return store.ResourceOwner{}
-}
-
 func reply(w http.ResponseWriter, data any) {
 	_ = protocol.WriteJSON(w, http.StatusOK, protocol.Envelope{Code: protocol.Success, Msg: "success", Data: data})
 }
 
 func fail(w http.ResponseWriter, code protocol.Code) {
-	_ = protocol.WriteError(w, protocol.NewError(code, nil))
+	err := protocol.NewError(code, nil)
+	if code == protocol.InvalidParameter {
+		err.Status = http.StatusBadRequest
+	}
+	_ = protocol.WriteError(w, err)
 }
 
 func stateError(w http.ResponseWriter, err error) {

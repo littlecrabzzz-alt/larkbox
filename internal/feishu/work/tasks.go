@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -38,7 +39,7 @@ func (h handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := store.Commit(r.Context(), h.state, func() (store.Task, error) {
-		return h.state.CreateTask(h.owner(r), input.Summary, input.Description), nil
+		return h.state.CreateTask(middleware.ResourceOwner(r), input.Summary, input.Description), nil
 	})
 	if err != nil {
 		stateError(w, err)
@@ -48,7 +49,7 @@ func (h handler) createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) readTask(w http.ResponseWriter, r *http.Request) {
-	task, ok := h.state.Task(h.owner(r), r.PathValue("task_guid"))
+	task, ok := h.state.Task(middleware.ResourceOwner(r), r.PathValue("task_guid"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return
@@ -108,7 +109,7 @@ func (h handler) updateTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed, err := store.Commit(r.Context(), h.state, func() (store.Task, error) {
-		return h.state.UpdateTask(h.owner(r), r.PathValue("task_guid"), summary, description, completed)
+		return h.state.UpdateTask(middleware.ResourceOwner(r), r.PathValue("task_guid"), summary, description, completed)
 	})
 	if err != nil {
 		stateError(w, err)

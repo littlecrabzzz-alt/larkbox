@@ -4,11 +4,12 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 func (h handler) minute(w http.ResponseWriter, r *http.Request) {
-	entry, ok := h.state.Minute(h.owner(r), r.PathValue("minute_token"))
+	entry, ok := h.state.Minute(middleware.ResourceOwner(r), r.PathValue("minute_token"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return
@@ -18,7 +19,7 @@ func (h handler) minute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) minuteArtifacts(w http.ResponseWriter, r *http.Request) {
-	entry, ok := h.state.Minute(h.owner(r), r.PathValue("minute_token"))
+	entry, ok := h.state.Minute(middleware.ResourceOwner(r), r.PathValue("minute_token"))
 	if !ok {
 		fail(w, protocol.ResourceNotFound)
 		return
