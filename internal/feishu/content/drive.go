@@ -21,23 +21,38 @@ func (h handler) driveRoot(w http.ResponseWriter, _ *http.Request) {
 func (h handler) uploadDrive(w http.ResponseWriter, r *http.Request) {
 	const maxFile = 20 << 20
 	r.Body = http.MaxBytesReader(w, r.Body, maxFile+(1<<20))
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	parser, err := r.MultipartReader()
+	if err != nil {
 		fail(w, protocol.MalformedRequest)
 		return
 	}
-	defer func() { _ = r.MultipartForm.RemoveAll() }()
-	name := r.FormValue("file_name")
-	if strings.TrimSpace(name) == "" || path.Base(name) != name || strings.ContainsAny(name, "\\\r\n") || r.FormValue("parent_type") != "explorer" {
+	form, err := parser.ReadForm(1 << 20)
+	if err != nil {
+		fail(w, protocol.MalformedRequest)
+		return
+	}
+	defer func() { _ = form.RemoveAll() }()
+	value := func(key string) string {
+		values := form.Value[key]
+		if len(values) == 1 {
+			return values[0]
+		}
+		return ""
+	}
+	name := value("file_name")
+	files := form.File["file"]
+	if strings.TrimSpace(name) == "" || path.Base(name) != name || strings.ContainsAny(name, "\\\r\n") || value("parent_type") != "explorer" || len(files) != 1 {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	file, header, err := r.FormFile("file")
+	header := files[0]
+	file, err := header.Open()
 	if err != nil {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
 	defer func() { _ = file.Close() }()
-	size, sizeErr := strconv.ParseInt(r.FormValue("size"), 10, 64)
+	size, sizeErr := strconv.ParseInt(value("size"), 10, 64)
 	if sizeErr != nil || header.Size != size || size > maxFile {
 		fail(w, protocol.InvalidParameter)
 		return
@@ -49,7 +64,7 @@ func (h handler) uploadDrive(w http.ResponseWriter, r *http.Request) {
 	}
 	stored, err := store.Commit(r.Context(), h.state, func() (store.DriveFile, error) {
 		return h.state.UploadDriveFile(store.DriveFile{
-			ID: r.FormValue("file_token"), Owner: middleware.ResourceOwner(r), Name: name, Parent: cmp.Or(r.FormValue("parent_node"), store.DriveRoot),
+			ID: value("file_token"), Owner: middleware.ResourceOwner(r), Name: name, Parent: cmp.Or(value("parent_node"), store.DriveRoot),
 			ContentType: http.DetectContentType(body), Data: body,
 		})
 	})
