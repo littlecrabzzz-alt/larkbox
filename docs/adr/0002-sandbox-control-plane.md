@@ -26,6 +26,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /clock` | Returns the current UTC `now` and whether manual time is configured. |
 | `POST /clock/advance` | Requires `{"by":"15s"}` or another positive Go duration. Returns the clock state and wakes due retries. Returns 409 in wall-clock mode. |
 | `GET /state` | Returns strict mode, build version, sanitized apps, users, departments, approval definitions, Minutes fixtures, chats, card summaries, active faults, and WebSocket sessions. |
+| `GET /snapshot` | Exports versioned runtime state and pending channel retries to an authenticated operator. |
+| `POST /snapshot` | Validates and atomically imports versioned state for an authenticated operator. |
 | `GET /metrics` | Returns Prometheus gauges for queued deliveries and retry waits and counters for delivery attempts, failures, retries, and rate-limit rejections. |
 | `GET /debug/pprof/{profile}` | Returns an enabled runtime profile to an authenticated operator. |
 | `POST /seed` | Accepts `apps`, `users`, `departments`, `approval_definitions`, `minutes`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates references before committing. |
@@ -131,6 +133,22 @@ and signals retries whose delay has elapsed since the failed attempt was
 recorded. Advance returns before network delivery finishes. The runtime uses
 wall time for network deadlines, webhook signatures, fault delays, and trace latency.
 Reset cancels retry waits and restores the configured start time.
+
+### Runtime snapshots
+
+Snapshot version 1 contains the resource, authentication and replay state,
+the current manual clock, and eligible channel retries. Import validates the
+format and clock mode before changing the runtime. It advances the admission
+generation, rebuilds message indexes, starts fresh sessions and diagnostics,
+and resumes retries at their recorded deadlines using the same event IDs.
+An operator token protects both snapshot routes.
+
+An optional state file uses the same format. The server writes each
+checkpoint to a private temporary file, synchronizes it, and atomically
+replaces the prior file. After an abrupt process stop, recovery starts from
+the last completed checkpoint. Graceful shutdown drains active requests and
+saves a final checkpoint. The configured startup seed remains the baseline
+for explicit resets.
 
 ### Audit and fault rules
 

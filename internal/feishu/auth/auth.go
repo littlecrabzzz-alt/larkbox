@@ -66,7 +66,7 @@ func (h handler) internalToken(includeApp bool) http.HandlerFunc {
 			return
 		}
 		if !matchesSecret(app, secret) {
-			writeAPIError(w, protocol.WrongAppSecret)
+			_ = protocol.WriteError(w, protocol.APIError{Status: http.StatusOK, Code: protocol.AppUnauthorized, Message: "app secret invalid"})
 			return
 		}
 

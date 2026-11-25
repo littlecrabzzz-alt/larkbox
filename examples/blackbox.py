@@ -91,9 +91,10 @@ def wait_for(probe, seconds=8):
 
 
 class Sandbox:
-    def __init__(self, binary, ready):
+    def __init__(self, binary, ready, process):
         self.binary = binary
         self.ready = ready
+        self.process = process
 
     @property
     def url(self):
@@ -149,7 +150,7 @@ def start(binary, directory, name, config):
                 return ready.exists()
 
             wait_for(ready_or_failed)
-            yield Sandbox(binary, ready)
+            yield Sandbox(binary, ready, proc)
         finally:
             if proc.poll() is None:
                 proc.terminate()

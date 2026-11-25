@@ -87,6 +87,9 @@ func serve(ctx context.Context, cfg config.Config, noUI bool, readyFile string) 
 		opts = append(opts, server.WithLogger(logger))
 	}
 	srv := server.New(cfg, opts...)
+	if err := srv.LoadCheckpoint(); err != nil {
+		return err
+	}
 	if readyFile != "" {
 		if err := writeReadyFile(readyFile, listener.Addr().String()); err != nil {
 			return fmt.Errorf("write ready file: %w", err)
@@ -103,6 +106,13 @@ func serve(ctx context.Context, cfg config.Config, noUI bool, readyFile string) 
 		}
 	}
 
+	go srv.CheckpointUntil(ctx, func(err error) {
+		if logger != nil {
+			logger.Error("checkpoint_failed", "error", err.Error())
+		} else {
+			log.Printf("checkpoint failed: %v", err)
+		}
+	})
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(listener) }()
 	select {

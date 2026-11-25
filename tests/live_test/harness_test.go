@@ -4,7 +4,6 @@ package livetest
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -95,7 +94,7 @@ func TestMutationCleanup(t *testing.T) {
 		t.Run("register fallback", func(t *testing.T) {
 			registerMutation(t, "test mutation", func(ctx context.Context) (*larkcore.ApiResp, error) {
 				called = ctx.Err() == nil
-				return nil, errors.New("synthetic failure")
+				return &larkcore.ApiResp{StatusCode: http.StatusOK, RawBody: []byte(okData)}, nil
 			}, nil)
 		})
 		if !called {

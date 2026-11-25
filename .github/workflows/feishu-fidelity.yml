@@ -1,0 +1,55 @@
+name: Feishu fidelity
+
+on:
+  schedule:
+    - cron: '30 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feishu-test-tenant
+  cancel-in-progress: false
+
+jobs:
+  differential:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: feishu-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run the local contracts
+        run: go test -tags=live -count=1 ./tests/live_test
+        env:
+          FEISHU_LIVE: '0'
+
+      - name: Run the dedicated test tenant contracts
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_TEST_CHAT_ID: ${{ secrets.FEISHU_TEST_CHAT_ID }}
+          FEISHU_LIVE: '1'
+          FEISHU_LIVE_ARTIFACT_DIR: ${{ runner.temp }}/feishu-contract-shapes
+        run: |
+          if [[ -z "$FEISHU_APP_ID" || -z "$FEISHU_APP_SECRET" || -z "$FEISHU_TEST_CHAT_ID" ]]; then
+            echo "Configure the dedicated test tenant app and chat in the feishu-test environment." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          go test -tags=live -count=1 -v ./tests/live_test -run '^(TestAuthContract|TestTenantClientCredentialsContract|TestUnknownTokenRevocationContract)$'
+          go test -tags=live -count=1 -v ./tests/live_test -run '^TestBotAndIMContracts$/^(bot_info|chat_message_lifecycle)$'
+
+      - name: Upload sanitized contract shapes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feishu-contract-shapes
+          path: ${{ runner.temp }}/feishu-contract-shapes/
+          if-no-files-found: ignore
+          retention-days: 14

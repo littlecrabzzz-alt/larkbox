@@ -148,7 +148,7 @@ func TestInternalTokens(t *testing.T) {
 				{"duplicate key", `{"app_id":"first","app_id":"cli_larkbox","app_secret":"value"}`, "invalid param", 200, 10003},
 				{"trailing value", `{"app_id":"cli_larkbox","app_secret":"value"} {}`, "bad request or invalid param", 400, 9499},
 				{"unknown app", `{"app_id":"unknown","app_secret":"value"}`, "app id not exists", 200, 10014},
-				{"wrong secret", `{"app_id":"cli_larkbox","app_secret":"value"}`, "wrong app secret", 200, 10015},
+				{"wrong secret", `{"app_id":"cli_larkbox","app_secret":"value"}`, "app secret invalid", 200, 10014},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					w := f.post(path, "", tc.body)

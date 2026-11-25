@@ -914,3 +914,66 @@ func TestSocketRetryUsesManualClockAndResetCancelsIt(t *testing.T) {
 		t.Fatal("old retry traces survived reset")
 	}
 }
+
+func TestSocketRetryRestoresOnReconnectedPeer(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := simclock.New(at)
+	d := testDispatcher(t, cfg, Options{
+		ManualClock: clock, WebSocketMaxAttempts: 2,
+		RetryBackoff: func(int) time.Duration { return time.Minute },
+	}, clock.Now)
+	host := strings.TrimPrefix(testGateway(t, d).URL, "http://")
+	peer := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 1)
+	d.Enqueue(t.Context(), app.AppID, "im.message.receive_v1", at, map[string]string{"text": "pending"})
+	first := readDataFrame(t, peer)
+	writeAck(t, peer, first, wsproto.Response{StatusCode: 500})
+	deadline := time.Now().Add(time.Second)
+	for d.Metrics().RetryWaiters == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if d.Metrics().RetryWaiters != 1 {
+		t.Fatal("retry did not enter the wait queue")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	requireNoError(t, d.Shutdown(ctx))
+	var pending []PendingRetry
+	requireNoError(t, d.ExportCheckpoint(func(retries []PendingRetry) error {
+		pending = retries
+		return nil
+	}))
+	if len(pending) != 1 || pending[0].Channel != "websocket" || pending[0].Attempt != 2 || !pending[0].Due.Equal(at.Add(time.Minute)) {
+		t.Fatalf("graceful checkpoint lost the pending WebSocket attempt: %+v", pending)
+	}
+
+	restoredClock := simclock.New(at)
+	restored := testDispatcher(t, cfg, Options{ManualClock: restoredClock, WebSocketMaxAttempts: 2}, restoredClock.Now)
+	restored.RestoreCheckpoint(func() {}, pending)
+	_, err := restoredClock.Advance(time.Minute)
+	requireNoError(t, err)
+	host = strings.TrimPrefix(testGateway(t, restored).URL, "http://")
+	peer = connect(t, ticketURL(t, restored, host, app), http.StatusSwitchingProtocols)
+	retry := readDataFrame(t, peer)
+	if wsproto.HeaderValue(first, wsproto.TraceID) != wsproto.HeaderValue(retry, wsproto.TraceID) ||
+		wsproto.HeaderValue(first, wsproto.MessageID) == wsproto.HeaderValue(retry, wsproto.MessageID) {
+		t.Fatal("restored retry lost its event ID or reused its acknowledgement ID")
+	}
+	writeAck(t, peer, retry, wsproto.Response{StatusCode: 200})
+	deadline = time.Now().Add(time.Second)
+	for restored.Metrics().Pending != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	trace := restored.state.Traces()
+	if len(trace) != 1 || trace[0].Attempt != 2 || trace[0].Status != 200 || trace[0].EventID != pending[0].EventID {
+		t.Fatalf("restored WebSocket delivery did not acknowledge at attempt 2: %+v", trace)
+	}
+	requireNoError(t, restored.ExportCheckpoint(func(retries []PendingRetry) error {
+		if len(retries) != 0 {
+			t.Errorf("acknowledged event retained in the retry snapshot: %+v", retries)
+		}
+		return nil
+	}))
+}

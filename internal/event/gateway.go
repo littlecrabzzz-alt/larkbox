@@ -230,6 +230,8 @@ func (d *Dispatcher) registerSession(ticket ticket, s *session) bool {
 	registered := s != nil && !d.closed
 	if registered {
 		app.sessions = append(app.sessions, s)
+		close(d.socketChanged)
+		d.socketChanged = make(chan struct{})
 	}
 	close(app.changed)
 	if len(app.sessions) == 0 && app.upgrading == 0 {

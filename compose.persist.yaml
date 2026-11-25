@@ -1,0 +1,8 @@
+services:
+  larkbox:
+    environment:
+      LARKBOX_STATE_FILE: /data/state.json
+    volumes:
+      - larkbox-state:/data
+volumes:
+  larkbox-state:

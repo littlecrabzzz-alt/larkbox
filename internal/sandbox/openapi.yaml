@@ -10,6 +10,35 @@ security:
   - sandboxBearer: []
   - sandboxBasic: []
 paths:
+  /_sandbox/snapshot:
+    get:
+      operationId: exportSnapshot
+      summary: Download a versioned sandbox state snapshot
+      security:
+        - sandboxBearer: []
+        - sandboxBasic: []
+      responses:
+        "200":
+          description: Private snapshot with runtime credentials
+          content: {application/json: {schema: {$ref: '#/components/schemas/Snapshot'}}}
+        "401": {description: Sandbox operator authentication required}
+        "404": {description: Snapshot routes require an operator token}
+    post:
+      operationId: importSnapshot
+      summary: Replace runtime state with a compatible snapshot
+      security:
+        - sandboxBearer: []
+        - sandboxBasic: []
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/Snapshot'}}}
+      responses:
+        "200":
+          description: State restored
+          content: {application/json: {schema: {type: object, properties: {restored: {type: boolean}}}}}
+        "400": {description: 'Invalid snapshot, version, or clock mode'}
+        "401": {description: Sandbox operator authentication required}
+        "404": {description: Snapshot routes require an operator token}
   /_sandbox/metrics:
     get:
       operationId: metrics
@@ -576,6 +605,14 @@ components:
             properties:
               error: {type: string}
   schemas:
+    Snapshot:
+      type: object
+      required: [version, state, pending_retries]
+      properties:
+        version: {type: integer, const: 1}
+        manual_clock: {type: string, format: date-time}
+        state: {type: object}
+        pending_retries: {type: array, items: {type: object}}
     Clock:
       type: object
       required: [now, manual]

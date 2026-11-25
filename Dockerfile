@@ -9,13 +9,14 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -ldflags="-s -w -X github.com/littlecrabzzz-alt/larkbox/internal/server.Version=$VERSION" \
-    -o /out/larkbox ./cmd/larkbox
+    -o /out/larkbox ./cmd/larkbox && mkdir -p /out/data
 
 FROM alpine:3.23
 ARG VERSION=0.1.0-dev
 LABEL org.opencontainers.image.source="https://github.com/littlecrabzzz-alt/larkbox" \
       org.opencontainers.image.version="$VERSION"
 COPY --from=build /out/larkbox /usr/local/bin/larkbox
+COPY --from=build --chown=65532:65532 /out/data /data
 ENV LARKBOX_ADDR=0.0.0.0:8080
 ENV LARKBOX_JSON_LOGS=true
 USER 65532:65532

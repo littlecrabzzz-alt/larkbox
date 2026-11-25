@@ -126,6 +126,7 @@ type Config struct {
 	SandboxToken        string               `json:"sandbox_token,omitempty" yaml:"sandbox_token,omitempty"`
 	Pprof               bool                 `json:"pprof,omitempty" yaml:"pprof,omitempty"`
 	JSONLogs            bool                 `json:"json_logs,omitempty" yaml:"json_logs,omitempty"`
+	StateFile           string               `json:"state_file,omitempty" yaml:"state_file,omitempty"`
 	RateLimits          RateLimits           `json:"rate_limits,omitempty" yaml:"rate_limits,omitempty"`
 	EventDelivery       EventDelivery        `json:"event_delivery,omitempty" yaml:"event_delivery,omitempty"`
 	ClockStart          *time.Time           `json:"clock_start,omitempty" yaml:"clock_start,omitempty"`
