@@ -8,6 +8,8 @@ import (
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 var (
@@ -21,7 +23,6 @@ var (
 
 const (
 	cardUUIDWindow  = time.Hour
-	cardLifetime    = 14 * 24 * time.Hour
 	streamingWindow = 10 * time.Minute
 )
 
@@ -94,7 +95,7 @@ func (s *Store) liveCard(appID, id string, now time.Time) (Card, error) {
 	if err != nil {
 		return Card{}, err
 	}
-	if !now.Before(card.CreatedAt.Add(cardLifetime)) {
+	if !now.Before(card.CreatedAt.Add(protocol.CardEntityLifetime)) {
 		return Card{}, ErrCardExpired
 	}
 	return card, nil

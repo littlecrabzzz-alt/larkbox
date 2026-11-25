@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,10 @@ func TestWebhookPayloadsAndChallenge(t *testing.T) {
 					stamp, nonce, sig := r.Header.Get("X-Lark-Request-Timestamp"), r.Header.Get("X-Lark-Request-Nonce"), r.Header.Get("X-Lark-Signature")
 					if stamp == "" || nonce == "" || !protocol.VerifyWebhookSignature(sig, stamp, nonce, app.EncryptKey, raw) {
 						t.Error("invalid encrypted webhook signature")
+					}
+					signedAt, err := strconv.ParseInt(stamp, 10, 64)
+					if err != nil || time.Since(time.Unix(signedAt, 0)).Abs() > 5*time.Minute {
+						t.Error("signed webhook timestamp must use wall time")
 					}
 					mustRead, err = protocol.DecryptWebhook(app.EncryptKey, raw)
 					if err != nil {

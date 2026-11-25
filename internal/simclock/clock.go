@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 // Manual is a frozen clock advanced explicitly by a sandbox client.
@@ -33,13 +35,19 @@ func (c *Manual) Snapshot() (time.Time, <-chan struct{}) {
 	return c.now, c.changed
 }
 
+// ValidTime reserves room for CardKit expiry timestamps and rejects the unset time.
+func ValidTime(now time.Time) bool {
+	now = now.UTC()
+	return !now.IsZero() && now.Year() >= 1 && now.Add(protocol.CardEntityLifetime).Year() <= 9999
+}
+
 // Advance moves the clock forwards and wakes waiters.
 func (c *Manual) Advance(by time.Duration) (time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	next := c.now.Add(by)
-	if by <= 0 || next.Year() > 9999 {
-		return c.now, errors.New("advance must be positive and keep the clock in the RFC3339 range")
+	if by <= 0 || !ValidTime(next) {
+		return c.now, errors.New("advance must be positive and keep card expiry timestamps in the RFC3339 range")
 	}
 	c.set(next)
 	return next, nil

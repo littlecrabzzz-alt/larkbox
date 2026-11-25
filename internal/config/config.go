@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 )
 
 // App describes a virtual Feishu application and its bot.
@@ -313,8 +315,8 @@ func (cfg Config) Validate() error {
 	if err := cfg.EventDelivery.validate(); err != nil {
 		return err
 	}
-	if cfg.ClockStart != nil && (cfg.ClockStart.UTC().Year() < 1 || cfg.ClockStart.UTC().Year() > 9999) {
-		return errors.New("clock_start must be in the RFC3339 range")
+	if cfg.ClockStart != nil && !simclock.ValidTime(*cfg.ClockStart) {
+		return errors.New("clock_start must be nonzero and keep card expiry timestamps in the RFC3339 range")
 	}
 	return cfg.ValidateSeeds()
 }

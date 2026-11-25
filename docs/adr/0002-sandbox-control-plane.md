@@ -60,7 +60,7 @@ counts, and webhook, verification, and acknowledgement deadlines. An optional
 RFC3339 start time freezes the sandbox state clock. Advance changes that clock
 and signals retries whose delay has elapsed since the failed attempt was
 recorded. Advance returns before network delivery finishes. The runtime uses
-wall time for network deadlines, fault delays, and measured trace latency.
+wall time for network deadlines, webhook signatures, fault delays, and trace latency.
 Reset cancels retry waits and restores the configured start time.
 
 ### Audit and fault rules

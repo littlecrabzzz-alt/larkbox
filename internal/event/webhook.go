@@ -135,7 +135,7 @@ func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, body []byte
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if app.EncryptKey != "" {
-		timestamp, nonce := strconv.FormatInt(d.state.Now().Unix(), 10), protocol.NewID("")
+		timestamp, nonce := strconv.FormatInt(time.Now().Unix(), 10), protocol.NewID("")
 		req.Header.Set("X-Lark-Request-Timestamp", timestamp)
 		req.Header.Set("X-Lark-Request-Nonce", nonce)
 		req.Header.Set("X-Lark-Signature", protocol.WebhookSignature(timestamp, nonce, app.EncryptKey, body))

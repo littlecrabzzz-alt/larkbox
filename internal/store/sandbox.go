@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 // UpsertSeed applies a validated runtime seed without changing the reset baseline.
@@ -184,7 +186,7 @@ func (s *Store) InspectChatMessages(id string) ([]Message, error) {
 }
 
 // ExpiresAt returns the CardKit entity expiry.
-func (c Card) ExpiresAt() time.Time { return c.CreatedAt.Add(cardLifetime) }
+func (c Card) ExpiresAt() time.Time { return c.CreatedAt.Add(protocol.CardEntityLifetime) }
 
 // StreamingExpiresAt returns the current stream expiry if streaming is enabled.
 func (c Card) StreamingExpiresAt() *time.Time {

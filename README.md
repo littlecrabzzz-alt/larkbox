@@ -128,7 +128,7 @@ such as `{"by":"15s"}`. `GET /_sandbox/clock` reports the current time and
 mode. The same clock controls token and card expiry and the delay after a
 failed event attempt. The advance response reports the new time. Due retries
 resume asynchronously, so inspect their traces for delivery results.
-Network deadlines, callback deadlines, and latency faults use actual time.
+Network deadlines, webhook signature timestamps, and latency faults use actual time.
 A reset cancels pending retries and restores `clock_start` along with the seed.
 
 ```sh

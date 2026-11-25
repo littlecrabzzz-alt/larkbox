@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func cleanEnvironment(t *testing.T) {
@@ -253,5 +254,19 @@ func TestEventTimingConfiguration(t *testing.T) {
 	t.Setenv("LARKBOX_EVENT_DELIVERY", `{"typo":1}`)
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown environment setting accepted: %v", err)
+	}
+}
+
+func TestManualClockLeavesRoomForCardExpiry(t *testing.T) {
+	cfg := Default()
+	for _, stamp := range []string{"0001-01-01T00:00:00Z", "9999-12-18T00:00:00Z"} {
+		start, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ClockStart = &start
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("invalid start %s accepted", stamp)
+		}
 	}
 }
