@@ -198,8 +198,8 @@ the audit ring.
 ### Local boundary and data exposure
 
 Use a loopback binding or an isolated test network with trusted clients.
-The control plane is unauthenticated and inherits the listener address.
-It can change all fixture state and send webhook requests to configured or
+The control plane inherits the listener address. Configure an operator token
+for a shared listener. It can change all fixture state and send webhook requests to configured or
 overridden HTTP(S) destinations, so the listener belongs inside the local
 development or CI trust boundary. The embedded UI can use same-origin
 requests against the control plane.

@@ -67,7 +67,7 @@ func (l *RateLimiter) Wrap(state *store.Store, routes *http.ServeMux, next http.
 		}
 		SetTraceApp(r, identity.AppID)
 		lease, err := store.Commit(r.Context(), state, func() (rateLease, error) {
-			return l.reserve(identity, state.Now(), state.ResetEpoch()), nil
+			return l.reserve(identity, state.Now, state.ResetEpoch()), nil
 		})
 		if WriteResetConflict(w, err) {
 			return
@@ -100,7 +100,7 @@ func (l *RateLimiter) Wrap(state *store.Store, routes *http.ServeMux, next http.
 	})
 }
 
-func (l *RateLimiter) reserve(auth Auth, now time.Time, epoch uint64) rateLease {
+func (l *RateLimiter) reserve(auth Auth, clock func() time.Time, epoch uint64) rateLease {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.epoch != epoch {
@@ -111,7 +111,7 @@ func (l *RateLimiter) reserve(auth Auth, now time.Time, epoch uint64) rateLease 
 	if current.tenant != auth.TenantKey {
 		current = appLimits{tenant: auth.TenantKey}
 	}
-	now = now.UTC()
+	now := clock().UTC()
 	y, month, day := now.Date()
 	current.second = openWindow(current.second, now.Truncate(time.Second).Add(time.Second))
 	current.day = openWindow(current.day, time.Date(y, month, day+1, 0, 0, 0, 0, time.UTC))

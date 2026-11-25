@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sample environment for optional live differential testing.
 - Synthetic sandbox reference fixtures for Auth, Bot, IM, CardKit, and webhook events, with hygiene and wire-contract tests in standard CI. See the [live capture and sanitization guide](testdata/fixtures/README.md).
 - Build-tagged differential tests for sandbox and Feishu test tenants that share assertions and clean up test messages and reactions.
+- Compose and versioned container images, operator authentication, configurable per-app API budgets, delivery metrics, runtime profiles, and correlated JSON logs.
 
 ### Fixed
 
