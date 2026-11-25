@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	larkmail "github.com/larksuite/oapi-sdk-go/v3/service/mail/v1"
+
 	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
@@ -33,16 +35,14 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 	}
 	const eml = "From: Alice <alice@example.test>\r\nTo: alice@example.test\r\nBcc: bob@example.test\r\nSubject: Test memo\r\nContent-Type: text/plain\r\n\r\nSimulated delivery"
 	raw := base64.RawURLEncoding.EncodeToString([]byte(eml))
-	saved := sandboxDecode[struct {
-		Data struct {
-			ID string `json:"draft_id"`
-		} `json:"data"`
-	}](t, []byte(request(http.MethodPost, "me/drafts", alice, `{"raw":"`+raw+`"}`, http.StatusOK))).Data.ID
-	if saved == "" {
+	create := sandboxDecode[larkmail.CreateUserMailboxDraftResp](t, []byte(request(http.MethodPost, "me/drafts", alice, `{"raw":"`+raw+`"}`, http.StatusOK)))
+	if create.Data == nil || create.Data.Draft == nil || create.Data.Draft.Id == nil || *create.Data.Draft.Id == "" {
 		t.Fatal("no draft ID")
 	}
+	saved := *create.Data.Draft.Id
 	get := request(http.MethodGet, "alice@example.test/drafts/"+saved+"?format=raw", readonly, "", http.StatusOK)
-	if !strings.Contains(get, `"message":{"raw":"`+raw+`"}`) {
+	draft := sandboxDecode[larkmail.GetUserMailboxDraftResp](t, []byte(get)).Data.Draft
+	if draft == nil || draft.Id == nil || *draft.Id != saved || draft.Message == nil || draft.Message.Raw == nil || *draft.Message.Raw != raw {
 		t.Fatalf("draft raw output lost wire format: %s", get)
 	}
 	request(http.MethodGet, "alice@example.test/drafts/"+saved, modify, "", http.StatusBadRequest)
@@ -55,17 +55,11 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 	if again := request(http.MethodPost, "me/drafts/"+saved+"/send", alice, "", http.StatusOK); sent != again {
 		t.Fatalf("repeat produced a new delivery: %s vs %s", sent, again)
 	}
-	inbox := sandboxDecode[struct {
-		Data struct {
-			Items []struct {
-				ID string `json:"message_id"`
-			} `json:"items"`
-		} `json:"data"`
-	}](t, []byte(request(http.MethodGet, "me/messages", bob, "", http.StatusOK))).Data.Items
-	if len(inbox) != 1 || inbox[0].ID == "" {
+	inbox := sandboxDecode[larkmail.ListUserMailboxMessageResp](t, []byte(request(http.MethodGet, "me/messages", bob, "", http.StatusOK))).Data.Items
+	if len(inbox) != 1 || inbox[0] == "" {
 		t.Fatalf("expected a single delivered message: %+v", inbox)
 	}
-	path := "me/messages/" + inbox[0].ID + "?format=full"
+	path := "me/messages/" + inbox[0] + "?format=full"
 	detail := request(http.MethodGet, path, bob, "", http.StatusOK)
 	if !strings.Contains(detail, `"subject":"Test memo"`) || !strings.Contains(detail, `"bcc":[]`) ||
 		!strings.Contains(detail, base64.RawURLEncoding.EncodeToString([]byte("Simulated delivery"))) {

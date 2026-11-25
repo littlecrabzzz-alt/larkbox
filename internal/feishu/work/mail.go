@@ -58,7 +58,7 @@ func (h handler) createMailDraft(w http.ResponseWriter, r *http.Request) {
 		stateError(w, err)
 		return
 	}
-	reply(w, fields{"draft_id": saved.ID})
+	reply(w, fields{"draft": fields{"id": saved.ID}})
 }
 
 func (h handler) readMailDraft(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +71,7 @@ func (h handler) readMailDraft(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.ResourceNotFound)
 		return
 	}
-	reply(w, fields{"draft": fields{"draft_id": draft.ID, "message": fields{"raw": draft.Raw}}})
+	reply(w, fields{"draft": fields{"id": draft.ID, "message": fields{"raw": draft.Raw}}})
 }
 
 func (h handler) sendMailDraft(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +174,7 @@ func (h handler) batchReadMail(w http.ResponseWriter, r *http.Request) {
 	reply(w, fields{"messages": messages})
 }
 
-func mailPage[T any](w http.ResponseWriter, r *http.Request, maxPage int, items []T, render func(T) fields) {
+func mailPage[T, R any](w http.ResponseWriter, r *http.Request, maxPage int, items []T, render func(T) R) {
 	query := r.URL.Query()
 	offset, offsetErr := strconv.Atoi(cmp.Or(query.Get("page_token"), "0"))
 	size, sizeErr := strconv.Atoi(cmp.Or(query.Get("page_size"), strconv.Itoa(maxPage)))
@@ -188,7 +188,7 @@ func mailPage[T any](w http.ResponseWriter, r *http.Request, maxPage int, items 
 	if end < len(items) {
 		next = strconv.Itoa(end)
 	}
-	page := make([]fields, 0, end-start)
+	page := make([]R, 0, end-start)
 	for _, item := range items[start:end] {
 		page = append(page, render(item))
 	}
@@ -212,7 +212,7 @@ func (h handler) listMail(w http.ResponseWriter, r *http.Request) {
 			items = append(items, msg.MessageID)
 		}
 	}
-	mailPage(w, r, 20, items, func(id string) fields { return fields{"message_id": id} })
+	mailPage(w, r, 20, items, func(id string) string { return id })
 }
 
 func (h handler) searchMail(w http.ResponseWriter, r *http.Request) {
