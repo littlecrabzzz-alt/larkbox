@@ -26,6 +26,8 @@ and sends a saved mail draft to the virtual mailbox. The probe retries the
 same draft send and checks that the sent mailbox contains a single copy.
 Calendar deletion and draft sending use the CLI's `--yes` flag against
 synthetic records on the isolated sandbox.
+The pinned CLI accepts the task URL for `+complete` and the task GUID for
+`+reopen`.
 
 ## Try the browser flow
 

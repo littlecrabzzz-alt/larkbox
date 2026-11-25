@@ -71,7 +71,7 @@ func (h handler) readMailDraft(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.ResourceNotFound)
 		return
 	}
-	reply(w, fields{"draft_id": draft.ID, "raw": draft.Raw})
+	reply(w, fields{"draft": fields{"draft_id": draft.ID, "message": fields{"raw": draft.Raw}}})
 }
 
 func (h handler) sendMailDraft(w http.ResponseWriter, r *http.Request) {
@@ -113,11 +113,15 @@ func mailScope(r *http.Request, scope string) bool {
 }
 
 func mailData(r *http.Request, msg store.MailMessage, format string) fields {
+	state := 1
+	if msg.Folder == "SENT" {
+		state = 2
+	}
 	item := fields{"message_id": msg.MessageID, "thread_id": msg.ThreadID, "folder_id": msg.Folder,
-		"internal_date": milliseconds(msg.SentAt), "is_read": msg.Folder == "SENT", "label_ids": []string{}}
+		"internal_date": milliseconds(msg.SentAt), "is_read": msg.Folder == "SENT", "message_state": state, "label_ids": []string{}}
 	if mailScope(r, mailAddressScope) {
 		item["head_from"] = fields{"mail_address": msg.From}
-		item["head_to"], item["head_cc"], item["head_bcc"] = addressData(msg.To), addressData(msg.CC), addressData(msg.BCC)
+		item["to"], item["cc"], item["bcc"] = addressData(msg.To), addressData(msg.CC), addressData(msg.BCC)
 	}
 	if mailScope(r, mailSubjectScope) {
 		item["subject"] = msg.Subject
@@ -170,7 +174,7 @@ func (h handler) batchReadMail(w http.ResponseWriter, r *http.Request) {
 	reply(w, fields{"messages": messages})
 }
 
-func mailPage(w http.ResponseWriter, r *http.Request, maxPage int, items []fields) {
+func mailPage[T any](w http.ResponseWriter, r *http.Request, maxPage int, items []T, render func(T) fields) {
 	query := r.URL.Query()
 	offset, offsetErr := strconv.Atoi(cmp.Or(query.Get("page_token"), "0"))
 	size, sizeErr := strconv.Atoi(cmp.Or(query.Get("page_size"), strconv.Itoa(maxPage)))
@@ -184,7 +188,11 @@ func mailPage(w http.ResponseWriter, r *http.Request, maxPage int, items []field
 	if end < len(items) {
 		next = strconv.Itoa(end)
 	}
-	reply(w, fields{"items": items[start:end], "has_more": next != "", "page_token": next})
+	page := make([]fields, 0, end-start)
+	for _, item := range items[start:end] {
+		page = append(page, render(item))
+	}
+	reply(w, fields{"items": page, "has_more": next != "", "page_token": next})
 }
 
 func (h handler) listMail(w http.ResponseWriter, r *http.Request) {
@@ -198,13 +206,13 @@ func (h handler) listMail(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	items := make([]fields, 0)
+	items := make([]string, 0)
 	for _, msg := range h.state.MailboxMessages(owner) {
 		if msg.Folder == folder && (query.Get("only_unread") != "true" || msg.Folder == "INBOX") {
-			items = append(items, fields{"message_id": msg.MessageID})
+			items = append(items, msg.MessageID)
 		}
 	}
-	mailPage(w, r, 20, items)
+	mailPage(w, r, 20, items, func(id string) fields { return fields{"message_id": id} })
 }
 
 func (h handler) searchMail(w http.ResponseWriter, r *http.Request) {
@@ -228,35 +236,41 @@ func (h handler) searchMail(w http.ResponseWriter, r *http.Request) {
 		fail(w, protocol.InvalidParameter)
 		return
 	}
-	items := make([]fields, 0)
+	items := make([]store.MailMessage, 0)
+	canSubject, canAddress, canBody := mailScope(r, mailSubjectScope), mailScope(r, mailAddressScope), mailScope(r, mailBodyScope)
 	for _, msg := range h.state.MailboxMessages(owner) {
 		if len(input.Filter.Folder) > 0 && !slices.ContainsFunc(input.Filter.Folder, func(folder string) bool { return strings.EqualFold(folder, msg.Folder) }) ||
 			input.Filter.IsUnread != nil && *input.Filter.IsUnread != (msg.Folder == "INBOX") {
 			continue
 		}
-		item := mailData(r, msg, "full")
-		subject, _ := item["subject"].(string)
+		subject := ""
+		if canSubject {
+			subject = msg.Subject
+		}
 		if input.Filter.Subject != "" && !containsFold(subject, input.Filter.Subject) {
 			continue
 		}
 		searchable := []string{subject}
-		if mailScope(r, mailAddressScope) {
+		if canAddress {
 			searchable = append(searchable, msg.From)
 			searchable = append(searchable, msg.To...)
 			searchable = append(searchable, msg.CC...)
 			searchable = append(searchable, msg.BCC...)
 		}
-		if mailScope(r, mailBodyScope) {
+		if canBody {
 			searchable = append(searchable, msg.Text, msg.HTML)
 		}
 		if sought != "" && !slices.ContainsFunc(searchable, func(value string) bool { return containsFold(value, sought) }) {
 			continue
 		}
-		items = append(items, fields{"meta_data": fields{"message_biz_id": msg.MessageID, "thread_id": msg.ThreadID,
-			"title": subject, "from": item["head_from"], "create_time": msg.SentAt.Format("2006-01-02T15:04:05Z07:00"),
-			"body_plain_text": item["body_plain_text"], "body_html": item["body_html"]}})
+		items = append(items, msg)
 	}
-	mailPage(w, r, 15, items)
+	mailPage(w, r, 15, items, func(msg store.MailMessage) fields {
+		item := mailData(r, msg, "full")
+		return fields{"meta_data": fields{"message_biz_id": msg.MessageID, "thread_id": msg.ThreadID,
+			"title": item["subject"], "from": item["head_from"], "create_time": msg.SentAt.Format("2006-01-02T15:04:05Z07:00"),
+			"body_plain_text": item["body_plain_text"], "body_html": item["body_html"]}}
+	})
 }
 
 func containsFold(value, query string) bool {

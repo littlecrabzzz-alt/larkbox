@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/feishu/middleware"
@@ -28,8 +27,8 @@ func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 		withToken(middleware.TenantOrUser, path, action, scopes...)
 	}
 	const calendars = "/open-apis/calendar/v4/calendars/"
-	register("GET "+calendars+"{calendar_id}", h.calendar, "calendar:calendar.event:read", "calendar:calendar:readonly")
-	register("POST "+calendars+"primary", h.primaryCalendar, "calendar:calendar.event:read", "calendar:calendar:readonly")
+	register("GET "+calendars+"{calendar_id}", h.calendar, "calendar:calendar:read", "calendar:calendar:readonly", "calendar:calendar")
+	register("POST "+calendars+"primary", h.primaryCalendar, "calendar:calendar:read", "calendar:calendar:readonly", "calendar:calendar", "calendar:calendar.calendar:readonly")
 	register("POST "+calendars+"{calendar_id}/events", h.createEvent, "calendar:calendar.event:create", "calendar:calendar")
 	register("GET "+calendars+"{calendar_id}/events/{event_id}", h.readEvent, "calendar:calendar.event:read", "calendar:calendar:readonly", "calendar:calendar")
 	register("GET "+calendars+"{calendar_id}/events/instance_view", h.agenda, "calendar:calendar.event:read", "calendar:calendar:readonly", "calendar:calendar")
@@ -47,7 +46,7 @@ func RegisterRoutes(mux *http.ServeMux, cfg config.Config, state *store.Store) {
 	}
 	mail(http.MethodGet, "/profile", h.mailProfile, "mail:user_mailbox:readonly")
 	mail(http.MethodPost, "/drafts", h.createMailDraft, "mail:user_mailbox.message:modify")
-	mail(http.MethodGet, "/drafts/{draft_id}", h.readMailDraft, "mail:user_mailbox.message:modify")
+	mail(http.MethodGet, "/drafts/{draft_id}", h.readMailDraft, mailReadScope)
 	mail(http.MethodPost, "/drafts/{draft_id}/send", h.sendMailDraft, "mail:user_mailbox.message:send")
 	mail(http.MethodGet, "/messages", h.listMail, mailReadScope)
 	mail(http.MethodGet, "/messages/{message_id}", h.readMail, mailReadScope)
@@ -88,12 +87,4 @@ func read(w http.ResponseWriter, r *http.Request, into any, allowEmpty bool) boo
 		return false
 	}
 	return true
-}
-
-func resourceURL(r *http.Request, path string) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return (&url.URL{Scheme: scheme, Host: r.Host, Path: path}).String()
 }

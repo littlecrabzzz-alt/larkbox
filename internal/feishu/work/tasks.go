@@ -2,6 +2,7 @@ package work
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -12,10 +13,16 @@ import (
 )
 
 func taskData(r *http.Request, task store.Task) fields {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	query := url.Values{"guid": {task.ID}}
+	link := url.URL{Scheme: scheme, Host: r.Host, Path: "/client/todo/task", RawQuery: query.Encode()}
 	return fields{
 		"guid": task.ID, "summary": task.Summary, "description": task.Description, "completed_at": milliseconds(task.Completed),
 		"created_at": milliseconds(task.Created), "updated_at": milliseconds(task.Updated),
-		"url": resourceURL(r, "/open-apis/task/v2/tasks/"+task.ID),
+		"url": link.String(),
 	}
 }
 

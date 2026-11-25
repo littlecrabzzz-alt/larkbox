@@ -18,11 +18,14 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 	const scope = "mail:user_mailbox:readonly mail:user_mailbox.message:modify mail:user_mailbox.message:send mail:user_mailbox.message:readonly mail:user_mailbox.message.address:read mail:user_mailbox.message.subject:read mail:user_mailbox.message.body:read"
 	expiry := time.Now().Add(time.Minute)
 	alice, bob, metadataOnly := "u-mail-alice-test", "u-mail-bob-test", "u-mail-bob-metadata"
+	readonly, modify := "u-mail-alice-readonly", "u-mail-alice-modify"
 	app := cfg.Apps[0].AppID
 	requireSDKNetwork(t, srv.Store().PutTokens(
 		store.Token{Value: alice, Kind: store.UserToken, AppID: app, UserOpenID: cfg.Users[0].OpenID, Scope: scope, ExpiresAt: expiry},
 		store.Token{Value: bob, Kind: store.UserToken, AppID: app, UserOpenID: cfg.Users[1].OpenID, Scope: scope, ExpiresAt: expiry},
 		store.Token{Value: metadataOnly, Kind: store.UserToken, AppID: app, UserOpenID: cfg.Users[1].OpenID, Scope: "mail:user_mailbox.message:readonly", ExpiresAt: expiry},
+		store.Token{Value: readonly, Kind: store.UserToken, AppID: app, UserOpenID: cfg.Users[0].OpenID, Scope: "mail:user_mailbox.message:readonly", ExpiresAt: expiry},
+		store.Token{Value: modify, Kind: store.UserToken, AppID: app, UserOpenID: cfg.Users[0].OpenID, Scope: "mail:user_mailbox.message:modify", ExpiresAt: expiry},
 	))
 	request := func(method, endpoint, bearer, payload string, status int) string {
 		t.Helper()
@@ -38,7 +41,11 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 	if saved == "" {
 		t.Fatal("no draft ID")
 	}
-	request(http.MethodGet, "alice@example.test/drafts/"+saved, alice, "", http.StatusOK)
+	get := request(http.MethodGet, "alice@example.test/drafts/"+saved+"?format=raw", readonly, "", http.StatusOK)
+	if !strings.Contains(get, `"message":{"raw":"`+raw+`"}`) {
+		t.Fatalf("draft raw output lost wire format: %s", get)
+	}
+	request(http.MethodGet, "alice@example.test/drafts/"+saved, modify, "", http.StatusBadRequest)
 	request(http.MethodGet, "alice@example.test/drafts/"+saved, bob, "", http.StatusNotFound)
 	request(http.MethodPost, "me/drafts/"+saved+"/send", alice, `{"send_time":"1800000000"}`, http.StatusBadRequest)
 	if got := request(http.MethodGet, "me/messages", bob, "", http.StatusOK); !strings.Contains(got, `"items":[]`) {
@@ -60,7 +67,7 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 	}
 	path := "me/messages/" + inbox[0].ID + "?format=full"
 	detail := request(http.MethodGet, path, bob, "", http.StatusOK)
-	if !strings.Contains(detail, `"subject":"Test memo"`) || !strings.Contains(detail, `"head_bcc":[]`) ||
+	if !strings.Contains(detail, `"subject":"Test memo"`) || !strings.Contains(detail, `"bcc":[]`) ||
 		!strings.Contains(detail, base64.RawURLEncoding.EncodeToString([]byte("Simulated delivery"))) {
 		t.Fatalf("inbox message lost its subject, body, or recipient privacy: %s", detail)
 	}
@@ -76,7 +83,7 @@ func TestMailDeliveryAndMailboxScope(t *testing.T) {
 func TestWorkResourceIsolationAndTimeWindows(t *testing.T) {
 	cfg := sdkTestConfig()
 	srv, web := sdkEventServer(t, cfg, event.Options{})
-	const scope = "calendar:calendar.event:create calendar:calendar.event:read task:task:write minutes:minutes.basic:read minutes:minutes.artifacts:read"
+	const scope = "calendar:calendar:read calendar:calendar.event:create calendar:calendar.event:read task:task:write minutes:minutes.basic:read minutes:minutes.artifacts:read"
 	app := cfg.Apps[0].AppID
 	expiry := time.Now().Add(time.Minute)
 	for i, value := range []string{"u-work-alice", "u-work-bob"} {
@@ -89,6 +96,9 @@ func TestWorkResourceIsolationAndTimeWindows(t *testing.T) {
 		return string(contentCall(t, web, method, "/open-apis/"+path, "u-work-"+who, "application/json", strings.NewReader(body), status))
 	}
 	const events = "calendar/v4/calendars/primary/events"
+	if body := call(http.MethodGet, "calendar/v4/calendars/primary", "alice", "", http.StatusOK); !strings.Contains(body, `"data":{"calendar_id":`) {
+		t.Fatalf("calendar metadata response did not contain the ID at data.calendar_id: %s", body)
+	}
 	call(http.MethodPost, events, "alice", `{"start_time":{"timestamp":"300"},"end_time":{"timestamp":"299"}}`, http.StatusBadRequest)
 	call(http.MethodPost, events, "alice", `{"summary":"Calendar block","start_time":{"timestamp":"300"},"end_time":{"timestamp":"400"}}`, http.StatusOK)
 	rangePath := events + "/instance_view?start_time=350&end_time=450"

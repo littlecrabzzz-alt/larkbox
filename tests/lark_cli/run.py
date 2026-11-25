@@ -225,10 +225,10 @@ def verify_work(command, directory, origin):
     call("calendar", "+delete", *selector, "--yes")
     assert call(*agenda) == []
 
-    created = call("api", "POST", "/open-apis/task/v2/tasks", "--data", json.dumps({"summary": marker}))["task"]
+    created = call("task", "+create", "--summary", marker, "--format", "json")
     task_path = "/open-apis/task/v2/tasks/" + created["guid"]
-    assert created["completed_at"] == "0", created
-    result = call("task", "+complete", "--task-id", created["guid"], "--format", "json")
+    assert call("api", "GET", task_path)["task"]["completed_at"] == "0", created
+    result = call("task", "+complete", "--task-id", created["url"], "--format", "json")
     readback = call("api", "GET", task_path)["task"]
     assert readback["completed_at"] == result["completed_at"] and int(result["completed_at"]) > 0, readback
     again = call("task", "+complete", "--task-id", created["guid"], "--format", "json")
@@ -258,6 +258,8 @@ def verify_work(command, directory, origin):
     assert [msg["message_id"] for msg in listed["messages"]] == [sent["message_id"]], listed
     readback = call("mail", "+messages", "--message-ids", sent["message_id"], "--format", "json")
     assert readback["messages"][0]["body_plain_text"].strip() == "The mailbox contains this local test.", readback
+    assert readback["messages"][0]["message_state_text"] == "sent", readback
+    assert readback["messages"][0]["to"][0]["mail_address"] == "bob@example.test", readback
 
 
 def main():

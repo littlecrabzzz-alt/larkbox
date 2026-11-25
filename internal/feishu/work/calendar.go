@@ -38,7 +38,7 @@ func (h handler) ownCalendar(w http.ResponseWriter, r *http.Request) (store.Reso
 
 func (h handler) calendar(w http.ResponseWriter, r *http.Request) {
 	if owner, ok := h.ownCalendar(w, r); ok {
-		reply(w, fields{"calendar": primaryData(owner)})
+		reply(w, primaryData(owner))
 	}
 }
 
