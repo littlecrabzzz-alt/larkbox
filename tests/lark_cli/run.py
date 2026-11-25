@@ -15,7 +15,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 ALICE = "ou_larkbox_alice"
 BOB = "ou_larkbox_bob"
-SCOPE = "im:message im:message.send_as_user"
+SCOPE = "contact:user:search im:message im:message.send_as_user"
 DEMO_APP = "cli_larkbox"
 HTTP = build_opener(ProxyHandler({}))
 
@@ -114,8 +114,14 @@ def verify(args, directory):
             assert [(entry["open_id"], entry["scope"]) for entry in grants] == expected, grants
         assert get_json(origin, f"apps/{DEMO_APP}/grants")["items"] == []
 
+        recipient = ""
+        for query in ("Bob", "bob@example.test"):
+            found = json.loads(command("contact", "+search-user", "--as", "user", "--query", query, "--format", "json"))
+            matches = found["data"]["users"]
+            assert len(matches) == 1 and matches[0]["open_id"] == BOB, matches
+            recipient = matches[0]["open_id"]
         marker = "Official CLI sandbox message"
-        sent = json.loads(command("im", "+messages-send", "--as", "user", "--user-id", BOB, "--text", marker))
+        sent = json.loads(command("im", "+messages-send", "--as", "user", "--user-id", recipient, "--text", marker))
         messages = get_json(origin, "chats/" + sent["data"]["chat_id"] + "/messages")["messages"]
         assert len(messages) == 1 and messages[0]["message_id"] == sent["data"]["message_id"], messages
         assert messages[0]["sender"]["id"] == ALICE and json.loads(messages[0]["content"])["text"] == marker, messages
@@ -123,7 +129,7 @@ def verify(args, directory):
         assert json.loads(command("auth", "logout", "--json"))["loggedOut"]
         assert get_json(origin, grants_path)["items"] == []
         version = command("--version").strip()
-    print(f"PASS {version} app registration, denial, login, user message and logout")
+    print(f"PASS {version} app registration, denial, login, recipient search, user message and logout")
 
 
 def main():

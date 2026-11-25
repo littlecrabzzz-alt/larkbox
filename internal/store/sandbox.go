@@ -30,6 +30,14 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 		return err
 	}
 	apps, users, chats := maps.Clone(s.apps.items), maps.Clone(s.users.items), maps.Clone(s.chats.items)
+	departments := maps.Clone(s.departments.items)
+	for _, dept := range cfg.Departments {
+		departments[dept.OpenID] = dept
+	}
+	definitions := maps.Clone(s.approvalDefinitions.items)
+	for _, definition := range cfg.ApprovalDefinitions {
+		definitions[definition.Code] = definition
+	}
 	for _, app := range cfg.Apps {
 		if strings.TrimSpace(app.AppSecret) == "" || strings.TrimSpace(app.BotOpenID) == "" {
 			return errors.New("apps require app_secret and bot_open_id")
@@ -68,6 +76,16 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 			return err
 		}
 	}
+	directory := config.Config{
+		Apps: slices.Collect(maps.Values(apps)), Users: slices.Collect(maps.Values(users)),
+		Departments: slices.Collect(maps.Values(departments)), ApprovalDefinitions: slices.Collect(maps.Values(definitions)),
+	}
+	if err := directory.ValidateDirectory(); err != nil {
+		return err
+	}
+	if err := directory.ValidateApprovals(); err != nil {
+		return err
+	}
 	if upsert {
 		for _, app := range cfg.Apps {
 			s.apps.put(app)
@@ -80,6 +98,12 @@ func (s *Store) applySeed(cfg config.Config, upsert bool) error {
 		}
 		for _, chat := range cfg.Chats {
 			s.chats.put(chats[chat.ChatID])
+		}
+		for _, dept := range cfg.Departments {
+			s.departments.put(dept)
+		}
+		for _, definition := range cfg.ApprovalDefinitions {
+			s.approvalDefinitions.put(definition)
 		}
 		s.registerTemplates(cfg.CardTemplates)
 	}

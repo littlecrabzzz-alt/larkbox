@@ -50,11 +50,12 @@ curl -fsS http://127.0.0.1:8080/healthz
 
 The server starts in strict mode with a virtual app, bot, users, and chats. The startup log shows the built-in local app credentials. `/healthz` is available in the foundation slice. The compatibility matrix tracks Feishu endpoint implementation.
 
-Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, `chats`, and `card_templates` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
+Configuration precedence is built-in defaults, then the YAML or JSON file passed to `--config`, then environment variables, then explicitly supplied flags (`--addr`, `--strict`). File keys include `addr`, `strict_mode`, `token_ttls` (in seconds), and the `apps`, `users`, `departments`, `chats`, `approval_definitions`, and `card_templates` seed lists. An omitted seed list keeps its defaults. Use `[]` to clear a list. Null seed lists are invalid.
 
 - `LARKBOX_ADDR`, `LARKBOX_STRICT_MODE`
 - `LARKBOX_TENANT_TOKEN_TTL`, `LARKBOX_APP_TOKEN_TTL`, `LARKBOX_USER_TOKEN_TTL`, `LARKBOX_REFRESH_TOKEN_TTL`, `LARKBOX_OAUTH_CODE_TTL` (in seconds)
 - `LARKBOX_APPS`, `LARKBOX_USERS`, `LARKBOX_CHATS`, `LARKBOX_CARD_TEMPLATES` (JSON arrays)
+- `LARKBOX_DEPARTMENTS`, `LARKBOX_APPROVAL_DEFINITIONS` (JSON arrays)
 
 For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exactly matches one of the app's configured `redirect_uris`. The demo app registers `http://127.0.0.1:8080/callback` and `http://localhost:8080/callback`. Callbacks must use HTTP or HTTPS and have no fragment. Add `open_id` or `user_id` to select a sandbox user. With neither selector, the server authorizes the first seeded user.
 
@@ -153,9 +154,29 @@ for trusted local and test-network clients.
 ### Official CLI onboarding
 
 Run `make test-cli` with Docker to test application registration, user denial
-and approval, messaging, and logout with official `lark-cli` v1.0.100. The
+and approval, recipient search, messaging, and logout with official `lark-cli` v1.0.100. The
 [CLI test guide](tests/lark_cli/README.md) covers the loopback adapter, browser
 confirmation, and scripted device decisions.
+
+### Directory and approval fixtures
+
+Assign each user to departments with `department_open_ids`. A tenant token
+uses the app's `contact_scope`. A user token uses the signed-in user's
+`contact_scope`. Each scope may select department subtrees by
+`department_open_ids` and individual contacts by `user_open_ids`. Omit
+the scope for full tenant visibility or use `{}` for no additional contacts.
+User search in strict mode requires the `contact:user:search` OAuth scope.
+The demo users can find each other in the seeded Engineering department.
+
+Seed an approval definition with `approval_code`, `name`, and
+`approver_open_id` for a single manual task. An app listening for
+`approval_instance` registers the definition through
+`POST /open-apis/approval/v4/approvals/{approval_code}/subscribe`. Create an
+instance with the applicant's ID and a JSON-encoded `form` array, then read
+it to get the task ID. The assigned approver can approve or reject the task,
+and the applicant can withdraw a pending instance. After receiving a legacy
+approval webhook, the receiver can read the committed state by instance code.
+[Feishu approval instance event](https://open.feishu.cn/document/ukTMukTMukTM/uIDO24iM4YjLygjN/event/common-event/approval-instance-event)
 
 ### Embedded Web UI
 
@@ -297,6 +318,17 @@ Status Legend:
 | `GET /open-apis/im/v1/messages/:message_id/resources/:file_key` | Download message attachment resources | `SDK-Tested` |
 | `POST / PUT / PATCH / DELETE /open-apis/cardkit/v1/cards*` | Card entities, streaming text, settings, element edits, and atomic batches | `SDK-Tested` |
 
+### Directory and approvals
+
+| Endpoint | Notes | Status |
+|---|---|---|
+| `POST /open-apis/contact/v3/users/search` | User search by name, email, employee number or ID within the caller's visibility | `CLI-Tested` |
+| `POST /open-apis/contact/v3/users/batch_get_id` | Resolve email or mobile to a requested ID type | `SDK-Tested` |
+| `GET /open-apis/contact/v3/users/{user_id}`, `POST /users/basic_batch` | Employee and basic profile lookup | `SDK-Tested` |
+| `GET /open-apis/contact/v3/users/find_by_department`, `GET /departments/{department_id}/children`, `GET /scopes` | Page through department members, child departments, and app visibility | `SDK-Tested` |
+| `POST /open-apis/approval/v4/instances`, `GET /instances/{instance_id}`, `POST /instances/cancel` | Create, read, and withdraw instances | `SDK-Tested` |
+| `POST /open-apis/approval/v4/tasks/approve`, `POST /tasks/reject` | Transition a pending approval through its assigned approver | `SDK-Tested` |
+
 ### Events & Callbacks
 
 | Event / Transport | Notes | Status |
@@ -313,6 +345,7 @@ Status Legend:
 | `application.bot.menu_v6` | User clicked a configured callback item | `SDK-Tested` |
 | `card.action.trigger` | Synchronous button and form callbacks with toast and persisted card updates | `SDK-Tested` |
 | `larkbox.auth.authorization_revoked_v1` | Sandbox event for a removed user grant | `Implemented` |
+| `approval_instance` | Native approval status changes via the subscribed app's legacy webhook | `SDK-Tested` |
 
 ## Verification & Fidelity Strategy
 

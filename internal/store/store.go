@@ -118,6 +118,11 @@ type Store struct {
 	userSeedOrder       []User
 	apps                Collection[App]
 	users               Collection[User]
+	departments         Collection[config.Department]
+	approvalDefinitions Collection[config.ApprovalDefinition]
+	approvalInstances   map[string]ApprovalInstance
+	approvalRequests    map[approvalRequest]approvalReplay
+	approvalSubscribers map[string]map[string]bool
 	chats               Collection[Chat]
 	disbandedChats      map[string]struct{}
 	messages            Collection[Message]
@@ -160,7 +165,12 @@ func New(now func() time.Time, traceCapacity int) *Store {
 	s.chatMessages = make(map[string]map[string]struct{})
 	s.threadMessages = make(map[string]map[string]struct{})
 	s.apps = newCollection(&s.mu, func(a App) string { return a.AppID }, cloneApp)
-	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, nil)
+	s.users = newCollection(&s.mu, func(u User) string { return u.OpenID }, cloneUser)
+	s.departments = newCollection(&s.mu, func(dept config.Department) string { return dept.OpenID }, nil)
+	s.approvalDefinitions = newCollection(&s.mu, func(entry config.ApprovalDefinition) string { return entry.Code }, nil)
+	s.approvalInstances = make(map[string]ApprovalInstance)
+	s.approvalRequests = make(map[approvalRequest]approvalReplay)
+	s.approvalSubscribers = make(map[string]map[string]bool)
 	s.chats = newCollection(&s.mu, func(c Chat) string { return c.ChatID }, cloneChat)
 	s.disbandedChats = make(map[string]struct{})
 	s.messages = newCollection(&s.mu, func(m Message) string { return m.ID }, cloneMessage)
@@ -399,6 +409,11 @@ func cloneSeed(cfg config.Config) config.Config {
 		cfg.Apps[i] = cloneApp(app)
 	}
 	cfg.Users = slices.Clone(cfg.Users)
+	for i, user := range cfg.Users {
+		cfg.Users[i] = cloneUser(user)
+	}
+	cfg.Departments = slices.Clone(cfg.Departments)
+	cfg.ApprovalDefinitions = slices.Clone(cfg.ApprovalDefinitions)
 	cfg.Chats = slices.Clone(cfg.Chats)
 	for i, chat := range cfg.Chats {
 		cfg.Chats[i] = cloneChat(chat)
@@ -423,6 +438,11 @@ func (s *Store) reset(seed config.Config) {
 	s.registerTemplates(seed.CardTemplates)
 	clear(s.apps.items)
 	clear(s.users.items)
+	clear(s.departments.items)
+	clear(s.approvalDefinitions.items)
+	clear(s.approvalInstances)
+	clear(s.approvalRequests)
+	clear(s.approvalSubscribers)
 	s.userSeedOrder = slices.Clone(seed.Users)
 	clear(s.chats.items)
 	clear(s.disbandedChats)
@@ -445,7 +465,13 @@ func (s *Store) reset(seed config.Config) {
 		s.apps.items[app.AppID] = cloneApp(app)
 	}
 	for _, user := range seed.Users {
-		s.users.items[user.OpenID] = user
+		s.users.put(user)
+	}
+	for _, dept := range seed.Departments {
+		s.departments.put(dept)
+	}
+	for _, definition := range seed.ApprovalDefinitions {
+		s.approvalDefinitions.put(definition)
 	}
 	for _, chat := range seed.Chats {
 		s.chats.items[chat.ChatID] = cloneChat(chat)
@@ -529,7 +555,23 @@ func cloneApp(app App) App {
 	app.BotMenu = app.BotMenu.Clone()
 	app.RedirectURIs = slices.Clone(app.RedirectURIs)
 	app.EventTypes = slices.Clone(app.EventTypes)
+	app.ContactScope = cloneContactScope(app.ContactScope)
 	return app
+}
+
+func cloneUser(user User) User {
+	user.DepartmentOpenIDs = slices.Clone(user.DepartmentOpenIDs)
+	user.ContactScope = cloneContactScope(user.ContactScope)
+	return user
+}
+
+func cloneContactScope(scope *config.ContactScope) *config.ContactScope {
+	if scope == nil {
+		return nil
+	}
+	return &config.ContactScope{
+		DepartmentOpenIDs: slices.Clone(scope.DepartmentOpenIDs), UserOpenIDs: slices.Clone(scope.UserOpenIDs),
+	}
 }
 
 func cloneChat(chat Chat) Chat {

@@ -92,6 +92,9 @@ type deliveryJob struct {
 	delayedAt time.Time
 }
 
+// ApprovalInstance is the legacy webhook event for native approval state changes.
+const ApprovalInstance = "approval_instance"
+
 // Dispatcher manages event delivery and long connections for one server.
 type Dispatcher struct {
 	state          *store.Store
@@ -286,7 +289,7 @@ func (d *Dispatcher) newJob(ctx context.Context, appID, kind string, at time.Tim
 		},
 		Event: payload,
 	}
-	if kind == FirstBotConversation {
+	if kind == FirstBotConversation || kind == ApprovalInstance {
 		payloadJSON, err := json.Marshal(payload)
 		if err != nil {
 			return deliveryJob{epoch: epoch}, err
@@ -428,6 +431,9 @@ func appendDelivery(deliveries []Delivery, delivery Delivery) []Delivery {
 }
 
 func (d *Dispatcher) deliverWebSocket(ctx context.Context, job deliveryJob) Delivery {
+	if job.kind == ApprovalInstance {
+		return Delivery{}
+	}
 	s := d.selectSession(ctx, job.app.AppID, true)
 	if s == nil {
 		return Delivery{}

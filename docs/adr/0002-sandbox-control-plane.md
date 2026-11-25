@@ -25,8 +25,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /openapi.json` | Returns the machine-readable contract for built-in controls. |
 | `GET /clock` | Returns the current UTC `now` and whether manual time is configured. |
 | `POST /clock/advance` | Requires `{"by":"15s"}` or another positive Go duration. Returns the clock state and wakes due retries. Returns 409 in wall-clock mode. |
-| `GET /state` | Returns strict mode, build version, sanitized apps, users, chats, card summaries, active faults, and WebSocket sessions. |
-| `POST /seed` | Accepts any of `apps`, `users`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates duplicate IDs, URLs, member and owner references, and card templates before committing. |
+| `GET /state` | Returns strict mode, build version, sanitized apps, users, departments, approval definitions, chats, card summaries, active faults, and WebSocket sessions. |
+| `POST /seed` | Accepts `apps`, `users`, `departments`, `approval_definitions`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates references before committing. |
 | `POST /reset` | Empty body or `{}` restores the configured startup seed. An optional `{"seed":{...}}` replaces the state for this reset, with omitted lists treated as empty. Both forms clear runtime entities, credentials, traces, faults, and WebSocket tickets and disconnect existing sessions. |
 | `GET /chats` | Returns `{"chats":[...]}` with member IDs and settings. |
 | `POST /chats/open` | Requires `app_id` and `operator_open_id`. Opens or creates a user-to-bot conversation. Returns `{chat_id, created, event_type, event_id, deliveries, error}`. |
@@ -101,6 +101,19 @@ simulated user. Headless tests use the control plane decision endpoint.
 The device code goes to the polling client. The confirmation page and
 decision endpoint use the separate user code. Reset clears both flows
 and all active grants.
+
+### Directory and approval seeds
+
+Department parents, department leaders, and visibility selectors must refer
+to entities in the same tenant. `0` is the synthetic root department. The
+control plane exposes seeded directory data for operators. Contact v3 reads
+enforce the configured caller's visibility.
+
+Approval definitions belong to a tenant and refer to an active approver.
+They provide one manual task for each submitted instance. Subscribe to the
+definition through Approval v4 and include `approval_instance` in the app's
+event types to receive status changes over its webhook. Reset clears the
+runtime instances and per-definition subscriptions.
 
 ### Timing
 
