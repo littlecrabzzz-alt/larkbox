@@ -40,6 +40,7 @@ export type Message = {
   raw_card_json?: unknown;
   rendered_card_json?: unknown;
   card_id?: string;
+  card_action_disabled?: boolean;
 };
 export type SendInput = {
   chat_id: string;

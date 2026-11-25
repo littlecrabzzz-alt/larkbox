@@ -145,7 +145,7 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 	v2 := doc["schema"] == "2.0"
 	var validationErr error
 	count := 0
-	walk(doc, func(_ elementSlot, node map[string]any) bool {
+	walk(doc, func(slot elementSlot, node map[string]any) bool {
 		count++
 		if v2 {
 			if count > 200 {
@@ -154,6 +154,16 @@ func indexElements(doc map[string]any) (map[string]string, error) {
 			}
 			if node["tag"] == "note" || node["tag"] == "action" {
 				validationErr = invalid("tag", "Component is unavailable in card JSON 2.0.")
+				return true
+			}
+		}
+		if node["tag"] == "select_img" {
+			if node["multi_select"] == true && !slot.inForm {
+				validationErr = invalid("multi_select", "Multiple image selection requires a form.")
+				return true
+			}
+			if slot.inForm && !nonemptyString(node, "name") {
+				validationErr = invalid("name", "An image picker inside a form requires a name.")
 				return true
 			}
 		}
@@ -194,7 +204,7 @@ func validCardSettings(doc map[string]any) bool {
 
 func validConfig(value any) bool {
 	config, ok := value.(map[string]any)
-	return ok && optionalCardType[bool](config, "streaming_mode", "update_multi", "enable_forward", "wide_screen_mode") &&
+	return ok && optionalCardType[bool](config, "streaming_mode", "update_multi", "enable_forward", "enable_forward_interaction", "wide_screen_mode") &&
 		optionalObject(config, "style") &&
 		optionalCardCheck(config, "summary", func(value any) bool {
 			summary, ok := value.(map[string]any)
@@ -260,6 +270,7 @@ type elementSlot struct {
 	parent map[string]any
 	key    string
 	index  int // -1 for a component stored directly in an object property
+	inForm bool
 }
 
 func (s elementSlot) list() []any {
@@ -283,18 +294,23 @@ func (s elementSlot) remove() {
 	s.parent[s.key] = slices.Delete(s.list(), s.index, s.index+1)
 }
 
-func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) bool {
+func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) {
+	walkWithin(parent, false, visit)
+}
+
+func walkWithin(parent map[string]any, inForm bool, visit func(elementSlot, map[string]any) bool) bool {
+	inForm = inForm || parent["tag"] == "form"
 	// Walk only structural properties so an ID in callback values, chart data,
 	// template variables, or other opaque payloads does not become a card element.
 	for _, key := range []string{"body", "header", "elements", "columns", "actions", "fields", "options", "extra", "text", "title", "subtitle", "alt", "label", "placeholder", "text_tag_list"} {
 		switch value := parent[key].(type) {
 		case map[string]any:
-			if visitNode(elementSlot{parent, key, -1}, value, visit) {
+			if visitNode(elementSlot{parent, key, -1, inForm}, value, visit) {
 				return true
 			}
 		case []any:
 			for i, item := range value {
-				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{parent, key, i}, node, visit) {
+				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{parent, key, i, inForm}, node, visit) {
 					return true
 				}
 			}
@@ -305,7 +321,7 @@ func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) b
 		for _, locale := range slices.Sorted(maps.Keys(locales)) {
 			nodes, _ := locales[locale].([]any)
 			for i, item := range nodes {
-				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{locales, locale, i}, node, visit) {
+				if node, ok := item.(map[string]any); ok && visitNode(elementSlot{locales, locale, i, inForm}, node, visit) {
 					return true
 				}
 			}
@@ -316,7 +332,7 @@ func walk(parent map[string]any, visit func(elementSlot, map[string]any) bool) b
 
 func visitNode(slot elementSlot, node map[string]any, visit func(elementSlot, map[string]any) bool) bool {
 	tag, _ := node["tag"].(string)
-	return (tag != "" && visit(slot, node)) || walk(node, visit)
+	return (tag != "" && visit(slot, node)) || walkWithin(node, slot.inForm, visit)
 }
 
 func findElement(doc map[string]any, id string) (elementSlot, map[string]any) {

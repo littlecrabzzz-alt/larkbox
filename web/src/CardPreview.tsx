@@ -204,10 +204,10 @@ function Element({ item, act, inForm }: { item: unknown; act?: Act; inForm: bool
     case "picker_time": return <CardPicker node={node} act={act} inForm={inForm} />;
     case "select_person":
     case "multi_select_person":
-    case "select_img":
     case "overflow":
     case "select_static":
     case "multi_select_static": return <CardSelect node={node} act={act} inForm={inForm} />;
+    case "select_img": return <CardImagePicker node={node} act={act} inForm={inForm} />;
     default: return tag ? <span className="card-note">Component · {tag}</span> : null;
   }
 }
@@ -228,9 +228,9 @@ function CardButton({ node, act, inForm }: { node: Node; act?: Act; inForm: bool
       const form = event.currentTarget.form;
       if (submit && form) {
         if (!HTMLFormElement.prototype.reportValidity.call(form)) return;
-        const selects = HTMLFormElement.prototype.querySelectorAll.call(form, "select[multiple][name]:enabled");
+        const selects = HTMLFormElement.prototype.querySelectorAll.call(form, "select[multiple][name]:enabled, [data-card-multiple][name]:enabled");
         const multipleNames = new Set(Array.from(selects, (select) => select.getAttribute("name")!));
-        const checkboxes = HTMLFormElement.prototype.querySelectorAll.call(form, "input[type=checkbox][name]:enabled");
+        const checkboxes = HTMLFormElement.prototype.querySelectorAll.call(form, "input[type=checkbox][name]:enabled:not([data-card-multiple])");
         const checks = new Map(Array.from(checkboxes, (input) => [(input as HTMLInputElement).name, (input as HTMLInputElement).checked]));
         act?.({ ...action, form_value: formValues(new FormData(form), multipleNames, checks) });
       } else {
@@ -310,6 +310,38 @@ function CardImage({ node }: { node: Node }) {
   return key && !failed
     ? <img className="card-image" alt={alt} src={cardImagePath(key)} loading="lazy" onError={() => setFailed(true)} />
     : <span className="card-note">{alt}</span>;
+}
+
+function CardImagePicker({ node, act, inForm }: CardControlProps) {
+  const [selected, setSelected] = useState<number[]>([]);
+  const name = string(node.name);
+  const multiple = inForm && node.multi_select === true;
+  const options = list(node.options).map((item) => record(item) ?? {});
+  const firstEnabled = options.findIndex((option) => option.disabled !== true);
+  return <fieldset className="card-image-picker" disabled={!act || node.disabled === true}>
+    <legend>{text(node.label) || name || "Select an image"}</legend>
+    <div className="card-image-grid" data-layout={node.layout === "stretch" || node.layout === "trisect" ? node.layout : "bisect"}>
+      {options.map((option, index) => {
+        const label = text(option.hover_tips ?? option.alt) || `Image ${index + 1}`;
+        const tip = option.disabled === true ? text(option.disabled_tips) : label;
+        const value = string(option.value);
+        const image = <CardImage node={{ ...option, alt: label }} />;
+        const disabled = option.disabled === true;
+        if (!inForm) return <button type="button" key={index} disabled={disabled} title={tip}
+          onClick={() => act?.(actionFor(node, { option: value }))}>{image}</button>;
+        return <label key={index} className="card-image-option" title={tip}>
+          {image}
+          <input type={multiple ? "checkbox" : "radio"} name={name} value={value} aria-label={label}
+            data-card-multiple={multiple ? "" : undefined} disabled={disabled}
+            required={node.required === true && (!multiple || (index === firstEnabled && selected.length === 0))}
+            checked={selected.includes(index)} onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setSelected((previous) => multiple ? (checked ? [...previous, index] : previous.filter((value) => value !== index)) : [index]);
+            }} />
+        </label>;
+      })}
+    </div>
+  </fieldset>;
 }
 
 function CardTable({ node }: { node: Node }) {

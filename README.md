@@ -269,7 +269,7 @@ Status Legend:
 | `PATCH /open-apis/application/v7/applications/:app_id/ability` | Set an app's effective bot menu | `SDK-Tested` |
 | `POST /open-apis/im/v1/messages` | Strict `receive_id_type` & JSON-string `content` checks | `SDK-Tested` |
 | `POST /open-apis/im/v1/messages/:message_id/reply` | Maintains `parent_id`, `root_id`, `thread_id` | `SDK-Tested` |
-| `POST /open-apis/im/v1/messages/:message_id/forward`, `POST /open-apis/im/v1/messages/merge_forward` | Forward to a user, group, or topic. Read merged children by parent ID and attachments by child ID | `SDK-Tested` |
+| `POST /open-apis/im/v1/messages/:message_id/forward`, `POST /open-apis/im/v1/messages/merge_forward` | Forward to a user, group, or topic. Read merged children by parent ID and attachments by child ID. Honors card forwarding settings | `SDK-Tested` |
 | `PATCH / PUT / DELETE / GET /open-apis/im/v1/messages/:message_id` | Card update, edit, recall, detail | `SDK-Tested` |
 | `GET /open-apis/im/v1/messages` | History list with sort & cursor pagination | `SDK-Tested` |
 | `POST / GET / DELETE /open-apis/im/v1/messages/:message_id/reactions` | Emoji reactions | `SDK-Tested` |

@@ -667,6 +667,7 @@ components:
         message_id: *identifier
         chat_id: *identifier
         msg_type: *string
+        card_action_disabled: *boolean
         body: {type: object, properties: {content: *string}}
     SendMessage:
       type: object

@@ -128,7 +128,7 @@ func (s *Store) CardTemplate(id, version string) string {
 
 // renderMessage resolves a linked entity for its owner in the same snapshot.
 func (s *Store) renderMessage(callerAppID string, m Message) Message {
-	if callerAppID == m.AppID && m.CardID != "" && !m.Deleted {
+	if callerAppID == m.CardAppID() && m.CardID != "" && !m.Deleted {
 		if card, err := s.ownedCard(callerAppID, m.CardID); err == nil {
 			m.Content = cardContent(card)
 			m.DiagnosticRedactor = card.DiagnosticRedactor
@@ -161,7 +161,7 @@ func (s *Store) CardActionTarget(messageID, openID string) (CardActionSnapshot, 
 	}
 	target := CardActionSnapshot{Message: cloneMessage(m), Operator: user}
 	if m.CardID != "" {
-		card, err := s.ownedCard(m.AppID, m.CardID)
+		card, err := s.ownedCard(m.CardAppID(), m.CardID)
 		if err != nil {
 			return CardActionSnapshot{}, err
 		}
@@ -180,6 +180,9 @@ func (s *Store) cardActionTarget(messageID, openID string) (Message, User, error
 	}
 	if m.MsgType != "interactive" {
 		return Message{}, User{}, errors.New("message is not interactive")
+	}
+	if m.Forwarded && !s.renderMessage(m.CardAppID(), m).CardActionsEnabled() {
+		return Message{}, User{}, errors.New("forwarded card interactions are disabled")
 	}
 	user, exists := s.users.items[openID]
 	chat, hasChat := s.chats.items[m.ChatID]
@@ -208,7 +211,7 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 	var previous Card
 	var schema string
 	if current.CardID != "" {
-		previous, err = s.liveCard(current.AppID, current.CardID, now)
+		previous, err = s.liveCard(current.CardAppID(), current.CardID, now)
 		if err != nil {
 			return err
 		}
@@ -236,7 +239,7 @@ func (s *Store) ApplyCardAction(ctx context.Context, target CardActionSnapshot, 
 	}
 	switch {
 	case reference != "":
-		if _, err := s.liveCard(current.AppID, reference, now); err != nil {
+		if _, err := s.liveCard(current.CardAppID(), reference, now); err != nil {
 			return err
 		}
 		current.CardID = reference

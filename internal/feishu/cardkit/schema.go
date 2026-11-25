@@ -23,7 +23,7 @@ func ValidMessageCard(card map[string]any) bool {
 		return false
 	}
 	config, _ := card["config"].(map[string]any)
-	if !optionalCardType[bool](config, "update_multi") {
+	if !optionalCardType[bool](config, "update_multi", "enable_forward", "enable_forward_interaction") {
 		return false
 	}
 	schema, supplied := card["schema"]
@@ -388,10 +388,13 @@ func validCardComponent(node map[string]any) bool {
 				optionalCardType[string](option, "value", "url") && optionalObject(option, "multi_url")
 		})
 	case "select_img":
-		return cardObjects(node["options"], true, func(option map[string]any) bool {
-			return nonemptyString(option, "img_key") && optionalCardType[string](option, "value") &&
-				optionalCardCheck(option, "alt", validCardText)
-		})
+		return optionalCardType[bool](node, "multi_select", "can_preview") &&
+			optionalCardType[string](node, "name", "layout", "aspect_ratio") &&
+			cardObjects(node["options"], true, func(option map[string]any) bool {
+				return nonemptyString(option, "img_key") && optionalCardType[string](option, "value") &&
+					optionalCardType[bool](option, "disabled") && optionalCardCheck(option, "alt", validCardText) &&
+					optionalCardCheck(option, "hover_tips", validCardText) && optionalCardCheck(option, "disabled_tips", validCardText)
+			})
 	case "img_combination":
 		return nonemptyString(node, "combination_mode") && cardObjects(node["img_list"], true, func(image map[string]any) bool {
 			return nonemptyString(image, "img_key") && optionalCardCheck(image, "alt", validCardText)

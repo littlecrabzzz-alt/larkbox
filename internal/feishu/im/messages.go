@@ -439,6 +439,9 @@ func (h handler) editMessage(w http.ResponseWriter, r *http.Request) {
 				return protocol.NewError(protocol.IMInvalidParameter, nil)
 			}
 			if patch {
+				if m.Forwarded {
+					return noPermission
+				}
 				if m.CardID != "" {
 					return protocol.APIError{Code: protocol.IMInvalidParameter, Message: "Use CardKit APIs to update a message card entity.", Status: http.StatusBadRequest}
 				}

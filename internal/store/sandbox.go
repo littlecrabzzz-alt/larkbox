@@ -158,10 +158,10 @@ func (s *Store) InspectMessage(id string) (Message, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m, ok := s.messages.items[id]
-	return s.renderMessage(m.AppID, m), ok
+	return s.renderMessage(m.CardAppID(), m), ok
 }
 
-// InspectChatMessages returns all messages including thread replies and recalled messages.
+// InspectChatMessages returns chat messages including thread replies and recalls.
 func (s *Store) InspectChatMessages(id string) ([]Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -174,7 +174,7 @@ func (s *Store) InspectChatMessages(id string) ([]Message, error) {
 		if m.UpperMessageID != "" {
 			continue
 		}
-		messages = append(messages, s.renderMessage(m.AppID, m))
+		messages = append(messages, s.renderMessage(m.CardAppID(), m))
 	}
 	slices.SortFunc(messages, func(a, b Message) int {
 		if a.Order == b.Order {

@@ -21,6 +21,10 @@ func TestPreviewValidatesCardWithoutCreatingEntity(t *testing.T) {
 		{"tag":"markdown","element_id":"duplicate","content":"second"}
 	]}}}`, http.StatusBadRequest)
 	assertContains(t, duplicate, "Duplicate element_id")
+	multiOutsideForm := call(t, srv, http.MethodPost, path, `{"card":{"schema":"2.0","body":{"elements":[
+		{"tag":"select_img","multi_select":true,"options":[{"img_key":"img_test","value":"photo"}]}
+	]}}}`, http.StatusBadRequest)
+	assertContains(t, multiOutsideForm, "Multiple image selection requires a form.")
 	assertContains(t, call(t, srv, http.MethodGet, "/_sandbox/cards", "", http.StatusOK), `"cards":[]`)
 }
 

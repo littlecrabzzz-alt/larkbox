@@ -19,8 +19,8 @@ func originalCardContent(w http.ResponseWriter, r *http.Request) (bool, bool) {
 }
 
 func cardForRead(m store.Message, appID string, original bool) store.Message {
-	if m.MsgType != "interactive" || m.Deleted || (m.CardID != "" && m.AppID != appID) ||
-		(original && m.AppID == appID) {
+	if m.MsgType != "interactive" || m.Deleted || (m.CardID != "" && m.CardAppID() != appID) ||
+		(original && m.CardAppID() == appID) {
 		return m
 	}
 	card := decodeContentObject(m.Content)

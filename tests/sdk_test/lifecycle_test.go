@@ -3,6 +3,7 @@ package sdk_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -281,4 +282,72 @@ func TestForwardMessageAndReadResourcesWithOfficialSDK(t *testing.T) {
 		MessageId(value(items[1].MessageId)).Type("image").FileKey(key).Build())
 	requireSDKNetwork(t, err)
 	requireSDKCode(t, recalled.CodeError, 230110)
+}
+
+func TestForwardedCardsUseOriginalAppPolicy(t *testing.T) {
+	cfg := sdkEventConfig()
+	origin := &cfg.Apps[0]
+	origin.EncryptKey = ""
+	callbacks := make(chan string, 2)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := sdkReadWebhook(t, w, r, origin.EncryptKey)
+		if !ok {
+			return
+		}
+		var packet struct {
+			Header struct {
+				AppID string `json:"app_id"`
+			} `json:"header"`
+		}
+		if err := json.Unmarshal(body, &packet); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		callbacks <- packet.Header.AppID
+		_, _ = w.Write([]byte(`{"toast":{"type":"success","content":"Received by original app"}}`))
+	}))
+	defer receiver.Close()
+	origin.WebhookURL = receiver.URL
+	_, web := sdkEventServer(t, cfg, event.Options{WebhookMaxAttempts: 1})
+	owner, forwarder := sdkEventREST(web, *origin), sdkEventREST(web, cfg.Apps[1])
+	operator := cfg.Users[0].OpenID
+	source, target := sdkCreateGroup(t, owner), sdkCreateGroup(t, forwarder, operator)
+	sdkBotJoin(t, owner, source, cfg.Apps[1].AppID)
+
+	send := func(cardConfig string) string {
+		t.Helper()
+		card := fmt.Sprintf(`{"schema":"2.0","config":%s,"body":{"elements":[{"tag":"markdown","content":"Review"}]}}`, cardConfig)
+		return value(sdkSend(t, owner, "chat_id", source, "interactive", card).MessageId)
+	}
+	forward := func(id string, code int) string {
+		t.Helper()
+		reply, err := forwarder.Im.Message.Forward(t.Context(), larkim.NewForwardMessageReqBuilder().MessageId(id).
+			ReceiveIdType("chat_id").Body(larkim.NewForwardMessageReqBodyBuilder().ReceiveId(target).Build()).Build())
+		requireSDKNetwork(t, err)
+		requireSDKCode(t, reply.CodeError, code)
+		if reply.Data == nil {
+			return ""
+		}
+		return value(reply.Data.MessageId)
+	}
+
+	protected := send(`{"enable_forward":false}`)
+	forward(protected, 230070)
+	merge, err := forwarder.Im.Message.MergeForward(t.Context(), larkim.NewMergeForwardMessageReqBuilder().ReceiveIdType("chat_id").
+		Body(larkim.NewMergeForwardMessageReqBodyBuilder().ReceiveId(target).MessageIdList([]string{protected}).Build()).Build())
+	requireSDKNetwork(t, err)
+	requireSDKCode(t, merge.CodeError, 230070)
+
+	action := func(id string, status int) []byte {
+		t.Helper()
+		return sandboxRequest(t, web, http.MethodPost, "cards/action", map[string]any{
+			"message_id": id, "operator_open_id": operator, "action": map[string]string{"tag": "button"},
+		}, status)
+	}
+	action(forward(send("{}"), 0), http.StatusBadRequest)
+	toast := action(forward(send(`{"enable_forward_interaction":true}`), 0), http.StatusOK)
+	if receiveSDKEvent(t, callbacks) != origin.AppID || !bytes.Contains(toast, []byte("Received by original app")) {
+		t.Fatalf("forwarded card callback missing or sent incorrectly: %s", toast)
+	}
 }

@@ -87,6 +87,7 @@ type Message struct {
 	ReactionOrder  uint64
 	UpperMessageID string
 	ResourceAppID  string
+	Forwarded      bool
 
 	forwardedIDs   []string
 	forwardedCount int

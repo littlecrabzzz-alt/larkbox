@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
@@ -56,6 +57,12 @@ func (s *Store) prepareForward(actor IMActor, dest *Message, request forwardRequ
 		if mode := s.chats.items[m.ChatID].RestrictedModeSetting; mode != nil && mode.Status {
 			return nil, ErrForwardRestricted
 		}
+		if m.MsgType == "interactive" {
+			card := s.renderMessage(m.CardAppID(), m)
+			if flag := forwardingFlags(card.Content).EnableForward; flag != nil && !*flag {
+				return nil, ErrForwardRestricted
+			}
+		}
 		if len(sources) > 0 {
 			if m.ChatID != sources[0].ChatID {
 				return nil, ErrForwardMixedChats
@@ -82,7 +89,9 @@ func (s *Store) prepareForward(actor IMActor, dest *Message, request forwardRequ
 	}
 	source := s.renderMessage(actor.AppID, sources[0])
 	dest.MsgType, dest.Content, dest.Mentions = source.MsgType, source.Content, source.Mentions
+	dest.DiagnosticRedactor = source.DiagnosticRedactor
 	dest.ResourceAppID = resourceOwner(source)
+	dest.Forwarded = true
 	dest.forwardedCount = source.forwardedCount
 	children := make([]Message, 0, len(source.forwardedIDs))
 	for _, id := range source.forwardedIDs {
@@ -100,7 +109,8 @@ func (s *Store) copyForwarded(appID string, parent Message, sources []Message) [
 			AppID: source.AppID, SenderOpenID: source.SenderOpenID, SenderIsUser: source.SenderIsUser,
 			MsgType: source.MsgType, Content: snapshot.Content, Mentions: source.Mentions,
 			CreatedAt: source.CreatedAt, UpdatedAt: source.UpdatedAt, Updated: source.Updated,
-			ResourceAppID: resourceOwner(source), forwardedCount: source.forwardedCount,
+			ResourceAppID: resourceOwner(source), Forwarded: true, forwardedCount: source.forwardedCount,
+			DiagnosticRedactor: snapshot.DiagnosticRedactor,
 		}
 		if len(source.forwardedIDs) > 0 {
 			nested := make([]Message, 0, len(source.forwardedIDs))
@@ -113,6 +123,34 @@ func (s *Store) copyForwarded(appID string, parent Message, sources []Message) [
 		ids = append(ids, child.ID)
 	}
 	return ids
+}
+
+type cardForwardFlags struct {
+	EnableForward     *bool `json:"enable_forward"`
+	EnableInteraction bool  `json:"enable_forward_interaction"`
+}
+
+func forwardingFlags(content string) cardForwardFlags {
+	var card struct {
+		Config cardForwardFlags `json:"config"`
+	}
+	if json.Unmarshal([]byte(content), &card) != nil {
+		return cardForwardFlags{}
+	}
+	return card.Config
+}
+
+// CardAppID identifies the application that owns an interactive message's callbacks.
+func (m Message) CardAppID() string {
+	if m.Forwarded {
+		return m.ResourceAppID
+	}
+	return m.AppID
+}
+
+// CardActionsEnabled reports whether a visible interactive message can emit a callback.
+func (m Message) CardActionsEnabled() bool {
+	return m.UpperMessageID == "" && (!m.Forwarded || (m.CardAppID() != "" && forwardingFlags(m.Content).EnableInteraction))
 }
 
 func resourceOwner(m Message) string {

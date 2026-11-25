@@ -103,7 +103,7 @@ function MessageItem({ message, sender, onReply }: { message: Message; sender?: 
   const toastTone = toast?.type && ["success", "warning", "error"].includes(toast.type) ? toast.type : "info";
   const toastText = toast?.content || toast?.i18n?.en_us || Object.values(toast?.i18n ?? {})[0];
 
-  const runAction = sender && !operation.busy ? (action: CardAction) => void operation.run(async () => {
+  const runAction = sender && !operation.busy && !message.card_action_disabled ? (action: CardAction) => void operation.run(async () => {
     setCallback(undefined);
     const result = await triggerCard(message.message_id, sender.open_id, action);
     setCallback(result);
