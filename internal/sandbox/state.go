@@ -49,6 +49,7 @@ func (c *control) snapshot(w http.ResponseWriter, _ *http.Request) {
 			"app_id": app.AppID, "bot_open_id": app.BotOpenID, "bot_name": app.BotName,
 			"webhook_url": app.WebhookURL, "has_encrypt_key": app.EncryptKey != "",
 			"has_verification_token": app.VerificationToken != "", "redirect_uris": append([]string{}, app.RedirectURIs...),
+			"event_types":        app.EventTypes,
 			"active_ws_sessions": counts[app.AppID],
 		})
 	}

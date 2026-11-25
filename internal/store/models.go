@@ -65,26 +65,32 @@ type Reaction struct {
 
 // Message stores an IM message and its reply, recall, and reaction state.
 type Message struct {
-	ID            string
-	AppID         string
-	ChatID        string
-	SenderOpenID  string
-	SenderIsUser  bool
-	Order         uint64
-	Revision      uint64
-	RootID        string
-	ParentID      string
-	ThreadID      string
-	MsgType       string
-	Content       string
-	CardID        string
-	Mentions      []Mention
-	Deleted       bool
-	Updated       bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	Reactions     []Reaction
-	ReactionOrder uint64
+	ID             string
+	AppID          string
+	ChatID         string
+	SenderOpenID   string
+	SenderIsUser   bool
+	Order          uint64
+	Revision       uint64
+	RootID         string
+	ParentID       string
+	ThreadID       string
+	MsgType        string
+	Content        string
+	CardID         string
+	Mentions       []Mention
+	Deleted        bool
+	Updated        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Reactions      []Reaction
+	ReactionOrder  uint64
+	UpperMessageID string
+	ResourceAppID  string
+
+	forwardedIDs   []string
+	forwardedCount int
+	invalidSources []string
 
 	DiagnosticRedactor Redactor `json:"-"`
 }

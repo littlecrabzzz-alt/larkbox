@@ -35,6 +35,24 @@ function formCard(submitField: object, reason = "Initial reason", selected = ["e
 }
 
 describe("card form callbacks", () => {
+  it("preserves checkbox booleans and date offsets in a form submission", () => {
+    const onAction = vi.fn();
+    const card = extractCard({ schema: "2.0", body: { elements: [{
+      tag: "form", name: "schedule", elements: [
+        { tag: "checker", name: "urgent", checked: false, text: { tag: "plain_text", content: "Urgent" } },
+        { tag: "date_picker", name: "when", initial_date: "2026-04-09" },
+        { tag: "button", name: "save", form_action_type: "submit", text: { tag: "plain_text", content: "Save" } },
+      ],
+    }] } });
+    act(() => root.render(<CardPreview card={card} onAction={onAction} />));
+    const submit = container.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    act(() => submit.click());
+    expect(onAction.mock.calls[0][0].form_value).toEqual({ urgent: false, when: expect.stringMatching(/^2026-04-09 [+-]\d{4}$/) });
+    act(() => container.querySelector<HTMLInputElement>("input[type=checkbox]")!.click());
+    act(() => submit.click());
+    expect(onAction.mock.calls[1][0].form_value.urgent).toBe(true);
+  });
+
   it.each([{ action_type: "form_submit" }, { form_action_type: "submit" }])(
     "submits the form with %o and includes selected_values",
     (submitField) => {

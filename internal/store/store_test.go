@@ -383,16 +383,17 @@ func TestSandboxMessageCapturesRecipientsAtCommit(t *testing.T) {
 	}
 	committed := make(chan result, 1)
 	go func() {
-		message, recipients, err := state.CreateSandboxMessage(actor, req)
+		message, recipients, _, err := state.CreateSandboxMessage(actor, req)
 		committed <- result{message, recipients, err}
 	}()
 	<-clockEntered
 	changed := make(chan error, 1)
 	go func() {
-		changed <- state.ChangeIMChat(actor, chatID, func(chat *Chat) error {
+		_, _, err := state.ChangeIMChat(actor, chatID, func(chat *Chat) error {
 			chat.MemberIDs = append(slices.DeleteFunc(chat.MemberIDs, func(id string) bool { return id == initial.BotOpenID }), replacement.BotOpenID)
 			return nil
 		})
+		changed <- err
 	}()
 	close(releaseClock)
 	first := <-committed
@@ -402,7 +403,7 @@ func TestSandboxMessageCapturesRecipientsAtCommit(t *testing.T) {
 	if first.err != nil || first.message.ID == "" || !slices.Equal(first.recipients, []string{initial.AppID}) {
 		t.Fatalf("before membership change: %+v", first)
 	}
-	_, after, err := state.CreateSandboxMessage(actor, req)
+	_, after, _, err := state.CreateSandboxMessage(actor, req)
 	if err != nil || !slices.Equal(after, []string{replacement.AppID}) {
 		t.Fatalf("after membership change: got %v, %v", after, err)
 	}

@@ -36,7 +36,7 @@ func actionMessage(t *testing.T, d *Dispatcher, cfg config.Config) (store.Messag
 	app := cfg.Apps[0]
 	card := store.Card{ID: protocol.NewID(protocol.CardID), AppID: app.AppID, Type: "card_json", JSON: []byte(initialCard), Sequence: 7}
 	requireNoError(t, d.state.CreateCard(card))
-	message, err := d.state.CreateIMMessage(store.IMActor{AppID: app.AppID, OpenID: app.BotOpenID}, store.NewMessage{
+	message, _, err := d.state.CreateIMMessage(store.IMActor{AppID: app.AppID, OpenID: app.BotOpenID}, store.NewMessage{
 		ChatID: cfg.Chats[1].ChatID, MsgType: "interactive", CardID: card.ID, Content: `{"type":"card","data":{"card_id":"` + card.ID + `"}}`,
 	})
 	requireNoError(t, err)

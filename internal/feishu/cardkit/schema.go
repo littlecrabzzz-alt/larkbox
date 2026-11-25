@@ -3,10 +3,14 @@ package cardkit
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 )
 
 // ValidMessageCard validates inline cards and template references in IM messages.
@@ -28,7 +32,9 @@ func ValidMessageCard(card map[string]any) bool {
 	}
 	switch schema {
 	case "2.0":
-		if _, localized := card["i18n_elements"]; localized || config["update_multi"] == false {
+		_, localized := card["i18n_elements"]
+		_, rootElements := card["elements"]
+		if localized || rootElements || config["update_multi"] == false {
 			return false
 		}
 		if value, present := card["body"]; present {
@@ -38,6 +44,9 @@ func ValidMessageCard(card map[string]any) bool {
 		header, _ := card["header"].(map[string]any)
 		return header["title"] != nil || header["subtitle"] != nil
 	case "1.0":
+		if _, body := card["body"]; body {
+			return false
+		}
 		if localized, supplied := card["i18n_elements"]; supplied {
 			_, plain := card["elements"]
 			return !plain && validCardLocales(localized, func(value any) bool {
@@ -48,6 +57,65 @@ func ValidMessageCard(card map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+// ValidatePreviewJSON checks inline card definitions without creating an entity.
+// Card JSON 2.0 uses CardKit's stored-entity checks and addressable-element rules.
+func ValidatePreviewJSON(encoded string) error {
+	doc := object(encoded)
+	if doc == nil || doc["type"] != nil {
+		return errors.New("paste a Card JSON 1.0 or 2.0 object")
+	}
+	if !validCardSettings(doc) {
+		return errors.New("correct the card config or card_link fields")
+	}
+	if doc["schema"] == "2.0" {
+		if err := validateEditedCard(doc); err != nil {
+			if errors.Is(err, errUnsharedCard) {
+				return errors.New(errUnsharedCard.Message)
+			}
+			return previewShapeIssue(doc)
+		}
+		if _, err := indexElements(doc); err != nil {
+			var apiErr protocol.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.Details != nil && len(apiErr.Details.FieldViolations) > 0 {
+					issue := apiErr.Details.FieldViolations[0]
+					return fmt.Errorf("%s — %s", issue.Field, issue.Description)
+				}
+				return errors.New(apiErr.Message)
+			}
+			return err
+		}
+		return nil
+	}
+	if !ValidMessageCard(doc) {
+		return previewShapeIssue(doc)
+	}
+	return nil
+}
+
+func previewShapeIssue(doc map[string]any) error {
+	if schema, supplied := doc["schema"]; supplied && schema != "1.0" && schema != "2.0" {
+		return errors.New("schema must be 1.0 or 2.0")
+	}
+	if !optionalCardCheck(doc, "header", validCardHeader) {
+		return errors.New("correct the card header and its title, subtitle, or text tags")
+	}
+	path, elements := "elements", doc["elements"]
+	if doc["schema"] == "2.0" {
+		path = "body.elements"
+		body, _ := doc["body"].(map[string]any)
+		elements = body["elements"]
+	}
+	if components, ok := elements.([]any); ok {
+		for i, raw := range components {
+			if node, ok := raw.(map[string]any); !ok || !validCardComponent(node) {
+				return fmt.Errorf("check the component at %s[%d] and its nested fields", path, i)
+			}
+		}
+	}
+	return fmt.Errorf("check %s and the fields allowed by the selected card schema", path)
 }
 
 func optionalObject(obj map[string]any, field string) bool {

@@ -22,6 +22,9 @@ type IMActor struct {
 // ErrOutsideChat indicates that the caller cannot access the chat.
 var ErrOutsideChat = errors.New("caller is outside the chat")
 
+// ErrChatDisbanded identifies a group that existed before it was dissolved.
+var ErrChatDisbanded = errors.New("group has been disbanded")
+
 // ErrMessageDeleted indicates that the message has already been recalled.
 var ErrMessageDeleted = errors.New("message has been recalled")
 
@@ -96,6 +99,9 @@ func (s *Store) IMChat(actor IMActor, id string) (Chat, error) {
 func (s *Store) imChat(actor IMActor, id string) (Chat, error) {
 	chat, ok := s.chats.items[id]
 	if !ok {
+		if _, disbanded := s.disbandedChats[id]; disbanded {
+			return Chat{}, ErrChatDisbanded
+		}
 		return Chat{}, ErrNotFound
 	}
 	if !s.canReadChat(actor, chat, false) {
@@ -106,35 +112,98 @@ func (s *Store) imChat(actor IMActor, id string) (Chat, error) {
 
 // ChangeIMChat commits a membership change after checking access. The callback
 // works on a copy under the lock and must not call back into the store.
-func (s *Store) ChangeIMChat(actor IMActor, id string, change func(*Chat) error) error {
+func (s *Store) ChangeIMChat(actor IMActor, id string, change func(*Chat) error) (Chat, []string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	chat, err := s.imChat(actor, id)
 	if err != nil {
-		return err
+		return Chat{}, nil, err
 	}
 	chat = cloneChat(chat)
 	if err := change(&chat); err != nil {
-		return err
+		return Chat{}, nil, err
 	}
 	s.chats.put(chat)
-	return nil
+	return cloneChat(s.chats.items[id]), s.chatBotIDs(chat), nil
+}
+
+// DeleteIMChat removes a group and its message history atomically. Recipients
+// come from the group's final membership. Authorize runs under the store lock.
+func (s *Store) DeleteIMChat(actor IMActor, id string, authorize func(Chat) error) (Chat, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chat, err := s.imChat(actor, id)
+	if err != nil {
+		return Chat{}, nil, err
+	}
+	chat = cloneChat(chat)
+	if err := authorize(chat); err != nil {
+		return Chat{}, nil, err
+	}
+	for messageID := range s.chatMessages[id] {
+		s.indexMessage(s.messages.items[messageID], Message{})
+		delete(s.messages.items, messageID)
+	}
+	maps.DeleteFunc(s.messageUUIDs, func(_ messageRequest, record messageDedup) bool {
+		_, exists := s.messages.items[record.id]
+		return !exists
+	})
+	delete(s.chats.items, id)
+	s.disbandedChats[id] = struct{}{}
+	return chat, s.chatBotIDs(chat), nil
 }
 
 // EnsureP2PChat reuses a matching seeded or API-created direct conversation.
-func (s *Store) EnsureP2PChat(actor IMActor, chat Chat) (Chat, error) {
+func (s *Store) EnsureP2PChat(actor IMActor, chat Chat) (Chat, bool, error) {
 	if len(chat.MemberIDs) != 2 || chat.MemberIDs[0] == "" || chat.MemberIDs[1] == "" ||
 		chat.MemberIDs[0] == chat.MemberIDs[1] || !slices.Contains(chat.MemberIDs, actor.OpenID) {
-		return Chat{}, ErrOutsideChat
+		return Chat{}, false, ErrOutsideChat
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	direct, found := s.resolveP2PChat(actor, chat)
+	if direct.ChatMode != "p2p" || len(direct.MemberIDs) != 2 || !s.canReadChat(actor, direct, false) ||
+		!slices.Contains(direct.MemberIDs, chat.MemberIDs[0]) || !slices.Contains(direct.MemberIDs, chat.MemberIDs[1]) {
+		return Chat{}, false, ErrOutsideChat
+	}
 	if !found {
 		direct.CreatedAt = s.Now()
 		s.chats.put(direct)
 	}
-	return cloneChat(direct), nil
+	return cloneChat(direct), !found, nil
+}
+
+// OpenBotConversation commits the first user opening and snapshots the last
+// visible message for subsequent entry events.
+func (s *Store) OpenBotConversation(appID, openID string) (Chat, User, bool, Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	app, appExists := s.apps.items[appID]
+	user, userExists := s.users.items[openID]
+	if !appExists || !userExists || app.BotOpenID == "" {
+		return Chat{}, User{}, false, Message{}, ErrNotFound
+	}
+	if user.Inactive {
+		return Chat{}, User{}, false, Message{}, ErrOutsideChat
+	}
+	actor := IMActor{AppID: appID, OpenID: openID, IsUser: true, Sandbox: true}
+	chat, exists := s.resolveP2PChat(actor, Chat{ChatMode: "p2p", OwnerID: openID, MemberIDs: []string{openID, app.BotOpenID}})
+	if !exists {
+		chat.CreatedAt = s.Now()
+		s.chats.put(chat)
+		return cloneChat(chat), user, true, Message{}, nil
+	}
+	if chat.ChatMode != "p2p" || len(chat.MemberIDs) != 2 || !slices.Contains(chat.MemberIDs, app.BotOpenID) || !s.canReadChat(actor, chat, false) {
+		return Chat{}, User{}, false, Message{}, ErrOutsideChat
+	}
+	var latest Message
+	for id := range s.chatMessages[chat.ChatID] {
+		m := s.messages.items[id]
+		if !m.Deleted && m.UpperMessageID == "" && (latest.ID == "" || m.Order > latest.Order || (m.Order == latest.Order && m.ID > latest.ID)) {
+			latest = m
+		}
+	}
+	return cloneChat(chat), user, false, cloneMessage(latest), nil
 }
 
 // resolveP2PChat requires the store lock. It computes the canonical chat ID
@@ -161,9 +230,10 @@ func (s *Store) resolveP2PChat(actor IMActor, chat Chat) (Chat, bool) {
 }
 
 type messageRequest struct {
-	appID string
-	reply bool
-	uuid  string
+	appID         string
+	operation     string
+	uuid          string
+	forwardTarget string
 }
 
 type messageDedup struct {
@@ -175,20 +245,23 @@ type messageDedup struct {
 
 // NewMessage selects the target and optional reply and deduplication metadata.
 type NewMessage struct {
-	ChatID        string
-	Peer          string
-	ParentID      string
-	ReplyInThread bool
-	UUID          string
-	MsgType       string
-	Content       string
-	CardID        string
-	Mentions      []Mention
+	ChatID         string
+	Peer           string
+	ParentID       string
+	TargetThreadID string
+	ReplyInThread  bool
+	UUID           string
+	MsgType        string
+	Content        string
+	CardID         string
+	Mentions       []Mention
+
+	forward *forwardRequest
 }
 
-// CreateIMMessage validates the target and saves the message, reply metadata,
-// and one-hour deduplication record in the same critical section.
-func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) {
+// CreateIMMessage saves the message and reports whether it created a direct
+// conversation, with the reply and deduplication records in the same commit.
+func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -197,28 +270,40 @@ func (s *Store) CreateIMMessage(actor IMActor, req NewMessage) (Message, error) 
 
 // CreateSandboxMessage commits a user message and captures its bot recipients
 // before any concurrent membership change can alter the result.
-func (s *Store) CreateSandboxMessage(actor IMActor, req NewMessage) (Message, []string, error) {
+func (s *Store) CreateSandboxMessage(actor IMActor, req NewMessage) (Message, []string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	actor.Sandbox = true
-	message, err := s.createIMMessage(actor, req)
+	message, created, err := s.createIMMessage(actor, req)
 	if err != nil {
-		return Message{}, nil, err
+		return Message{}, nil, false, err
 	}
-	return message, s.chatBotIDs(s.chats.items[message.ChatID]), nil
+	return message, s.chatBotIDs(s.chats.items[message.ChatID]), created, nil
 }
 
-func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) {
+func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, bool, error) {
 	if actor.Sandbox {
 		user, ok := s.users.items[actor.OpenID]
 		if !ok || user.Inactive {
-			return Message{}, ErrOutsideChat
+			return Message{}, false, ErrOutsideChat
 		}
 	}
 	var chat Chat
 	var parent Message
 	var err error
 	var createDirect bool
+	if req.TargetThreadID != "" {
+		for id := range s.threadMessages[req.TargetThreadID] {
+			if s.messages.items[id].ParentID == "" {
+				req.ParentID = id
+				break
+			}
+		}
+		if req.ParentID == "" {
+			return Message{}, false, ErrForwardThreadMissing
+		}
+		req.ReplyInThread = true
+	}
 	switch {
 	case req.ParentID != "":
 		parent, err = s.imMessage(actor, req.ParentID)
@@ -231,7 +316,7 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	case actor.Sandbox && req.Peer != "":
 		bot, ok := s.apps.items[actor.AppID]
 		if !ok || bot.BotOpenID != req.Peer {
-			return Message{}, ErrOutsideChat
+			return Message{}, false, ErrOutsideChat
 		}
 		var found bool
 		chat, found = s.resolveP2PChat(actor, Chat{
@@ -258,7 +343,7 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		chat, err = s.imChat(actor, req.ChatID)
 	}
 	if err != nil {
-		return Message{}, err
+		return Message{}, false, err
 	}
 
 	if actor.Sandbox {
@@ -268,7 +353,7 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		}
 		for _, mention := range req.Mentions {
 			if !slices.Contains(target.MemberIDs, mention.OpenID) {
-				return Message{}, ErrOutsideChat
+				return Message{}, false, ErrOutsideChat
 			}
 		}
 		if card, ok := s.cards.items[req.CardID]; ok && actor.AppID == "" {
@@ -282,20 +367,27 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	if req.CardID != "" {
 		card, err := s.liveCard(actor.AppID, req.CardID, s.Now())
 		if errors.Is(err, ErrNotFound) {
-			return Message{}, ErrMessageCardNotFound
+			return Message{}, false, ErrMessageCardNotFound
 		} else if err != nil {
-			return Message{}, err
+			return Message{}, false, err
 		}
 		if actor.Sandbox && protocol.HasAssignedMention([]byte(cardContent(card))) {
-			return Message{}, errors.New("card content must not contain preassigned @_user_N mention keys")
+			return Message{}, false, errors.New("card content must not contain preassigned @_user_N mention keys")
 		}
 	}
 
 	now := s.Now()
-	key := messageRequest{appID: actor.AppID, reply: req.ParentID != "", uuid: req.UUID}
+	key := messageRequest{appID: actor.AppID, operation: "send", uuid: req.UUID}
 	target := chat.ChatID
-	if key.reply {
+	if req.ParentID != "" {
+		key.operation = "reply"
 		target = parent.ID
+	}
+	if req.forward != nil {
+		key.operation, key.forwardTarget = "forward", target
+		if req.forward.merged {
+			key.operation = "merge_forward"
+		}
 	}
 	if req.UUID != "" {
 		if !now.Before(s.nextDedupCleanup) {
@@ -306,10 +398,10 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		}
 		if record, exists := s.messageUUIDs[key]; exists && now.Before(record.expires) {
 			if record.target != target || record.actor != actor {
-				return Message{}, ErrMessageUUIDConflict
+				return Message{}, false, ErrMessageUUIDConflict
 			}
 			m, err := s.imMessage(actor, record.id)
-			return s.renderMessage(actor.AppID, m), err
+			return s.renderMessage(actor.AppID, m), false, err
 		}
 	}
 
@@ -317,6 +409,13 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		ID: protocol.NewID(protocol.MessageID), ChatID: chat.ChatID, AppID: actor.AppID,
 		SenderOpenID: actor.OpenID, SenderIsUser: actor.IsUser, MsgType: req.MsgType,
 		Content: req.Content, CardID: req.CardID, Mentions: slices.Clone(req.Mentions), CreatedAt: now, UpdatedAt: now,
+	}
+	var sources []Message
+	if req.forward != nil {
+		sources, err = s.prepareForward(actor, &m, *req.forward)
+		if err != nil {
+			return Message{}, false, err
+		}
 	}
 	switch {
 	case req.ParentID != "":
@@ -328,7 +427,7 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 		if m.ThreadID == "" && req.ReplyInThread {
 			root, exists := s.messages.items[m.RootID]
 			if !exists {
-				return Message{}, ErrNotFound
+				return Message{}, false, ErrNotFound
 			}
 			if root.ThreadID == "" {
 				root.ThreadID = protocol.NewID(protocol.ThreadID)
@@ -347,11 +446,14 @@ func (s *Store) createIMMessage(actor IMActor, req NewMessage) (Message, error) 
 	}
 	s.messageOrder++
 	m.Order = s.messageOrder
+	if len(sources) > 0 {
+		m.forwardedIDs = s.copyForwarded(actor.AppID, m, sources)
+	}
 	s.messages.put(m)
 	if req.UUID != "" {
 		s.messageUUIDs[key] = messageDedup{id: m.ID, target: target, actor: actor, expires: now.Add(time.Hour)}
 	}
-	return s.renderMessage(actor.AppID, s.messages.items[m.ID]), nil
+	return s.renderMessage(actor.AppID, s.messages.items[m.ID]), createDirect, nil
 }
 
 // IMMessage returns a message visible to the caller.
@@ -385,6 +487,14 @@ func (s *Store) imMessage(actor IMActor, id string) (Message, error) {
 	if _, err := s.imChat(actor, m.ChatID); err != nil {
 		return Message{}, err
 	}
+	for upper := m.UpperMessageID; upper != ""; {
+		ancestor, exists := s.messages.items[upper]
+		if !exists || ancestor.Deleted {
+			m.Deleted = true
+			break
+		}
+		upper = ancestor.UpperMessageID
+	}
 	return m, nil
 }
 
@@ -400,15 +510,20 @@ func (s *Store) ChangeIMMessage(actor IMActor, id string, change func(*Message, 
 // from the same chat membership snapshot used to authorize the mutation.
 // The authorization callback runs under the lock and must not call the store.
 func (s *Store) RecallIMMessage(actor IMActor, id string, authorize func(*Message, Chat) error) (Message, []string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	m, err := s.changeIMMessage(actor, id, func(m *Message, chat Chat) error {
+	return s.ChangeIMMessageAndRecipients(actor, id, func(m *Message, chat Chat) error {
 		if err := authorize(m, chat); err != nil {
 			return err
 		}
 		m.Deleted, m.UpdatedAt = true, s.Now()
 		return nil
 	})
+}
+
+// ChangeIMMessageAndRecipients returns the bots in the message's committed chat.
+func (s *Store) ChangeIMMessageAndRecipients(actor IMActor, id string, change func(*Message, Chat) error) (Message, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.changeIMMessage(actor, id, change)
 	if err != nil {
 		return Message{}, nil, err
 	}
@@ -436,6 +551,9 @@ func (s *Store) changeIMMessage(actor IMActor, id string, change func(*Message, 
 	}
 	if m.Deleted {
 		return Message{}, ErrMessageDeleted
+	}
+	if m.UpperMessageID != "" {
+		return Message{}, ErrNotFound
 	}
 	m = cloneMessage(m)
 	if err := change(&m, cloneChat(s.chats.items[m.ChatID])); err != nil {
@@ -485,6 +603,9 @@ func (s *Store) IMHistory(actor IMActor, containerType, id string) ([]Message, e
 	result := make([]Message, 0, len(ids))
 	for id := range ids {
 		m := s.messages.items[id]
+		if m.UpperMessageID != "" {
+			continue
+		}
 		if containerType == "chat" {
 			if m.ThreadID != "" && m.ParentID != "" {
 				continue

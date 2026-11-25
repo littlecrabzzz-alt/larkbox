@@ -171,6 +171,9 @@ func (s *Store) InspectChatMessages(id string) ([]Message, error) {
 	messages := make([]Message, 0, len(s.chatMessages[id]))
 	for id := range s.chatMessages[id] {
 		m := s.messages.items[id]
+		if m.UpperMessageID != "" {
+			continue
+		}
 		messages = append(messages, s.renderMessage(m.AppID, m))
 	}
 	slices.SortFunc(messages, func(a, b Message) int {

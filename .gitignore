@@ -33,6 +33,9 @@ coverage.html
 web/node_modules/
 web/dist/
 web/.vite/
+tests/sdk_external/node/node_modules/
+tests/sdk_external/java/target/
+tests/sdk_external/python/.venv/
 
 # OS and editor files
 .DS_Store

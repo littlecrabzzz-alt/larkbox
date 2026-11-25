@@ -58,3 +58,43 @@ jobs:
       - name: Build binary
         if: steps.check_go.outputs.exists == 'true'
         run: go build ./...
+
+  official-sdk:
+    name: Official SDK (${{ matrix.sdk }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [node, java, python]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        if: matrix.sdk == 'node'
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        if: matrix.sdk == 'java'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Node.js SDK
+        if: matrix.sdk == 'node'
+        run: npm ci --prefix tests/sdk_external/node --ignore-scripts
+      - name: Build Java SDK probe
+        if: matrix.sdk == 'java'
+        run: mvn -B -q -f tests/sdk_external/java/pom.xml compile dependency:build-classpath -Dmdep.outputFile=target/classpath
+      - name: Install Python SDK
+        if: matrix.sdk == 'python'
+        run: python -m pip install -r tests/sdk_external/python/requirements.txt
+      - name: Test REST and WebSocket against the built server
+        run: |
+          make build
+          python tests/sdk_external/run.py "${{ matrix.sdk }}" --binary bin/larkbox --python python

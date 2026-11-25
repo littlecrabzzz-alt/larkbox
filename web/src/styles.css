@@ -236,6 +236,16 @@ tr.selected-row td { background: var(--accent-fill); }
 .card-columns > * { flex: 1 1 95px; min-width: 0; }
 .card-note { color: var(--muted); font-size: .86rem; overflow-wrap: anywhere; }
 .card-row input, .card-row select { max-width: 100%; }
+.card-panel > summary { padding: 4px 0; }
+.card-panel[open] > div, .card-panel[open] > form { margin-top: 8px; }
+.card-image { display: block; max-width: 100%; max-height: 360px; border-radius: 6px; object-fit: contain; }
+.card-image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 6px; }
+.card-people { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: .86rem; }
+.card-people li { border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; overflow-wrap: anywhere; }
+.card-table td, .card-table th { padding: 5px 8px; overflow-wrap: anywhere; }
+.card-chart { margin: 0; min-width: 0; }
+.card-chart figcaption { font-size: .86rem; font-weight: 650; }
+.card-json-input { font-family: var(--mono); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .skip-link { position: fixed; left: 12px; top: -120px; z-index: 2; background: var(--surface); padding: 8px; }

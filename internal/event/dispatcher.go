@@ -1,4 +1,4 @@
-// Package event delivers Feishu Schema 2.0 events over WebSocket and HTTP.
+// Package event delivers Feishu events over WebSocket and HTTP.
 package event
 
 import (
@@ -61,6 +61,14 @@ type envelope struct {
 	Schema string      `json:"schema"`
 	Header eventHeader `json:"header"`
 	Event  any         `json:"event"`
+}
+
+type legacyEnvelope struct {
+	Timestamp string `json:"ts"`
+	ID        string `json:"uuid"`
+	Token     string `json:"token"`
+	Type      string `json:"type"`
+	Event     any    `json:"event"`
 }
 
 type eventHeader struct {
@@ -270,14 +278,32 @@ func (d *Dispatcher) newJob(ctx context.Context, appID, kind string, at time.Tim
 		createTime = strconv.FormatInt(at.UnixMicro(), 10)
 	}
 	id := protocol.NewID(protocol.EventID)
-	body, err := json.Marshal(envelope{
+	var packet any = envelope{
 		Schema: "2.0",
 		Header: eventHeader{
 			ID: id, Type: kind, CreateTime: createTime,
 			AppID: appID, Token: app.VerificationToken, TenantKey: tenantKey(app),
 		},
 		Event: payload,
-	})
+	}
+	if kind == FirstBotConversation {
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return deliveryJob{epoch: epoch}, err
+		}
+		var legacyData map[string]json.RawMessage
+		if json.Unmarshal(payloadJSON, &legacyData) != nil || legacyData == nil {
+			return deliveryJob{epoch: epoch}, errors.New("legacy event requires an event object")
+		}
+		for name, value := range map[string]string{"type": kind, "app_id": appID, "tenant_key": tenantKey(app)} {
+			legacyData[name], _ = json.Marshal(value)
+		}
+		packet = legacyEnvelope{
+			Timestamp: fmt.Sprintf("%d.%09d", at.Unix(), at.Nanosecond()), ID: id,
+			Token: app.VerificationToken, Type: "event_callback", Event: legacyData,
+		}
+	}
+	body, err := json.Marshal(packet)
 	if err != nil {
 		return deliveryJob{epoch: epoch}, err
 	}
@@ -296,9 +322,18 @@ func tenantKey(app store.App) string {
 
 func millis(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
 
-// Dispatch delivers a Schema 2.0 event to one active session for the app
+// Dispatch delivers an event to one active session for the app
 // and to its configured webhook. It waits for each receiver's outcome.
 func (d *Dispatcher) Dispatch(ctx context.Context, appID, kind string, payload any) (Result, error) {
+	return d.dispatch(ctx, appID, kind, payload, false)
+}
+
+// DispatchSubscribed delivers a user interaction if the app subscribes to it.
+func (d *Dispatcher) DispatchSubscribed(ctx context.Context, appID, kind string, payload any) (Result, error) {
+	return d.dispatch(ctx, appID, kind, payload, true)
+}
+
+func (d *Dispatcher) dispatch(ctx context.Context, appID, kind string, payload any, requireSubscription bool) (Result, error) {
 	ctx, finish, err := d.begin(ctx)
 	if err != nil {
 		return Result{}, err
@@ -308,7 +343,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, appID, kind string, payload a
 	if err != nil {
 		return Result{}, err
 	}
+	if requireSubscription && !subscribed(job.app, kind) {
+		return Result{}, nil
+	}
 	return d.deliver(ctx, job)
+}
+
+// Enqueue delivers a committed state change to an app subscribed to its event type.
+func (d *Dispatcher) Enqueue(ctx context.Context, appID, kind string, at time.Time, payload any) {
+	d.enqueue(ctx, appID, kind, at, payload)
 }
 
 func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.Time, payload any) {
@@ -327,7 +370,7 @@ func (d *Dispatcher) enqueue(from context.Context, appID, kind string, at time.T
 	switch {
 	case d.closed:
 		err = errors.New("event dispatcher is shutting down")
-	case job.app.WebhookURL == "" && d.ws.apps[appID] == nil:
+	case !subscribed(job.app, kind) || (job.app.WebhookURL == "" && d.ws.apps[appID] == nil):
 		// Nothing is subscribed for this app.
 	case d.pending >= maxPendingEvents:
 		err = errors.New("too many pending events")

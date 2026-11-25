@@ -53,10 +53,15 @@ func (c *control) send(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.RLock()
 	ctx := c.events.Scope(r.Context())
-	message, recipients, err := c.saveMessage(input)
+	message, recipients, created, err := c.saveMessage(input)
 	var view data
 	if err == nil {
 		view = im.InspectMessageData(c.state, message)
+		if created {
+			user, _ := c.state.Users().Get(message.SenderOpenID)
+			c.events.Enqueue(ctx, input.AppID, event.FirstBotConversation, message.CreatedAt,
+				event.FirstBotConversationPayload(message.ChatID, user, user))
+		}
 	}
 	c.mu.RUnlock()
 	if err != nil {
@@ -84,18 +89,18 @@ func (c *control) send(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusCreated, data{"message": view, "deliveries": deliveries})
 }
 
-func (c *control) saveMessage(input sendInput) (store.Message, []string, error) {
+func (c *control) saveMessage(input sendInput) (store.Message, []string, bool, error) {
 	user, ok := c.state.OAuthUser(input.SenderOpenID, input.SenderUserID)
 	if !ok {
-		return store.Message{}, nil, store.ErrNotFound
+		return store.Message{}, nil, false, store.ErrNotFound
 	}
 	if user.Inactive {
-		return store.Message{}, nil, errors.New("sender is inactive")
+		return store.Message{}, nil, false, errors.New("sender is inactive")
 	}
 	actor := store.IMActor{AppID: input.AppID, OpenID: user.OpenID, IsUser: true, Sandbox: true}
 	chat, apps, peer, err := c.messageTarget(input, actor)
 	if err != nil {
-		return store.Message{}, nil, err
+		return store.Message{}, nil, false, err
 	}
 	var bots []string
 	if input.AtBot || input.MentionBot || slices.Contains(input.Mentions, "@bot") {
@@ -103,7 +108,7 @@ func (c *control) saveMessage(input sendInput) (store.Message, []string, error) 
 			bots = append(bots, app.BotOpenID)
 		}
 		if len(bots) == 0 {
-			return store.Message{}, nil, errors.New("chat has no bot to mention")
+			return store.Message{}, nil, false, errors.New("chat has no bot to mention")
 		}
 	}
 	mentions := make([]string, 0, len(input.Mentions))
@@ -112,7 +117,7 @@ func (c *control) saveMessage(input sendInput) (store.Message, []string, error) 
 			continue
 		}
 		if !slices.Contains(chat.MemberIDs, id) || strings.ContainsAny(id, "\"<>") {
-			return store.Message{}, nil, errors.New("mentions must identify existing chat members by open_id")
+			return store.Message{}, nil, false, errors.New("mentions must identify existing chat members by open_id")
 		}
 		if !slices.Contains(mentions, id) && !slices.Contains(bots, id) {
 			mentions = append(mentions, id)
@@ -127,7 +132,7 @@ func (c *control) saveMessage(input sendInput) (store.Message, []string, error) 
 	}
 	req, err := im.PrepareSandboxMessage(c.state, input.MsgType, content, mentions, bots)
 	if err != nil {
-		return store.Message{}, nil, err
+		return store.Message{}, nil, false, err
 	}
 	req.ChatID, req.Peer, req.ParentID, req.ReplyInThread = chat.ChatID, peer, input.ParentID, input.ReplyInThread
 	return c.state.CreateSandboxMessage(actor, req)
