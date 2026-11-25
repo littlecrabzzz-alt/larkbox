@@ -73,8 +73,22 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, ok := h.state.OAuthUser(query.Get("open_id"), query.Get("user_id"))
-	if !ok {
+	if !ok || user.Inactive {
 		writeLegacyError(w, oauthUserMissing)
+		return
+	}
+
+	decision := query.Get("decision")
+	if decision != "" && decision != "approve" && decision != "deny" {
+		writeLegacyError(w, oauthInvalidRequest)
+		return
+	}
+	callback.Del("error")
+	callback.Del("error_description")
+	if decision == "deny" {
+		callback.Del("code")
+		callback.Set("error", "access_denied")
+		authorizeCallback(w, redirect, callback, query)
 		return
 	}
 
@@ -83,7 +97,7 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Code)), Scope: query.Get("scope"),
 		RedirectURI: redirectURI, CodeChallenge: challenge, CodeChallengeMethod: method,
 	}
-	if err := h.state.Mutate(r.Context(), func() error { return h.state.PutToken(grant) }); err != nil {
+	if err := h.state.Mutate(r.Context(), func() error { return h.state.SaveAuthorizationCode(grant) }); err != nil {
 		if middleware.WriteResetConflict(w, err) {
 			return
 		}
@@ -92,6 +106,10 @@ func (h handler) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callback.Set("code", grant.Value)
+	authorizeCallback(w, redirect, callback, query)
+}
+
+func authorizeCallback(w http.ResponseWriter, redirect *url.URL, callback, query url.Values) {
 	if query.Has("state") {
 		callback.Set("state", query.Get("state"))
 	}
@@ -155,8 +173,7 @@ func (h handler) oidcToken(refresh bool) http.HandlerFunc {
 	}
 }
 
-func readOAuthFields(w http.ResponseWriter, r *http.Request) (map[string]string, bool) {
-	allowed := []string{"grant_type", "client_id", "client_secret", "code", "refresh_token", "redirect_uri", "code_verifier", "scope"}
+func readOAuthFields(w http.ResponseWriter, r *http.Request, allowed ...string) (map[string]string, bool) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	switch {
 	case mediaType == "application/json" || r.Header.Get("Content-Type") == "":
@@ -183,13 +200,19 @@ func readOAuthFields(w http.ResponseWriter, r *http.Request) (map[string]string,
 	return fields, true
 }
 
+var userTokenFields = []string{"grant_type", "client_id", "client_secret", "code", "refresh_token", "redirect_uri", "code_verifier", "scope"}
+
 func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	fields, ok := readOAuthFields(w, r)
+	fields, ok := readOAuthFields(w, r, userTokenFields...)
 	if !ok {
 		writeOAuthErrorDescription(w, oauthInvalidRequest, "The request is malformed. Please check your request.")
 		return
 	}
+	h.exchangeUserToken(w, r, fields)
+}
+
+func (h handler) exchangeUserToken(w http.ResponseWriter, r *http.Request, fields map[string]string) {
 	for _, field := range []string{"grant_type", "client_id", "client_secret"} {
 		if fields[field] == "" {
 			writeMissingOAuthField(w, field)
@@ -241,6 +264,10 @@ func (h handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, exchangeCode(err, refresh, true))
 		return
 	}
+	h.writeOAuthTokens(w, tokens)
+}
+
+func (h handler) writeOAuthTokens(w http.ResponseWriter, tokens [2]store.Token) {
 	body := oauthResponse{Code: protocol.Success, tokenResponse: h.tokenData(tokens)}
 	if tokens[1].Value != "" {
 		body.RefreshExpiresIn = h.ttls.Refresh
@@ -270,20 +297,24 @@ func (h handler) exchange(ctx context.Context, appID string, fields map[string]s
 			if err != nil {
 				return [2]store.Token{}, err
 			}
-			access := store.Token{
-				Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-				Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User)),
-			}
-			var replacement store.Token
-			if !v2 || slices.Contains(strings.Split(scope, " "), "offline_access") {
-				replacement = store.Token{
-					Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
-					Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh)),
-				}
-			}
-			return [2]store.Token{access, replacement}, nil
+			return h.issueUserTokens(grant, scope, now, !v2), nil
 		})
 	})
+}
+
+func (h handler) issueUserTokens(grant store.Token, scope string, now time.Time, legacy bool) [2]store.Token {
+	access := store.Token{
+		Kind: store.UserToken, Value: protocol.NewID(protocol.UserToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+		Scope: scope, ExpiresAt: now.Add(seconds(h.ttls.User)),
+	}
+	var refresh store.Token
+	if legacy || slices.Contains(strings.Split(scope, " "), "offline_access") {
+		refresh = store.Token{
+			Kind: store.RefreshToken, Value: protocol.NewID(protocol.RefreshToken), AppID: grant.AppID, UserOpenID: grant.UserOpenID,
+			Scope: grant.Scope, ExpiresAt: now.Add(seconds(h.ttls.Refresh)),
+		}
+	}
+	return [2]store.Token{access, refresh}
 }
 
 func verifyPKCE(grant store.Token, verifier string, supplied bool) bool {

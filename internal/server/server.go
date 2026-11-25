@@ -125,6 +125,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 
 	feishu := http.NewServeMux()
 	auth.RegisterRoutes(feishu, cfg, state)
+	auth.RegisterAccountsRoutes(feishu, cfg, state, events)
 	bot.RegisterRoutes(feishu, state)
 	cardkit.RegisterRoutes(feishu, state)
 	im.RegisterRoutes(feishu, state, eventEmitter{state: state, dispatcher: events, next: settings.emitter})
@@ -145,7 +146,10 @@ func New(cfg config.Config, opts ...Option) *Server {
 			StrictMode bool   `json:"strict_mode"`
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
-	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu)))))
+	api := middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu))))
+	mux.Handle("/open-apis/", api)
+	mux.Handle("/oauth/", api)
+	mux.Handle("/page/cli", api)
 	control := sandbox.New(cfg, Version, state, events, faults, clock)
 	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pattern := extensions.Handler(r); pattern != "" {
@@ -186,9 +190,13 @@ func withWebUI(routes http.Handler, disabled bool) http.Handler {
 		return routes
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/page/cli" {
+			routes.ServeHTTP(w, r)
+			return
+		}
 		prefix, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		switch prefix {
-		case "open-apis", "_sandbox", "callback", "ws", "healthz":
+		case "open-apis", "oauth", "_sandbox", "callback", "ws", "healthz":
 			routes.ServeHTTP(w, r)
 		default:
 			webui.ServeHTTP(w, r)

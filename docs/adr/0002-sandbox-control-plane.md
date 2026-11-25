@@ -42,6 +42,8 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /bots/{app_id}/menu` | Returns the bot's effective menu in Application v7 field names. |
 | `POST /bots/{app_id}/menu/click` | Requires `menu_id` and `operator_open_id`. Dispatches the subscribed `application.bot.menu_v6` event for a callback item in an enabled menu. Returns `{event_id, deliveries, error}`. |
 | `POST /tokens/expire` | Requires `app_id`. Accepts `token` or a nonempty `tokens` list to expire individual credentials, or expires all credentials for that app when both fields are omitted. Explicit `null` selectors return 400. Returns `{"expired":n}` without echoing credentials. |
+| `GET /apps/{app_id}/grants` | Returns `{app_id, items}` with an entry per current user consent. Entries are ordered by `open_id` and include `scope` and `authorized_at`. Returns 404 for an unknown app. |
+| `POST /auth/devices/decision` | Requires `user_code` and `decision` (`approve` or `deny`). Approval requires the `open_id` of an active simulated user. Returns `{decision}`, 404 for an unavailable code, or 409 for a second decision. |
 
 A user message requires one sender selector (`sender_open_id` or
 `sender_user_id`), one destination (`chat_id` or `app_id` for a direct
@@ -74,6 +76,31 @@ Card actions use the dispatcher’s synchronous callback deadline and channel
 selection. A failed delivery is represented in the result for the saved
 message, callback, or verification. Request validation uses HTTP 400,
 missing entities use 404, and conflicts use 409.
+
+### User grants and device confirmation
+
+`decision=deny` on the OAuth authorize route sends the documented Feishu
+denial callback with `error=access_denied` and the provided `state`. Approval
+of browser or device consent records a per-app grant. App registration
+creates an app and bot after approval and polling. A user logs in through a
+separate device consent request.
+
+`POST /oauth/v1/revoke` uses the Accounts client credentials and form
+contract. A successful revocation invalidates all credentials issued for
+the app and user consent and removes its grant. The app receives the
+sandbox event `larkbox.auth.authorization_revoked_v1` if subscribed. Its
+Schema 2.0 event payload includes `open_id` and `scope`. Larkbox returns an
+empty HTTP 200 for an unknown, foreign, or previously revoked token without
+generating an event. Live verification covers that response for unknown
+access and refresh tokens. Grant observation and its event are sandbox
+contracts.
+
+`/page/cli` provides local browser confirmation for the CLI. It displays
+the app and requested scopes when present and lets an operator choose a
+simulated user. Headless tests use the control plane decision endpoint.
+The device code goes to the polling client. The confirmation page and
+decision endpoint use the separate user code. Reset clears both flows
+and all active grants.
 
 ### Timing
 

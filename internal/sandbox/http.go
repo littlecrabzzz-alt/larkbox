@@ -62,6 +62,8 @@ func New(cfg config.Config, version string, state *store.Store, events *event.Di
 	mux.HandleFunc("DELETE /_sandbox/faults/{fault_id}", c.deleteFault)
 	mux.HandleFunc("DELETE /_sandbox/faults", c.clearFaults)
 	mux.HandleFunc("POST /_sandbox/tokens/expire", c.expireTokens)
+	mux.HandleFunc("GET /_sandbox/apps/{app_id}/grants", c.authorizedUsers)
+	mux.HandleFunc("POST /_sandbox/auth/devices/decision", c.decideDevice)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		_, pattern := mux.Handler(r)

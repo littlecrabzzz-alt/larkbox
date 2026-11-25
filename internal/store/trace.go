@@ -208,7 +208,7 @@ func credentialField(key string, value any) bool {
 	switch strings.ToLower(key) {
 	case "authorization", "password", "app_secret", "client_secret", "encrypt_key", "verification_token",
 		"access_token", "tenant_access_token", "app_access_token", "user_access_token", "refresh_token",
-		"app_ticket", "code_verifier", "token", "preview_token":
+		"app_ticket", "code_verifier", "token", "preview_token", "device_code", "user_code", "verification_uri_complete":
 		return true
 	case "code":
 		_, isString := value.(string)
