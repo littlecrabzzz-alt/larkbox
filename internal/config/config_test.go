@@ -7,12 +7,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func cleanEnvironment(t *testing.T) {
 	t.Helper()
 	var ttl TokenTTLs
-	names := []string{"LARKBOX_ADDR", "LARKBOX_STRICT_MODE", "LARKBOX_APPS", "LARKBOX_USERS", "LARKBOX_CHATS", "LARKBOX_CARD_TEMPLATES"}
+	names := []string{"LARKBOX_ADDR", "LARKBOX_STRICT_MODE", "LARKBOX_APPS", "LARKBOX_USERS", "LARKBOX_CHATS", "LARKBOX_CARD_TEMPLATES", "LARKBOX_EVENT_DELIVERY", "LARKBOX_CLOCK_START"}
 	for _, field := range ttlFields(&ttl) {
 		names = append(names, field.env)
 	}
@@ -222,5 +223,50 @@ func TestCardTemplateSeeds(t *testing.T) {
 	cfg, err = Load(path)
 	if err != nil || len(cfg.CardTemplates) != 0 {
 		t.Fatalf("environment did not replace template list: %+v, %v", cfg.CardTemplates, err)
+	}
+}
+
+func TestEventTimingConfiguration(t *testing.T) {
+	cleanEnvironment(t)
+	path := filepath.Join(t.TempDir(), "timing.yaml")
+	body := "clock_start: 2026-01-01T00:00:00Z\nevent_delivery:\n  webhook_timeout_ms: 150\n  retry_backoff_ms: [4, 0]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LARKBOX_CLOCK_START", "2026-02-01T00:00:00Z")
+	t.Setenv("LARKBOX_EVENT_DELIVERY", `{"websocket_max_attempts":2,"verification_timeout_ms":1500}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClockStart == nil || cfg.ClockStart.Month() != 2 ||
+		cfg.EventDelivery.WebhookTimeoutMS != 150 || cfg.EventDelivery.WebSocketMaxAttempts != 2 ||
+		cfg.EventDelivery.VerificationTimeoutMS != 1500 || !slices.Equal(cfg.EventDelivery.RetryBackoffMS, []int64{4, 0}) {
+		t.Fatalf("timing override lost file fields or clock: %+v", cfg.EventDelivery)
+	}
+	cfg.EventDelivery.RetryBackoffMS = []int64{-1}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "retry_backoff_ms") {
+		t.Fatalf("negative retry delay accepted: %v", err)
+	}
+	t.Setenv("LARKBOX_EVENT_DELIVERY", `{"typo":1}`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown environment setting accepted: %v", err)
+	}
+}
+
+func TestManualClockLeavesRoomForCardExpiry(t *testing.T) {
+	cfg := Default()
+	for _, stamp := range []string{"0001-01-01T00:00:00Z", "9999-12-18T00:00:00Z"} {
+		start, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ClockStart = &start
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("invalid start %s accepted", stamp)
+		}
 	}
 }

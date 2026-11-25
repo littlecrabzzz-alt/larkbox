@@ -23,6 +23,7 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/config"
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 	"github.com/littlecrabzzz-alt/larkbox/internal/wsproto"
 )
@@ -843,5 +844,73 @@ func TestTicketExpirySampledWhileHoldingReservationLock(t *testing.T) {
 	}
 	if rejection.status != http.StatusUnauthorized {
 		t.Fatalf("unexpected rejection: %+v", rejection)
+	}
+}
+
+func TestSocketRetryUsesManualClockAndResetCancelsIt(t *testing.T) {
+	cfg := config.Default()
+	app := cfg.Apps[0]
+	clock := simclock.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	d := testDispatcher(t, cfg, Options{
+		ManualClock: clock, WebSocketMaxAttempts: 2,
+		RetryBackoff: func(int) time.Duration { return time.Hour },
+	}, clock.Now)
+	srv := testGateway(t, d)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	conn := connect(t, ticketURL(t, d, host, app), http.StatusSwitchingProtocols)
+	waitForSessions(t, d, app.AppID, 1)
+
+	done := dispatchAsync(t, d, app.AppID)
+	first := readDataFrame(t, conn)
+	writeAck(t, conn, first, wsproto.Response{StatusCode: 500})
+	waitForAttempts := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for len(d.state.Traces()) < want {
+			if time.Now().After(deadline) {
+				t.Fatal("acknowledgement did not reach the trace ring")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitForAttempts(1)
+	_, err := clock.Advance(time.Hour - time.Second)
+	requireNoError(t, err)
+	if len(d.state.Traces()) != 1 {
+		t.Fatal("retry ran before its virtual deadline")
+	}
+	_, err = clock.Advance(time.Second)
+	requireNoError(t, err)
+	retry := readDataFrame(t, conn)
+	if wsproto.HeaderValue(first, wsproto.TraceID) != wsproto.HeaderValue(retry, wsproto.TraceID) ||
+		wsproto.HeaderValue(first, wsproto.MessageID) == wsproto.HeaderValue(retry, wsproto.MessageID) {
+		t.Fatal("retry must retain the event ID and use a fresh acknowledgement ID")
+	}
+	writeAck(t, conn, retry, wsproto.Response{StatusCode: 200})
+	if result := <-done; len(result.Deliveries) != 1 || result.Deliveries[0].Status != 200 {
+		t.Fatalf("retry did not succeed: %+v", result)
+	}
+
+	pending := make(chan error, 1)
+	go func() {
+		_, err := d.Dispatch(t.Context(), app.AppID, "im.message.receive_v1", map[string]string{"text": "pending"})
+		pending <- err
+	}()
+	writeAck(t, conn, readDataFrame(t, conn), wsproto.Response{StatusCode: 500})
+	waitForAttempts(3)
+	d.Reset(func() {
+		clock.Reset()
+		d.state.Reset()
+	})
+	select {
+	case err := <-pending:
+		if err == nil {
+			t.Fatal("reset unexpectedly completed an unacknowledged event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reset did not release an event waiting on the clock")
+	}
+	if len(d.state.Traces()) != 0 {
+		t.Fatal("old retry traces survived reset")
 	}
 }

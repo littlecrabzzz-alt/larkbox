@@ -99,6 +99,9 @@ func (c *control) reset(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	c.events.Reset(func() {
 		c.faults.Reset()
+		if c.clock != nil {
+			c.clock.Reset()
+		}
 		reset()
 	})
 	c.mu.Unlock()

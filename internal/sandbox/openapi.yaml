@@ -1,0 +1,622 @@
+openapi: 3.1.0
+info:
+  title: Larkbox sandbox control plane
+  version: 1.0.0
+  description: Controls for trusted local and test-network clients.
+servers:
+  - url: /
+paths:
+  /_sandbox/openapi.json:
+    get:
+      operationId: getOpenAPI
+      summary: Discover the built-in controls
+      responses:
+        "200":
+          description: OpenAPI document
+          content: {application/json: {schema: {type: object}}}
+  /_sandbox/state:
+    get:
+      operationId: getState
+      summary: Inspect the current sandbox state
+      responses:
+        "200":
+          description: Sandbox state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  strict_mode: {type: boolean}
+                  version: {type: string}
+                  apps:
+                    type: array
+                    items: {$ref: '#/components/schemas/AppSummary'}
+                  users:
+                    type: array
+                    items: {$ref: '#/components/schemas/User'}
+                  chats:
+                    type: array
+                    items: {$ref: '#/components/schemas/ChatSummary'}
+                  cards:
+                    type: array
+                    items: {$ref: '#/components/schemas/Card'}
+                  faults:
+                    type: array
+                    items: {$ref: '#/components/schemas/Fault'}
+                  ws_sessions:
+                    type: array
+                    items: {$ref: '#/components/schemas/Session'}
+  /_sandbox/seed:
+    post:
+      operationId: seed
+      summary: Upsert apps, users, chats, or templates
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/Seed'}}}
+      responses:
+        "200":
+          description: Counts of upserted entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apps: &integer {type: integer}
+                  users: *integer
+                  chats: *integer
+                  card_templates: *integer
+        default: &error {$ref: '#/components/responses/Error'}
+  /_sandbox/reset:
+    post:
+      operationId: reset
+      summary: Reset runtime state and the manual clock
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                seed: {$ref: '#/components/schemas/Seed'}
+      responses:
+        "200":
+          description: Reset complete
+          content: {application/json: {schema: {type: object, properties: {reset: {type: boolean}}}}}
+        default: *error
+  /_sandbox/clock:
+    get:
+      operationId: getClock
+      summary: Read the current sandbox time and clock mode
+      responses:
+        "200": &clockResponse
+          description: Updated clock state
+          content: {application/json: {schema: {$ref: '#/components/schemas/Clock'}}}
+  /_sandbox/clock/advance:
+    post:
+      operationId: advanceClock
+      summary: Advance a configured manual clock and release due retries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [by]
+              additionalProperties: false
+              properties:
+                by:
+                  type: string
+                  description: Positive Go duration, such as 15s or 24h.
+                  example: 15s
+      responses:
+        "200": *clockResponse
+        "400": *error
+        "409": *error
+        default: *error
+  /_sandbox/chats:
+    get:
+      operationId: listChats
+      summary: Inspect virtual chats
+      responses:
+        "200":
+          description: Chats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chats:
+                    type: array
+                    items: {$ref: '#/components/schemas/ChatSummary'}
+  /_sandbox/chats/{chat_id}/messages:
+    get:
+      operationId: listChatMessages
+      summary: Inspect a chat's saved messages
+      parameters:
+        - {in: path, name: chat_id, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Messages in creation order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: {$ref: '#/components/schemas/Message'}
+        default: *error
+  /_sandbox/cards:
+    get:
+      operationId: listCards
+      summary: Inspect saved card entities
+      responses:
+        "200":
+          description: Card entities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cards:
+                    type: array
+                    items: {$ref: '#/components/schemas/Card'}
+  /_sandbox/cards/{card_id}:
+    get:
+      operationId: getCard
+      summary: Inspect a saved card entity
+      parameters:
+        - {in: path, name: card_id, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Card entity with JSON and elements
+          content: {application/json: {schema: {$ref: '#/components/schemas/Card'}}}
+        default: *error
+  /_sandbox/ws/sessions:
+    get:
+      operationId: listSessions
+      summary: Inspect active long connections
+      responses:
+        "200":
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ws_sessions:
+                    type: array
+                    items: {$ref: '#/components/schemas/Session'}
+  /_sandbox/messages/send:
+    post:
+      operationId: sendMessage
+      summary: Simulate a user message and wait for configured receivers
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SendMessage'}}}
+      responses:
+        "201":
+          description: Saved message and delivery outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: {$ref: '#/components/schemas/Message'}
+                  deliveries:
+                    type: array
+                    items: {$ref: '#/components/schemas/EventDelivery'}
+        default: *error
+  /_sandbox/cards/action:
+    post:
+      operationId: triggerCardAction
+      summary: Simulate a card action and read the callback result
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CardAction'}}}
+      responses:
+        "200":
+          description: Callback outcome and updated message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  toast: {type: [object, "null"], additionalProperties: true}
+                  card_applied: {type: boolean}
+                  card_error: {type: string}
+                  message: {oneOf: [{$ref: '#/components/schemas/Message'}, {type: "null"}]}
+                  delivery:
+                    allOf:
+                      - {$ref: '#/components/schemas/Delivery'}
+                      - type: object
+                        properties: {event_id: {type: string}}
+        default: *error
+  /_sandbox/events/webhook/verify:
+    post:
+      operationId: verifyWebhook
+      summary: Send a URL verification challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id]
+              additionalProperties: false
+              properties:
+                app_id: &identifier {type: string, minLength: 1}
+                webhook_url: {type: [string, "null"], format: uri}
+      responses:
+        "200":
+          description: Verification outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified: {type: boolean}
+                  status_code: *integer
+                  latency_ms: *integer
+                  error: {type: string}
+        default: *error
+  /_sandbox/traces:
+    get:
+      operationId: listTraces
+      summary: Inspect matching inbound or outbound exchanges
+      parameters:
+        - {in: query, name: direction, schema: {type: string, enum: [all, inbound, outbound]}}
+        - {in: query, name: app_id, schema: {type: string}}
+        - {in: query, name: method, schema: {type: string}}
+        - {in: query, name: path_prefix, schema: {type: string}}
+        - {in: query, name: event_type, schema: {type: string}}
+        - {in: query, name: event_id, schema: {type: string}}
+        - {in: query, name: channel, schema: {type: string, enum: [webhook, websocket]}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 256, default: 256}}
+      responses:
+        "200":
+          description: Latest matching traces, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  traces:
+                    type: array
+                    items: {$ref: '#/components/schemas/Trace'}
+        default: *error
+    delete:
+      operationId: clearTraces
+      summary: Clear the trace ring
+      responses:
+        "200": &cleared
+          description: Cleared
+          content: {application/json: {schema: {type: object, properties: {cleared: {type: boolean}}}}}
+  /_sandbox/faults:
+    get:
+      operationId: listFaults
+      summary: List active fault rules
+      responses:
+        "200":
+          description: Active rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  faults:
+                    type: array
+                    items: {$ref: '#/components/schemas/Fault'}
+    post:
+      operationId: addFault
+      summary: Create a fault rule
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FaultInput'}}}
+      responses:
+        "201":
+          description: Created rule
+          headers:
+            Location: {schema: {type: string}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Fault'}}}
+        default: *error
+    delete:
+      operationId: clearFaults
+      summary: Clear all rules and release fault delays
+      responses:
+        "200": *cleared
+  /_sandbox/faults/{fault_id}:
+    delete:
+      operationId: deleteFault
+      summary: Delete one active fault rule
+      parameters:
+        - {in: path, name: fault_id, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Deleted
+          content: {application/json: {schema: {type: object, properties: {deleted: {type: boolean}}}}}
+        default: *error
+  /_sandbox/tokens/expire:
+    post:
+      operationId: expireTokens
+      summary: Expire selected credentials or all credentials for an app
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id]
+              additionalProperties: false
+              not: {required: [token, tokens]}
+              properties:
+                app_id: *identifier
+                token: *identifier
+                tokens: {type: array, minItems: 1, items: *identifier}
+      responses:
+        "200":
+          description: Number of expired credentials
+          content: {application/json: {schema: {type: object, properties: {expired: *integer}}}}
+        default: *error
+components:
+  responses:
+    Error:
+      description: Sandbox error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+  schemas:
+    Clock:
+      type: object
+      required: [now, manual]
+      properties:
+        now: &timestamp {type: string, format: date-time}
+        manual: &boolean {type: boolean}
+    Seed:
+      type: object
+      additionalProperties: false
+      properties:
+        apps: {type: array, items: {$ref: '#/components/schemas/AppSeed'}}
+        users: {type: array, items: {$ref: '#/components/schemas/User'}}
+        chats: {type: array, items: {$ref: '#/components/schemas/ChatSeed'}}
+        card_templates:
+          type: array
+          items:
+            type: object
+            required: [template_id, data]
+            additionalProperties: false
+            properties:
+              template_id: *identifier
+              template_version_name: &string {type: string}
+              data:
+                type: string
+                description: Card JSON 2.0 serialized as a string.
+    AppSeed:
+      type: object
+      required: [app_id]
+      additionalProperties: false
+      properties:
+        app_id: *identifier
+        app_secret: *string
+        tenant_key: *string
+        bot_open_id: *string
+        bot_name: *string
+        bot_avatar_url: *string
+        webhook_url: *string
+        verification_token: *string
+        encrypt_key: *string
+        redirect_uris: &strings {type: array, items: *string}
+    AppSummary:
+      type: object
+      properties:
+        app_id: *identifier
+        bot_open_id: *string
+        bot_name: *string
+        webhook_url: *string
+        has_encrypt_key: *boolean
+        has_verification_token: *boolean
+        redirect_uris: *strings
+        active_ws_sessions: *integer
+    User:
+      type: object
+      required: [open_id]
+      additionalProperties: false
+      properties:
+        open_id: *identifier
+        user_id: *string
+        union_id: *string
+        name: *string
+        email: *string
+        inactive: *boolean
+        en_name: *string
+        avatar: *string
+        avatar_thumb: *string
+        avatar_middle: *string
+        avatar_big: *string
+        enterprise_email: *string
+        mobile: *string
+        tenant_key: *string
+        employee_no: *string
+    ChatSeed:
+      type: object
+      required: [chat_id, chat_mode]
+      additionalProperties: false
+      properties:
+        <<: &chatSettings
+          avatar: *string
+          description: *string
+          i18n_names: &stringMap {type: object, additionalProperties: *string}
+          chat_type: *string
+          external: *boolean
+          group_message_type: *string
+          join_message_visibility: *string
+          leave_message_visibility: *string
+          membership_approval: *string
+          urgent_setting: *string
+          video_conference_setting: *string
+          edit_permission: *string
+          pin_manage_setting: *string
+          hide_member_count_setting: *string
+          labels: *strings
+          toolkit_ids: *strings
+          chat_tags: *strings
+          restricted_mode_setting:
+            type: [object, "null"]
+            additionalProperties: false
+            properties:
+              status: *boolean
+              screenshot_has_permission_setting: *string
+              download_has_permission_setting: *string
+              message_has_permission_setting: *string
+        chat_id: *identifier
+        chat_mode: &chatMode {type: string, enum: [group, p2p]}
+        name: *string
+        owner_id: *string
+        member_ids: *strings
+    ChatSummary:
+      type: object
+      properties:
+        chat_id: *identifier
+        chat_mode: *chatMode
+        name: *string
+        owner_id: *string
+        member_ids: *strings
+        settings: {type: object, properties: *chatSettings}
+    Card:
+      type: object
+      properties:
+        card_id: *identifier
+        app_id: *identifier
+        type: *string
+        streaming_mode: *boolean
+        last_sequence: *integer
+        revision: *integer
+        created_at: *timestamp
+        expires_at: *timestamp
+        streaming_expires_at: {type: [string, "null"], format: date-time}
+        card_json: {type: object, additionalProperties: true}
+        elements: *stringMap
+    Session:
+      type: object
+      properties:
+        session_id: *string
+        device_id: *string
+        service_id: *integer
+        connected_at: *timestamp
+        app_id: *identifier
+    Message:
+      type: object
+      additionalProperties: true
+      properties:
+        message_id: *identifier
+        chat_id: *identifier
+        msg_type: *string
+        body: {type: object, properties: {content: *string}}
+    SendMessage:
+      type: object
+      additionalProperties: false
+      description: Choose one destination, one sender, and either text or content. A thread reply requires a parent.
+      allOf:
+        - oneOf: [{required: [chat_id]}, {required: [app_id]}]
+        - oneOf: [{required: [sender_open_id]}, {required: [sender_user_id]}]
+        - oneOf: [{required: [text]}, {required: [content]}]
+      properties:
+        chat_id: *identifier
+        app_id: *identifier
+        sender_open_id: *identifier
+        sender_user_id: *identifier
+        msg_type: {type: string, default: text}
+        text: *string
+        content: {type: string, description: JSON-encoded message content.}
+        mentions: *strings
+        at_bot: *boolean
+        mention_bot: *boolean
+        parent_id: *identifier
+        reply_in_thread: *boolean
+    CardAction:
+      type: object
+      required: [message_id, operator_open_id, action]
+      additionalProperties: false
+      properties:
+        message_id: *identifier
+        operator_open_id: *identifier
+        host: *string
+        delivery_type: *string
+        action:
+          type: object
+          required: [tag]
+          additionalProperties: false
+          properties:
+            tag: *identifier
+            value: &jsonObject {type: object, additionalProperties: true}
+            option: *string
+            options: *strings
+            timezone: *string
+            name: *string
+            form_value: *jsonObject
+            input_value: *string
+            checked: *boolean
+    Delivery:
+      type: object
+      properties:
+        channel: *string
+        status_code: *integer
+        error: *string
+    EventDelivery:
+      type: object
+      properties:
+        app_id: *identifier
+        event_id: *string
+        error: *string
+        deliveries: {type: array, items: {$ref: '#/components/schemas/Delivery'}}
+    Trace:
+      type: object
+      properties:
+        direction: {type: string, enum: [inbound, outbound]}
+        started_at: *timestamp
+        latency_ms: *integer
+        app_id: *string
+        method: *string
+        path: *string
+        status_code: *integer
+        code: *integer
+        request_headers: &headers {type: [object, "null"], additionalProperties: *strings}
+        request_body: {}
+        request_body_truncated: *boolean
+        response_headers: *headers
+        response_body: {}
+        response_body_truncated: *boolean
+        event_id: *string
+        event_type: *string
+        channel: *string
+        attempt: *integer
+        duplicate_index: *integer
+        error: *string
+    FaultInput:
+      type: object
+      required: [kind]
+      additionalProperties: false
+      properties: &faultProperties
+        kind: {type: string, enum: [latency, rate_limit, http_error, token_expiry, duplicate_event]}
+        app_id: *string
+        method: *string
+        path_prefix: *string
+        event_type: *string
+        channel: {type: string, enum: [inbound, webhook, websocket]}
+        remaining_hits: {type: integer, minimum: 1}
+        probability: {type: number, exclusiveMinimum: 0, maximum: 1, default: 1}
+        delay_ms: {type: integer, minimum: 1, maximum: 60000}
+        retry_after: {type: integer, minimum: 0, maximum: 86400}
+        status_code: {type: integer, minimum: 400, maximum: 599}
+        error_code: {type: integer, minimum: 1}
+        error_msg: *identifier
+        duplicate_count: {type: integer, minimum: 2, maximum: 10}
+    Fault:
+      type: object
+      properties:
+        <<: *faultProperties
+        fault_id: *identifier

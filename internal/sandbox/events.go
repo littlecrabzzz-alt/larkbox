@@ -244,7 +244,11 @@ func (c *control) verifyWebhook(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "webhook_url must be an absolute HTTP(S) URL with a valid host")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	timeout := time.Second
+	if ms := c.cfg.EventDelivery.VerificationTimeoutMS; ms > 0 {
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	start := time.Now()
 	result := c.events.VerifyWebhookAt(ctx, input.AppID, override)

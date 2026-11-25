@@ -60,7 +60,7 @@ For local OAuth, supply `app_id` (or `client_id`) and a `redirect_uri` that exac
 
 Include the same `redirect_uri` when exchanging a browser code at the v2 token endpoint. Authorization codes and refresh tokens are single-use. OAuth v2 issues a refresh token only when the resulting scope includes `offline_access`.
 
-To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends ordinary events to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
+To receive events over a long connection, point the Go SDK WebSocket client's domain at the larkbox base URL. For HTTP delivery, set `webhook_url` and `verification_token` on the receiving app. Set `encrypt_key` to enable encrypted, signed delivery, and `tenant_key` to set the tenant represented in the event header. With both channels configured, larkbox sends ordinary events to one active WebSocket session for the app and to the webhook. In-process tests can use `Server.Events().VerifyWebhook` to run URL verification and `server.WithEventOptions` to shorten retry delays. By default, URL verification has a 1-second timeout. Event delivery allows 3 seconds per attempt and up to four retries at 15 seconds, 5 minutes, 1 hour, and 6 hours on either transport. Each app can have up to 50 active long connections by default. [Feishu event handling guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/server-side-sdk/nodejs-sdk/handling-events)
 
 CardKit writes require the creating app's tenant token. Send or reply with an interactive message whose JSON-encoded `content` is `{"type":"card","data":{"card_id":"..."}}`. The owner sees the latest card in the rendered IM format. Pass `card_msg_content_type=user_card_content` on GET or history to request the underlying card JSON. Other apps in the chat see the stored message reference. Card updates require a positive sequence greater than the previous one. Stale sequences return HTTP 400 and code `300317`. Identical requests can replay a successful UUID for one hour. Reusing it with a different request on the same card and operation returns `200770`. A stream expires after 10 minutes and the entity expires after 14 days. [Feishu CardKit batch update reference](https://open.larkoffice.com/document/cardkit-v1/card/batch_update)
 
@@ -76,6 +76,72 @@ message with `POST /_sandbox/messages/send`, simulate a card click with
 control plane on loopback or an isolated test network. See the
 [control plane contract](docs/adr/0002-sandbox-control-plane.md) for request
 fields, trace filters, and fault options.
+
+### Black-box testing
+
+Use `--addr 127.0.0.1:0 --ready-file /path/to/address` to start a test
+instance on a free port. The ready file contains the bound `host:port` and is
+written atomically after binding. Give each instance its own file.
+
+```sh
+make test-blackbox
+```
+
+The [runnable recipe](examples/blackbox.py) uses Python 3 and the built binary.
+It starts two isolated servers and a loopback receiver, seeds a webhook,
+and asserts matching event IDs after a 503 and a successful retry. It also
+checks token and CardKit expiry and sends a real reply after a card callback
+deadline to verify that the card is left untouched.
+
+The sandbox CLI uses the same local HTTP contract as other test clients.
+Run `larkbox sandbox --help` to list commands and `<command> --help` for flags.
+Select a server with `--ready-file` or `--url`. `LARKBOX_URL` supplies the
+default URL when neither flag is present. Request bodies can use `--data`
+or `--file` (use `--file -` for stdin). The CLI prints the JSON response and
+exits nonzero on HTTP errors.
+
+```sh
+larkbox sandbox openapi --ready-file /path/to/address
+larkbox sandbox state --ready-file /path/to/address
+larkbox sandbox traces --ready-file /path/to/address --event-id evt_example
+```
+
+Adjust the standalone server's event timing with an `event_delivery` mapping.
+Milliseconds are integers. A zero timeout or attempt count uses its Feishu
+default. An empty retry list uses the default 15s, 5m, 1h, and 6h delays.
+A nonempty list repeats its final delay for additional retries, and a `0`
+entry retries immediately.
+
+```yaml
+event_delivery:
+  webhook_timeout_ms: 500
+  verification_timeout_ms: 1000
+  ack_timeout_ms: 500
+  webhook_max_attempts: 2
+  websocket_max_attempts: 2
+  retry_backoff_ms: [150]
+```
+
+For manual time, set `clock_start` to an RFC3339 timestamp. The clock freezes
+at that time until `POST /_sandbox/clock/advance` receives a positive duration
+such as `{"by":"15s"}`. `GET /_sandbox/clock` reports the current time and
+mode. The same clock controls token and card expiry and the delay after a
+failed event attempt. The advance response reports the new time. Due retries
+resume asynchronously, so inspect their traces for delivery results.
+Network deadlines, webhook signature timestamps, and latency faults use actual time.
+A reset cancels pending retries and restores `clock_start` along with the seed.
+
+```sh
+larkbox sandbox clock --ready-file /path/to/address
+larkbox sandbox advance --ready-file /path/to/address --by 15s
+```
+
+An injected message waits for its delivery outcomes. With a manual clock, run
+the send in the background and advance time after observing its failed attempt
+in traces. `--timeout` overrides the CLI's 30-second request timeout.
+Override file settings with `LARKBOX_EVENT_DELIVERY` (a JSON object) and
+`LARKBOX_CLOCK_START` (an RFC3339 timestamp). The control plane is intended
+for trusted local and test-network clients.
 
 ### Embedded Web UI
 
@@ -241,26 +307,13 @@ streaming card entity. Set `FEISHU_LIVE=0` to force local mode if your
 - **Milestone 3 — Control Plane, Fault Injection & Live Harness**: `/_sandbox/*` control API, request/event trace logs, chaos rules, and `//go:build live` differential test suite.
 - **Milestone 4 — Embedded Web Inspector & Chat Playground**: Lightweight React/Vite UI bundled into the Go binary via `//go:embed`.
 
+- **Milestone 5 — Black-box test controls**. Standalone timing configuration, time advancement, CLI, OpenAPI discovery, ready files, and a runnable [black-box recipe](#black-box-testing).
+
 ### Planned Milestones
 
 Each phase adds verified workflows to the compatibility matrix through focused PRs.
 Use the four-layer fidelity strategy above for the Feishu contracts in each phase.
 Document simulator-specific controls under `/_sandbox/`.
-
-#### Milestone 5 — Black-box test controls
-
-Expose retry delays, attempt counts, and timeouts for Webhook delivery, URL
-verification, and WebSocket acknowledgements in startup configuration. Add time
-advancement for token expiry, CardKit stream and entity expiry, and pending
-retries. Provide a late-callback scenario where the receiver gets the request
-before the deadline and responds after it.
-
-Publish a machine-readable contract at `/_sandbox/openapi.json`, add
-`larkbox sandbox` commands for common control operations, and write the bound
-address to a ready file for `--addr :0` runs. Ship a runnable recipe that starts
-the binary, seeds a scenario, injects a message, and uses traces to assert that
-a failed delivery retries successfully with the same event ID. Use the recipe
-to verify parallel startup, time advancement, and late-response behavior.
 
 #### Milestone 6 — Bot and conversation lifecycle
 

@@ -19,6 +19,7 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 	"github.com/littlecrabzzz-alt/larkbox/internal/webui"
 )
@@ -101,14 +102,21 @@ func (e eventEmitter) Emit(ctx context.Context, notification im.Event) {
 
 // New creates and seeds a server and registers the configured routes.
 func New(cfg config.Config, opts ...Option) *Server {
-	settings := options{}
+	settings := options{eventOptions: configuredDelivery(cfg.EventDelivery)}
 	for _, opt := range opts {
 		opt(&settings)
 	}
-	state := store.New(nil, 0)
+	var clock *simclock.Manual
+	var now func() time.Time
+	if cfg.ClockStart != nil {
+		clock = simclock.New(*cfg.ClockStart)
+		now = clock.Now
+	}
+	state := store.New(now, 0)
 	state.Seed(cfg)
 	faults := fault.New(nil)
 	settings.eventOptions.Faults = faults
+	settings.eventOptions.ManualClock = clock
 	events := event.New(state, settings.eventOptions)
 
 	feishu := http.NewServeMux()
@@ -134,7 +142,7 @@ func New(cfg config.Config, opts ...Option) *Server {
 		}{Status: "ok", Version: Version, StrictMode: cfg.StrictMode})
 	})
 	mux.Handle("/open-apis/", middleware.Audit(state, middleware.Fault(settings.fault, middleware.SandboxFaults(faults, state, feishu, openAPIHandler(feishu)))))
-	control := sandbox.New(cfg, Version, state, events, faults)
+	control := sandbox.New(cfg, Version, state, events, faults, clock)
 	mux.Handle("/_sandbox/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pattern := extensions.Handler(r); pattern != "" {
 			extensions.ServeHTTP(w, r)
@@ -150,6 +158,23 @@ func New(cfg config.Config, opts ...Option) *Server {
 		},
 		store: state, events: events, faults: faults,
 	}
+}
+
+func configuredDelivery(settings config.EventDelivery) event.Options {
+	opts := event.Options{
+		WebhookTimeout:       time.Duration(settings.WebhookTimeoutMS) * time.Millisecond,
+		VerificationTimeout:  time.Duration(settings.VerificationTimeoutMS) * time.Millisecond,
+		AckTimeout:           time.Duration(settings.AckTimeoutMS) * time.Millisecond,
+		WebhookMaxAttempts:   settings.WebhookMaxAttempts,
+		WebSocketMaxAttempts: settings.WebSocketMaxAttempts,
+	}
+	if len(settings.RetryBackoffMS) > 0 {
+		backoff := append([]int64(nil), settings.RetryBackoffMS...)
+		opts.RetryBackoff = func(attempt int) time.Duration {
+			return time.Duration(backoff[min(attempt, len(backoff))-1]) * time.Millisecond
+		}
+	}
+	return opts
 }
 
 func withWebUI(routes http.Handler, disabled bool) http.Handler {
