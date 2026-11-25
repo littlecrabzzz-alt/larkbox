@@ -111,6 +111,11 @@ func appSelector(method, path string) string {
 // Credential endpoints name their app in the request instead of using Bearer
 // auth. Peek only when an app-scoped rule could match, preserving the reader.
 func declaredApp(r *http.Request, field string) string {
+	if r.URL.Path == "/oauth/v3/token" {
+		if id, _, basic := r.BasicAuth(); basic {
+			return id
+		}
+	}
 	if field == "query" {
 		query := r.URL.Query()
 		appID := query.Get("app_id")

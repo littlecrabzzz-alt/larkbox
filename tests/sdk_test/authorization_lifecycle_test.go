@@ -239,6 +239,11 @@ func TestDeviceRegistrationAndConsent(t *testing.T) {
 		advance("5m")
 		pollError(expired, client, "expired_token")
 		decide(expired, "approve", http.StatusNotFound)
+		begin(client)
+		pollError(expired, client, "expired_token")
+		advance("1m")
+		begin(client)
+		pollError(expired, client, "invalid_grant")
 	}
 	trace := string(sandboxRequest(t, web, http.MethodGet, "traces", nil, http.StatusOK))
 	for _, secret := range []string{appFlow.UserCode, appFlow.DeviceCode, app.AppSecret, login.DeviceCode, login.UserCode, value(tokens.AccessToken), value(tokens.RefreshToken)} {

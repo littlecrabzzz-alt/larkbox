@@ -18,7 +18,10 @@ const (
 	DeviceAuthorization
 )
 
-const deviceInterval = time.Second
+const (
+	deviceInterval    = time.Second
+	deviceExpiryGrace = time.Minute
+)
 
 // Device flow errors map to independent OAuth wire outcomes.
 var (
@@ -55,9 +58,11 @@ func (s *Store) BeginDeviceFlow(kind DeviceKind, appID, scope string, ttl time.D
 	}
 	now := s.Now()
 	for key, flow := range s.deviceFlows {
-		if !now.Before(flow.ExpiresAt) {
-			delete(s.deviceFlows, key)
+		if !now.Before(flow.ExpiresAt) && s.deviceUserCodes[flow.UserCode] == key {
 			delete(s.deviceUserCodes, flow.UserCode)
+		}
+		if !now.Before(flow.ExpiresAt.Add(deviceExpiryGrace)) {
+			delete(s.deviceFlows, key)
 		}
 	}
 	var deviceCode, userCode string

@@ -274,6 +274,7 @@ Status Legend:
 | `GET /open-apis/authen/v1/user_info` | Authenticated user profile (`u-...`) | `SDK-Tested` |
 | `POST /oauth/v1/app/registration` | Separate app registration flow for `config init --new` | `CLI-Tested` |
 | `POST /oauth/v1/device_authorization`, `POST /oauth/v3/token` | Device user consent and token exchange, including pending, backoff, denial and expiry | `CLI-Tested` |
+| `POST /oauth/v3/token` (`client_credentials`) | Tenant Bearer token through form credentials or HTTP Basic | `Live-Verified` |
 | `POST /oauth/v1/revoke` | User and refresh token revocation. Live coverage uses unknown tokens | `CLI-Tested`, `Live-Verified` for unknown tokens |
 | `GET /_sandbox/apps/{app_id}/grants` | Sandbox consent list per app | `Implemented` |
 

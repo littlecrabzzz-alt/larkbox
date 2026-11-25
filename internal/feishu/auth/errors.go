@@ -29,6 +29,7 @@ const (
 	oauthUsedCode         oauthCode = 20065
 	oauthDuplicateScope   oauthCode = 20067
 	oauthInvalidScope     oauthCode = 20068
+	oauthMultipleAuth     oauthCode = 20070
 	oauthRedirectMismatch oauthCode = 20071
 	oauthUsedRefresh      oauthCode = 20073
 )
@@ -58,6 +59,7 @@ var oauthErrors = map[oauthCode]errorInfo{
 	oauthUsedCode:                        {"invalid_grant", "The authorization code has already been used."},
 	oauthDuplicateScope:                  {"invalid_scope", "The requested scopes contain duplicates."},
 	oauthInvalidScope:                    {"invalid_scope", "The requested scopes exceed the authorized scopes."},
+	oauthMultipleAuth:                    {"invalid_request", "Provide one client authentication method."},
 	oauthRedirectMismatch:                {"invalid_grant", "The redirect URI differs from the authorization request."},
 	oauthUsedRefresh:                     {"invalid_grant", "The refresh token has already been used."},
 }

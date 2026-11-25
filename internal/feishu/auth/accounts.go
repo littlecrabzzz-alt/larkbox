@@ -165,22 +165,56 @@ func (h handler) accountsToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) tenantCredentialGrant(w http.ResponseWriter, r *http.Request, fields map[string]string) {
-	app, ok := h.checkAccountsClient(w, r, fields["client_id"], fields["client_secret"])
+	id, secret := fields["client_id"], fields["client_secret"]
+	if basicID, basicSecret, basic := r.BasicAuth(); basic {
+		if secret != "" {
+			writeOAuthError(w, oauthMultipleAuth)
+			return
+		}
+		id, secret = basicID, basicSecret
+	}
+	if id == "" {
+		writeMissingOAuthField(w, "client_id")
+		return
+	}
+	if secret == "" {
+		writeMissingOAuthField(w, "client_secret")
+		return
+	}
+	middleware.SetTraceApp(r, id)
+	app, ok := h.state.Apps().Get(id)
 	if !ok {
+		writeOAuthError(w, oauthAppNotFound)
+		return
+	}
+	if !matchesSecret(app, secret) {
+		writeOAuthError(w, oauthInvalidClient)
+		return
+	}
+	scope, err := tokenScope(fields["scope"], fields["scope"])
+	if err != nil {
+		writeOAuthError(w, oauthDuplicateScope)
 		return
 	}
 	credential := store.Token{
 		Value: protocol.NewID(protocol.TenantToken), Kind: store.TenantToken, AppID: app.AppID,
-		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Tenant)), Scope: fields["scope"],
+		ExpiresAt: h.state.Now().Add(seconds(h.ttls.Tenant)), Scope: scope,
 	}
 	if err := h.state.Mutate(r.Context(), func() error { return h.state.PutToken(credential) }); err != nil {
 		if !middleware.WriteResetConflict(w, err) {
-			writeAccountsError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials.")
+			writeOAuthError(w, oauthAppNotFound)
 		}
 		return
 	}
-	_ = protocol.WriteJSON(w, http.StatusOK, tokenResponse{
-		AccessToken: credential.Value, ExpiresIn: h.ttls.Tenant, TokenType: "Bearer", Scope: credential.Scope,
+	_ = protocol.WriteResult(w, http.StatusOK, protocol.Success, struct {
+		Code        protocol.Code `json:"code"`
+		AccessToken string        `json:"access_token"`
+		ExpiresIn   int64         `json:"expires_in"`
+		TokenType   string        `json:"token_type"`
+		Scope       string        `json:"scope,omitempty"`
+	}{
+		Code: protocol.Success, AccessToken: credential.Value, ExpiresIn: h.ttls.Tenant,
+		TokenType: "Bearer", Scope: credential.Scope,
 	})
 }
 
