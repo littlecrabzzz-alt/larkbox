@@ -42,9 +42,13 @@ func TestPreviewRequiresTablesAndFormsAtCardRoot(t *testing.T) {
 		t.Run(tag, func(t *testing.T) {
 			call(t, srv, http.MethodPost, path, fmt.Sprintf(card, component), http.StatusOK)
 			body := call(t, srv, http.MethodPost, path, fmt.Sprintf(card, fmt.Sprintf(panel, component)), http.StatusBadRequest)
-			assertContains(t, body, tag+" must be a top-level card component")
+			assertContains(t, body, "check the component at body.elements[0] and its nested fields")
 		})
 	}
+	call(t, srv, http.MethodPost, path, `{"card":{"elements":[
+		{"tag":"markdown","content":"Review","elements":[{"tag":"form"}]},
+		{"tag":"select_static","options":[{"value":"ready","tag":"table"}]}
+	]}}`, http.StatusOK)
 }
 
 func TestCardImagePreviewSniffsUploadedBytes(t *testing.T) {

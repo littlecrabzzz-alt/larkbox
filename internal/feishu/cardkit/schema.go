@@ -15,7 +15,7 @@ import (
 
 // ValidMessageCard validates inline cards and template references in IM messages.
 func ValidMessageCard(card map[string]any) bool {
-	if field, _ := componentIssue(card); field != "" {
+	if field, _ := imagePickerIssue(card); field != "" {
 		return false
 	}
 	return validMessageCardShape(card)
@@ -76,7 +76,7 @@ func ValidatePreviewJSON(encoded string) error {
 	if !validCardSettings(doc) {
 		return errors.New("correct the card config or card_link fields")
 	}
-	if field, issue := componentIssue(doc); field != "" {
+	if field, issue := imagePickerIssue(doc); field != "" {
 		return fmt.Errorf("%s — %s", field, issue)
 	}
 	if doc["schema"] == "2.0" {
@@ -105,19 +105,15 @@ func ValidatePreviewJSON(encoded string) error {
 	return nil
 }
 
-func componentIssue(card map[string]any) (field, issue string) {
+func imagePickerIssue(card map[string]any) (field, issue string) {
 	walk(card, func(slot elementSlot, node map[string]any) bool {
-		switch tag := node["tag"]; tag {
-		case "form", "table":
-			if slot.parent["tag"] != nil {
-				field, issue = "tag", fmt.Sprintf("A %s must be a top-level card component.", tag)
-			}
-		case "select_img":
-			if node["multi_select"] == true && !slot.inForm {
-				field, issue = "multi_select", "Multiple image selection requires a form."
-			} else if slot.inForm && !nonemptyString(node, "name") {
-				field, issue = "name", "An image picker inside a form requires a name."
-			}
+		if node["tag"] != "select_img" {
+			return false
+		}
+		if node["multi_select"] == true && !slot.inForm {
+			field, issue = "multi_select", "Multiple image selection requires a form."
+		} else if slot.inForm && !nonemptyString(node, "name") {
+			field, issue = "name", "An image picker inside a form requires a name."
 		}
 		return field != ""
 	})
@@ -234,6 +230,14 @@ func validCardElements(value any) bool {
 	return cardObjects(value, false, validCardComponent)
 }
 
+func validNestedCardElements(value any) bool {
+	return cardObjects(value, false, validNestedCardComponent)
+}
+
+func validNestedCardComponent(node map[string]any) bool {
+	return node["tag"] != "form" && node["tag"] != "table" && validCardComponent(node)
+}
+
 func cardString(value any) bool {
 	_, ok := value.(string)
 	return ok
@@ -347,7 +351,7 @@ func validCardComponent(node map[string]any) bool {
 				})
 			}) && optionalCardCheck(node, "extra", func(value any) bool {
 			extra, ok := value.(map[string]any)
-			return ok && validCardComponent(extra)
+			return ok && validNestedCardComponent(extra)
 		})
 	case "img":
 		return nonemptyString(node, "img_key") && validCardText(node["alt"]) &&
@@ -372,16 +376,16 @@ func validCardComponent(node map[string]any) bool {
 	case "column":
 		return optionalCardType[json.Number](node, "weight") &&
 			optionalCardType[string](node, "width", "vertical_align") &&
-			optionalCardCheck(node, "elements", validCardElements)
+			optionalCardCheck(node, "elements", validNestedCardElements)
 	case "action":
-		return cardObjects(node["actions"], true, validCardComponent)
+		return cardObjects(node["actions"], true, validNestedCardComponent)
 	case "form":
-		return nonemptyString(node, "name") && validCardElements(node["elements"]) && hasCardSubmit(node["elements"])
+		return nonemptyString(node, "name") && validNestedCardElements(node["elements"]) && hasCardSubmit(node["elements"])
 	case "interactive_container":
-		return cardObjects(node["behaviors"], true, validCardBehavior) && validCardElements(node["elements"])
+		return cardObjects(node["behaviors"], true, validCardBehavior) && validNestedCardElements(node["elements"])
 	case "collapsible_panel":
 		return validCardHeader(node["header"]) && optionalCardType[bool](node, "expanded") &&
-			optionalCardCheck(node, "elements", validCardElements)
+			optionalCardCheck(node, "elements", validNestedCardElements)
 	case "button":
 		return (node["text"] != nil || node["icon"] != nil) && optionalCardCheck(node, "text", validCardText) &&
 			optionalCardType[string](node, "type", "url", "name", "form_action_type", "action_type", "size", "width", "margin") &&
