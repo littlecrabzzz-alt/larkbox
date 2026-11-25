@@ -6,7 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/littlecrabzzz-alt/larkbox/internal/config"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -41,11 +40,6 @@ func ValidatePending(retries []PendingRetry) error {
 			retry.Copy < 0 || retry.AttemptsUsed < 1 || retry.Attempt <= retry.AttemptsUsed ||
 			len(retry.Body) > maxFrame || !json.Valid(retry.Body) || seen[key] {
 			return errors.New("invalid pending event retry")
-		}
-		if retry.Channel == "webhook" {
-			if _, err := config.ParseRedirectURI(retry.Receiver.WebhookURL); err != nil {
-				return errors.New("invalid webhook retry destination")
-			}
 		}
 		seen[key] = true
 	}

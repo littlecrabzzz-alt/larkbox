@@ -184,16 +184,6 @@ func DecodeSnapshot(raw json.RawMessage) (*Snapshot, error) {
 		!validKeys(image.Tokens, func(token Token) string { return token.Value }) {
 		return nil, errors.New("invalid snapshot store image")
 	}
-	for _, app := range image.Apps {
-		if app.AppSecret == "" || app.BotOpenID == "" {
-			return nil, errors.New("invalid app in snapshot")
-		}
-		if app.WebhookURL != "" {
-			if _, err := config.ParseRedirectURI(app.WebhookURL); err != nil {
-				return nil, errors.New("invalid webhook in snapshot")
-			}
-		}
-	}
 	return &Snapshot{image}, nil
 }
 

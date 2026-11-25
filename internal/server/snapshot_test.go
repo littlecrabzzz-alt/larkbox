@@ -87,7 +87,7 @@ func TestSnapshotRoundTripAndRetryRecovery(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer peer.Close()
-	cfg.Apps[0].WebhookURL = peer.URL
+	cfg.Apps[0].WebhookURL = peer.URL + "/events?tag=a;b"
 	app, alice := cfg.Apps[0], cfg.Users[0]
 	const bearer = "t-snapshot-fixture" // #nosec G101 -- Synthetic in-process credential.
 	const artifact = "persistent test attachment"
