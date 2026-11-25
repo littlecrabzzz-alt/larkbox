@@ -13,6 +13,7 @@ import (
 	"github.com/littlecrabzzz-alt/larkbox/internal/event"
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 )
 
@@ -24,16 +25,20 @@ type control struct {
 	state   *store.Store
 	events  *event.Dispatcher
 	faults  *fault.Engine
+	clock   *simclock.Manual
 	mu      sync.RWMutex // Serialize control-plane state preparation with reset.
 }
 
 type data = map[string]any
 
 // New creates the unauthenticated local control plane.
-func New(cfg config.Config, version string, state *store.Store, events *event.Dispatcher, faults *fault.Engine) http.Handler {
-	c := &control{cfg: cfg, version: version, state: state, events: events, faults: faults}
+func New(cfg config.Config, version string, state *store.Store, events *event.Dispatcher, faults *fault.Engine, clock *simclock.Manual) http.Handler {
+	c := &control{cfg: cfg, version: version, state: state, events: events, faults: faults, clock: clock}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_sandbox/state", c.snapshot)
+	mux.HandleFunc("GET /_sandbox/openapi.json", describeOpenAPI)
+	mux.HandleFunc("GET /_sandbox/clock", c.clockStatus)
+	mux.HandleFunc("POST /_sandbox/clock/advance", c.advanceClock)
 	mux.HandleFunc("POST /_sandbox/reset", c.reset)
 	mux.HandleFunc("POST /_sandbox/seed", c.seed)
 	mux.HandleFunc("GET /_sandbox/chats", c.chats)

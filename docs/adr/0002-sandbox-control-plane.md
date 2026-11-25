@@ -22,6 +22,9 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 
 | Method and path (relative to `/_sandbox`) | Contract |
 |---|---|
+| `GET /openapi.json` | Returns the machine-readable contract for built-in controls. |
+| `GET /clock` | Returns the current UTC `now` and whether manual time is configured. |
+| `POST /clock/advance` | Requires `{"by":"15s"}` or another positive Go duration. Returns the clock state and wakes due retries. Returns 409 in wall-clock mode. |
 | `GET /state` | Returns strict mode, build version, sanitized apps, users, chats, card summaries, active faults, and WebSocket sessions. |
 | `POST /seed` | Accepts any of `apps`, `users`, `chats`, and `card_templates` in their configuration shape. Upserts whole entries by primary key and templates by ID and version. Returns counts. Validates duplicate IDs, URLs, member and owner references, and card templates before committing. |
 | `POST /reset` | Empty body or `{}` restores the configured startup seed. An optional `{"seed":{...}}` replaces the state for this reset, with omitted lists treated as empty. Both forms clear runtime entities, credentials, traces, faults, and WebSocket tickets and disconnect existing sessions. |
@@ -31,7 +34,7 @@ bypass Open API Bearer authentication, auditing, and fault evaluation.
 | `GET /ws/sessions` | Returns `{"ws_sessions":[...]}` with session, app, device and service IDs, and connection time. |
 | `POST /messages/send` | Persists a virtual user's message and returns HTTP 201 with `{message, deliveries}`. Each member bot has a delivery result containing its app ID, event ID, and per-channel status. |
 | `POST /cards/action` | Requires `message_id`, `operator_open_id`, and `action.tag`. Accepts SDK action fields `value`, `name`, `option`, `options`, `input_value`, `form_value`, `checked`, and `timezone`, plus optional top-level `host` and `delivery_type`. Returns `{toast, card_applied, card_error, message, delivery}` after callback processing. |
-| `POST /events/webhook/verify` | Requires `app_id`. Uses the registered URL or a one-call HTTP(S) `webhook_url` override. Caps the handshake at one second, including on embedded servers with a longer timeout. Returns `{verified, status_code, error, latency_ms}`. A transport failure has status code 0 inside the result. |
+| `POST /events/webhook/verify` | Requires `app_id`. Uses the registered URL or a one-call HTTP(S) `webhook_url` override. Uses a one-second control-plane deadline by default. An explicit file or environment verification timeout changes that deadline. Returns `{verified, status_code, error, latency_ms}`. A transport failure has status code 0 inside the result. |
 | `POST /tokens/expire` | Requires `app_id`. Accepts `token` or a nonempty `tokens` list to expire individual credentials, or expires all credentials for that app when both fields are omitted. Explicit `null` selectors return 400. Returns `{"expired":n}` without echoing credentials. |
 
 A user message requires one sender selector (`sender_open_id` or
@@ -49,6 +52,16 @@ Card actions use the dispatcher’s synchronous callback deadline and channel
 selection. A failed delivery is represented in the result for the saved
 message, callback, or verification. Request validation uses HTTP 400,
 missing entities use 404, and conflicts use 409.
+
+### Timing
+
+Startup settings can replace the default retry intervals, per-transport attempt
+counts, and webhook, verification, and acknowledgement deadlines. An optional
+RFC3339 start time freezes the sandbox state clock. Advance changes that clock
+and signals retries whose delay has elapsed since the failed attempt was
+recorded. Advance returns before network delivery finishes. The runtime uses
+wall time for network deadlines, fault delays, and measured trace latency.
+Reset cancels retry waits and restores the configured start time.
 
 ### Audit and fault rules
 

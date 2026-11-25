@@ -93,7 +93,7 @@ func (d *Dispatcher) webhookDelivery(ctx context.Context, job deliveryJob) Deliv
 			break
 		}
 		result = d.webhookAttempt(ctx, job, i, d.opts.WebhookTimeout, nil)
-		if result.Err == nil || i == d.opts.WebhookMaxAttempts || !d.waitRetry(ctx, i, nil) {
+		if result.Err == nil || i == d.opts.WebhookMaxAttempts || !d.waitRetry(ctx, i, result.completedAt, nil) {
 			break
 		}
 	}
@@ -115,8 +115,9 @@ func (d *Dispatcher) webhookAttempt(ctx context.Context, job deliveryJob, attemp
 			err = verify(ctx, trace.ResponseBody)
 		}
 	}
+	completedAt := d.state.Now()
 	d.record(job, trace, err)
-	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: trace.ResponseHeaders, Data: trace.ResponseBody, Err: err}
+	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: trace.ResponseHeaders, Data: trace.ResponseBody, Err: err, completedAt: completedAt}
 }
 
 func (d *Dispatcher) postWebhook(ctx context.Context, app store.App, body []byte, trace *store.Trace) error {

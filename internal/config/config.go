@@ -115,6 +115,8 @@ type CardTemplate struct {
 type Config struct {
 	Addr          string         `json:"addr" yaml:"addr"`
 	StrictMode    bool           `json:"strict_mode" yaml:"strict_mode"`
+	EventDelivery EventDelivery  `json:"event_delivery,omitempty" yaml:"event_delivery,omitempty"`
+	ClockStart    *time.Time     `json:"clock_start,omitempty" yaml:"clock_start,omitempty"`
 	TokenTTLs     TokenTTLs      `json:"token_ttls" yaml:"token_ttls"`
 	Apps          []App          `json:"apps" yaml:"apps"`
 	Users         []User         `json:"users" yaml:"users"`
@@ -256,7 +258,10 @@ func applyEnv(cfg *Config) error {
 	if err := applySeedEnv("LARKBOX_CHATS", &cfg.Chats); err != nil {
 		return err
 	}
-	return applySeedEnv("LARKBOX_CARD_TEMPLATES", &cfg.CardTemplates)
+	if err := applySeedEnv("LARKBOX_CARD_TEMPLATES", &cfg.CardTemplates); err != nil {
+		return err
+	}
+	return cfg.applyEventEnv()
 }
 
 func applySeedEnv[T any](name string, dest *[]T) error {
@@ -304,6 +309,12 @@ func (cfg Config) Validate() error {
 		if *item.seconds <= 0 || *item.seconds > maxSeconds {
 			return fmt.Errorf("%s / token_ttls must be a positive duration in seconds", item.env)
 		}
+	}
+	if err := cfg.EventDelivery.validate(); err != nil {
+		return err
+	}
+	if cfg.ClockStart != nil && (cfg.ClockStart.UTC().Year() < 1 || cfg.ClockStart.UTC().Year() > 9999) {
+		return errors.New("clock_start must be in the RFC3339 range")
 	}
 	return cfg.ValidateSeeds()
 }

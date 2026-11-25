@@ -15,6 +15,7 @@ import (
 
 	"github.com/littlecrabzzz-alt/larkbox/internal/protocol"
 	"github.com/littlecrabzzz-alt/larkbox/internal/sandbox/fault"
+	"github.com/littlecrabzzz-alt/larkbox/internal/simclock"
 	"github.com/littlecrabzzz-alt/larkbox/internal/store"
 	"github.com/littlecrabzzz-alt/larkbox/internal/wsproto"
 )
@@ -36,16 +37,18 @@ type Options struct {
 	AckTimeout   time.Duration
 	TicketTTL    time.Duration
 	Faults       *fault.Engine
+	ManualClock  *simclock.Manual
 }
 
 // Delivery contains the outcome for one receiver. Data is the HTTP response
 // body or the decoded WebSocket response data.
 type Delivery struct {
-	Channel string
-	Status  int
-	Headers http.Header
-	Data    []byte
-	Err     error
+	Channel     string
+	Status      int
+	Headers     http.Header
+	Data        []byte
+	Err         error
+	completedAt time.Time
 }
 
 // Result identifies an event and contains the final outcome for each receiver.
@@ -412,13 +415,16 @@ func (d *Dispatcher) socketDelivery(ctx context.Context, s *session, job deliver
 		}
 		attempts++
 		// Once a write may have reached a peer, keep retries on that replica.
-		if result.Err == nil || attempts == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, attempts, s.done) {
+		if result.Err == nil || attempts == d.opts.WebSocketMaxAttempts || !d.waitRetry(ctx, attempts, result.completedAt, s.done) {
 			return result
 		}
 	}
 }
 
 func (d *Dispatcher) canRetry(ctx context.Context) bool {
+	if scope, ok := ctx.Value(admissionKey{}).(admission); ok && scope.reset.Err() != nil {
+		return false
+	}
 	select {
 	case <-d.retriesStopped:
 		return false
@@ -427,11 +433,30 @@ func (d *Dispatcher) canRetry(ctx context.Context) bool {
 	}
 }
 
-func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, peerDone <-chan struct{}) bool {
+func (d *Dispatcher) waitRetry(ctx context.Context, attempt int, completedAt time.Time, peerDone <-chan struct{}) bool {
 	if !d.canRetry(ctx) {
 		return false
 	}
-	timer := time.NewTimer(d.opts.RetryBackoff(attempt))
+	delay := d.opts.RetryBackoff(attempt)
+	if clock := d.opts.ManualClock; clock != nil {
+		due := completedAt.Add(delay)
+		for {
+			now, changed := clock.Snapshot()
+			if !now.Before(due) {
+				return d.canRetry(ctx)
+			}
+			select {
+			case <-changed:
+			case <-ctx.Done():
+				return false
+			case <-d.retriesStopped:
+				return false
+			case <-peerDone:
+				return false
+			}
+		}
+	}
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -479,8 +504,9 @@ func (d *Dispatcher) socketAttempt(ctx context.Context, s *session, job delivery
 			result.err = verify(ctx, result.response.Data)
 		}
 	}
+	completedAt := d.state.Now()
 	d.record(job, trace, result.err)
-	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: headers, Data: result.response.Data, Err: result.err}
+	return Delivery{Channel: trace.Channel, Status: trace.Status, Headers: headers, Data: result.response.Data, Err: result.err, completedAt: completedAt}
 }
 
 func (job deliveryJob) trace(channel string, attempt int) store.Trace {
